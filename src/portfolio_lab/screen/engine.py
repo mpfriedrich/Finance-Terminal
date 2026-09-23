@@ -1,0 +1,318 @@
+"""Apply a PortfolioSpec to data. Deterministic, no model involved.
+
+The design rule throughout: nothing disappears quietly. Every name that drops out is
+counted and attributed to the reason that removed it. A screen that returns 3 names when
+you asked for 10 must say why, or the user will read "these are the 3 best" when the truth
+is "your data is missing".
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import numpy as np
+import pandas as pd
+
+from .spec import FILTERABLE, Filter, PortfolioSpec
+from .valuation import Assumptions, add_valuation
+
+
+@dataclass(slots=True)
+class ScreenResult:
+    """Result of applying a spec. `unknown_tickers` is only used by hand-picked lists.
+
+    Two frames, and the difference matters:
+
+      * `ranked` — every name that passed every filter, best first. Nothing is cut. This
+        is the evidence: what the screen actually found.
+      * `picks`  — the ones chosen to be held, and therefore weighted.
+
+    Separating them is what makes the ranking a proposal rather than a verdict. The screen
+    orders the candidates; a person decides which of them become a portfolio.
+    """
+
+    picks: pd.DataFrame
+    n_universe: int
+    n_eligible: int
+    n_passing: int
+    exclusions: dict[str, int] = field(default_factory=dict)
+    per_filter_survivors: dict[str, int] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
+    unknown_tickers: list[str] = field(default_factory=list)
+    hand_picked: bool = False
+    ranked: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+    @property
+    def found_nothing(self) -> bool:
+        return self.n_passing == 0
+
+    def select(self, tickers, weighting: str = "equal") -> pd.DataFrame:
+        """The chosen subset of `ranked`, reweighted, still in ranking order.
+
+        Used by the UI on every interaction, so the weights a person sees always belong
+        to the names actually ticked — never to a set the screener chose earlier.
+        """
+        if self.ranked.empty:
+            return self.ranked.copy()
+        subset = self.ranked[
+            self.ranked.ticker.astype(str).str.upper().isin(_keys(tickers))
+        ].copy()
+        return weighted(subset, weighting)
+
+
+def _keys(tickers) -> set[str]:
+    """Tickers as comparison keys: upper case, trimmed, empties gone.
+
+    One function so the selection, the "no longer passing" check and `select()` can never
+    disagree about whether " aapl " is AAPL. They did disagree once, and the symptom was a
+    silently empty portfolio."""
+    return {str(t).strip().upper() for t in tickers if str(t).strip()}
+
+
+def weighted(frame: pd.DataFrame, weighting: str) -> pd.DataFrame:
+    """Attach portfolio weights. Equal weighting is the honest default: market-cap
+    weighting inside a small-cap value screen quietly turns it into a bet on the two
+    largest survivors."""
+    out = frame.copy()
+    total = out["market_cap"].sum() if "market_cap" in out else 0
+    if weighting == "market_cap" and total and total > 0:
+        out["weight"] = out["market_cap"] / total
+    else:
+        out["weight"] = 1.0 / max(len(out), 1)
+    return out
+
+
+def derive_metrics(frame: pd.DataFrame) -> pd.DataFrame:
+    """Build valuation ratios from raw inputs.
+
+    Market cap uses the UNADJUSTED price: an adjusted price times a historical share count
+    is a number that never existed. Ratios on a negative denominator are undefined, not
+    negative — a company with negative equity is not 'cheap', and letting a negative
+    price-to-book through would rank the worst names first.
+    """
+    out = frame.copy()
+
+    def col(name: str) -> pd.Series:
+        """A numeric column, or an all-NaN column of the right length if it is absent.
+
+        Without this, a missing column collapses to a scalar NaN and every later
+        Series operation on it fails — which is how an absent metric would turn into a
+        crash instead of an honest gap.
+        """
+        if name not in out:
+            return pd.Series(np.nan, index=out.index, dtype="float64")
+        return pd.to_numeric(out[name], errors="coerce")
+
+    out["market_cap"] = out["price"] * out.get("shares_outstanding")
+
+    def ratio(numer: pd.Series, denom_col: str) -> pd.Series:
+        denom = col(denom_col)
+        return pd.Series(
+            np.where(denom > 0, numer / denom, np.nan), index=out.index, dtype="float64"
+        )
+
+    out["price_to_book"] = ratio(out["market_cap"], "book_value")
+    out["price_to_earnings"] = ratio(out["market_cap"], "net_income_ttm")
+    out["price_to_sales"] = ratio(out["market_cap"], "revenue_ttm")
+    out["price_to_cash_flow"] = ratio(out["market_cap"], "operating_cash_flow_ttm")
+    out["price_to_cash"] = ratio(out["market_cap"], "cash")
+    # price_to_free_cash_flow lives in add_valuation: free cash flow does not exist
+    # until capex has been subtracted there, and a ratio against a column that is
+    # not there yet would silently be NaN for every company.
+
+    # Leverage. Two measures on purpose, because "debt" means different things:
+    #   debt_to_equity       interest-bearing borrowings only — the conventional one
+    #   liabilities_to_equity everything owed, including payables and leases
+    # A filer that tags neither debt side gets NaN, not a flattering zero.
+    lt = col("long_term_debt")
+    st_ = col("current_debt")
+    total_debt = lt.fillna(0) + st_.fillna(0)
+    total_debt = total_debt.where(lt.notna() | st_.notna())
+    out["total_debt"] = total_debt
+    equity = col("book_value")
+    out["debt_to_equity"] = np.where(equity > 0, total_debt / equity, np.nan)
+    out["liabilities_to_equity"] = ratio(col("total_liabilities"), "book_value")
+    out["current_ratio"] = ratio(col("current_assets"), "current_liabilities")
+
+    # Profitability. Margins are signed: a loss-making company has a negative margin,
+    # which is a real and useful fact, unlike a negative price-to-earnings.
+    revenue = col("revenue_ttm")
+    net_income = col("net_income_ttm")
+    ocf = col("operating_cash_flow_ttm")
+    out["net_margin"] = np.where(revenue > 0, net_income / revenue, np.nan)
+    out["operating_margin_proxy"] = np.where(revenue > 0, ocf / revenue, np.nan)
+    out["return_on_equity"] = np.where(equity > 0, net_income / equity, np.nan)
+    return out
+
+
+def _apply_filter(frame: pd.DataFrame, f: Filter) -> pd.Series:
+    col = frame[f.metric]
+    # Substring matching for text fields. Industry names come from the SEC as phrases
+    # like "Biological Products, (No Diagnostic Substances)" — nobody types that, and
+    # exact matching would make sector filtering useless in practice.
+    if f.op in ("contains", "not_contains"):
+        hit = col.astype(str).str.contains(str(f.value), case=False, na=False)
+        return ~hit if f.op == "not_contains" else hit
+    if f.op == "in":
+        values = f.value if isinstance(f.value, list) else [f.value]
+        return col.isin(values)
+    if f.op == "==":
+        return col == f.value
+    if f.op == "!=":
+        return col != f.value
+    value = float(f.value)  # type: ignore[arg-type]
+    return {"<=": col <= value, "<": col < value,
+            ">=": col >= value, ">": col > value}[f.op]
+
+
+def run_screen(
+    frame: pd.DataFrame,
+    spec: PortfolioSpec,
+    assumptions: "Assumptions | None" = None,
+) -> ScreenResult:
+    """frame: one row per security with raw inputs already joined.
+
+    Required columns: ticker, cik, name, price, shares_outstanding, data_age_days,
+    median_dollar_volume_60d. Optional: book_value, net_income_ttm, revenue_ttm,
+    operating_cash_flow_ttm, sector, exchange.
+    """
+    n_universe = len(frame)
+    data = add_valuation(derive_metrics(frame), assumptions or Assumptions())
+
+    # A hand-picked list is the portfolio. Filters and eligibility floors do not apply:
+    # they exist to stop a screen wandering into untradeable names, and someone naming a
+    # company on purpose has already made that judgement. The metrics are still shown so
+    # the holding can be examined, and anything not found is named rather than dropped.
+    if spec.tickers:
+        wanted = [t.strip().upper() for t in spec.tickers if t.strip()]
+        found = data[data.ticker.astype(str).str.upper().isin(wanted)].copy()
+        present = set(found.ticker.astype(str).str.upper())
+        unknown = [t for t in wanted if t not in present]
+        order = {t: i for i, t in enumerate(wanted)}
+        found = found.sort_values(
+            by="ticker", key=lambda col: col.astype(str).str.upper().map(order)
+        )
+        found = weighted(found, spec.weighting)
+        notes = []
+        if unknown:
+            notes.append(
+                f"not found in the universe: {', '.join(unknown)}. They may be delisted, "
+                "a fund, a second share class, or simply mistyped."
+            )
+        return ScreenResult(
+            picks=found, ranked=found, n_universe=n_universe, n_eligible=len(found),
+            n_passing=len(found), notes=notes, unknown_tickers=unknown,
+            hand_picked=True,
+        )
+
+    exclusions: dict[str, int] = {}
+
+    def drop(mask: pd.Series, label: str) -> pd.DataFrame:
+        nonlocal data
+        removed = int((~mask).sum())
+        if removed:
+            exclusions[label] = removed
+        data = data[mask]
+        return data
+
+    max_age = spec.max_filing_age_months * 31
+    drop(data["price"].notna(), "no current price")
+    drop(data["shares_outstanding"].notna(), "no share count")
+    drop(data["data_age_days"].fillna(10**6) <= max_age,
+         f"filing older than {spec.max_filing_age_months} months")
+    drop(~share_count_is_implausible(data), "share count fails the volume sanity check")
+    drop(data["price"] >= spec.min_price, f"price below {spec.min_price:g}")
+    drop(data["median_dollar_volume_60d"].fillna(0) >= spec.min_dollar_volume,
+         "below minimum turnover")
+
+    n_eligible = len(data)
+
+    # Per-filter survivor counts computed on the eligible set INDEPENDENTLY, so a zero-hit
+    # screen can tell the user which single rule is the binding one (PLAN.md edge cases).
+    eligible = data.copy()
+    per_filter: dict[str, int] = {}
+    passing = eligible
+    notes: list[str] = []
+    for f in spec.filters:
+        if f.metric not in FILTERABLE or f.metric not in eligible.columns:
+            notes.append(f"filter on '{f.metric}' ignored — not available in the data")
+            continue
+        # A text fragment that matches no value in the data is an invention, and the
+        # dangerous case is `not_contains`: it quietly keeps everything, so the person
+        # believes they excluded something they did not. Refuse it out loud.
+        if f.op in ("contains", "not_contains"):
+            present = eligible[f.metric].dropna().astype(str)
+            if not present.str.contains(str(f.value), case=False, na=False).any():
+                sample = sorted(present.unique())[:6]
+                notes.append(
+                    f"'{f.value}' matches no {f.metric} in the data, so that filter was "
+                    f"not applied. Real values look like: {', '.join(sample)}"
+                )
+                continue
+        per_filter[f.describe()] = int(_apply_filter(eligible, f).fillna(False).sum())
+        passing = passing[_apply_filter(passing, f).fillna(False)]
+
+    # A name missing the metric a filter needs fails that filter. It is not a pass.
+    n_passing = len(passing)
+
+    rank_by, ascending = spec.effective_rank()
+    if rank_by in passing.columns:
+        passing = passing.sort_values(rank_by, ascending=ascending, na_position="last")
+    else:
+        notes.append(f"ranking metric '{rank_by}' unavailable; order is arbitrary")
+
+    # Every passing name, in ranking order. NOT truncated: the ranking is the screener's
+    # opinion about order, and cutting the list at an arbitrary count would present that
+    # opinion as a decision. The 11th-cheapest company is not disqualified, it is 11th.
+    ranked = passing.copy()
+    ranked.insert(0, "rank", range(1, len(ranked) + 1))
+
+    # `selected` empty means the screen has not been curated yet, so the top `size` are
+    # offered as a starting point. That is a proposal the UI lets you change, not a cap.
+    chosen = _keys(spec.selected) or _keys(ranked.ticker.astype(str).head(spec.size))
+    picks = weighted(
+        ranked[ranked.ticker.astype(str).str.upper().isin(chosen)], spec.weighting
+    )
+
+    if n_passing == 0:
+        notes.append("no security passed every filter — see the per-filter counts below")
+    elif not spec.selected and n_passing < spec.size:
+        notes.append(
+            f"only {n_passing} securities passed, fewer than the {spec.size} proposed"
+        )
+    missing = sorted(_keys(spec.selected)
+                     - set(ranked.ticker.astype(str).str.upper()))
+    if missing:
+        notes.append(
+            f"no longer passing, so dropped from the holding: {', '.join(missing)}. "
+            "The filters changed under a selection made earlier."
+        )
+    if spec.unsupported:
+        notes.append("not applied (no such field): " + "; ".join(spec.unsupported))
+
+    return ScreenResult(
+        picks=picks,
+        ranked=ranked,
+        n_universe=n_universe,
+        n_eligible=n_eligible,
+        n_passing=n_passing,
+        exclusions=exclusions,
+        per_filter_survivors=per_filter,
+        notes=notes,
+    )
+
+
+# A company cannot trade a large fraction of its entire share count every single day.
+# When it appears to, the share count is wrong — in practice because the filer tagged it
+# in thousands. Detected names are EXCLUDED and COUNTED, never silently rescaled: a
+# guessed factor of 1000 would be exactly the kind of invention this tool refuses.
+MAX_PLAUSIBLE_DAILY_TURNOVER = 0.5
+
+
+def share_count_is_implausible(frame: pd.DataFrame) -> pd.Series:
+    vol = frame.get("median_share_volume_60d")
+    shares = frame.get("shares_outstanding")
+    if vol is None or shares is None:
+        return pd.Series(False, index=frame.index)
+    return (vol.notna() & shares.notna() & (shares > 0)
+            & (vol > shares * MAX_PLAUSIBLE_DAILY_TURNOVER))

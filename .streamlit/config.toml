@@ -1,0 +1,20 @@
+[theme]
+base = "dark"
+primaryColor = "#FF9E1B"
+backgroundColor = "#000000"
+secondaryBackgroundColor = "#080808"
+textColor = "#E8E8E8"
+font = "monospace"
+
+[server]
+headless = true
+port = 8501
+# Listen on every interface, not just the loopback, so a phone on the same wifi can
+# reach the Mac. This is a home-network convenience, not a deployment: there is no
+# login, so anyone on that network can open it.
+address = "0.0.0.0"
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false

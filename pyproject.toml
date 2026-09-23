@@ -1,0 +1,28 @@
+[project]
+name = "portfolio-lab"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "anthropic>=1.7.0",
+    "duckdb>=1.5.5",
+    "pandas>=3.0.6",
+    "plotly>=7.1.0",
+    "requests>=2.34.2",
+    "streamlit>=1.64.0",
+    "yfinance>=1.7.0",
+]
+
+[project.scripts]
+portfolio-lab = "portfolio_lab:main"
+
+[build-system]
+requires = ["uv_build>=0.12.15,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "numpy>=2.5.3",
+    "pytest>=9.1.1",
+]
