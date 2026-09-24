@@ -396,6 +396,44 @@ Zwei kleinere Befunde aus der Durchsicht am 23.09.:
   `shares_outstanding` erklärt, warum 426 Titel mangels Aktienzahl ausgeschlossen
   werden, und `ticker_history` ist die Voraussetzung für Phase 7.
 
+## Phase 7 — Ergebnis vom 24.09.2026: die Messung fällt aus, und das ist das Ergebnis
+
+**Abgeschlossen, mit dem Ausgang, den der Prüfer vorhergesagt hatte.** `ticker_history`
+ist gebaut — 16.918 Melder aus der SEC-Einreichungsdatei gelesen, Einreichungsfenster und
+beobachtete Kurszeiträume je mit Quellenangabe hinterlegt, 13.972 Zeilen. Dann die
+vorgeschriebene Messung: 20 CIKs aus dem **eigenen** Bestand, die 2014 noch meldeten und
+seit 2019 nichts mehr, gezogen über einen Hash der CIK, damit niemand bequeme Firmen
+ausgesucht haben kann.
+
+| Frage | Ergebnis |
+|---|---|
+| Für wie viele liefert `ticker_history` überhaupt ein Kürzel? | **0 von 20** |
+| Für wie viele davon liegen Kurse vor? | **0 von 20** |
+| Verdikt | **überlebendenbasiert** (Schwelle: 50 %) |
+
+**Warum null und nicht wenig:** Die SEC-Einreichungsdatei führt unter `tickers` nur die
+**heutigen** Kürzel. Für eine verschwundene Firma ist das Feld leer. Die im Plan
+vorgesehene Deckblattangabe `dei:TradingSymbol` ist ein **Text**-Fakt und steckt deshalb
+nicht im numerischen `companyfacts`-Paket; sie pro Einreichung zu holen hieße
+Zehntausende Einzelabrufe. Von 16.918 Meldern haben überhaupt nur 6.586 ein aktuelles
+Kürzel — die anderen 10.332 sind aus Sicht der kostenlosen Quelle namenlos.
+
+**Folge, und sie steht jetzt in der Oberfläche statt nur hier:** Stufe B wird auf einem
+überlebendenbasierten Universum laufen. Die Seitenleiste und das Etikett an jeder
+Backtest-Grafik nennen die gemessenen Quoten im Klartext, statt eine Korrektur zu
+behaupten, die nicht stattfindet. Vollständig behoben wird das erst durch die bezahlte
+Quelle (Phase 10).
+
+**R18 · Delisting-Rendite ist umgesetzt.** Eine Position, deren Kurse vor dem Ende des
+Zeitraums aufhören, hält **nicht** ihren letzten Kurs, sondern nimmt den ausgewiesenen
+Verlust (Standard −30 %, Einstellung `[A17]`). Von Hand nachgerechneter Test: halb in
+einer Verdopplung, halb in einem verschwindenden Titel → 100 × (0,5 × 2,0 + 0,5 × 0,7) =
+**135,00**. Ein zweiter Test zeigt, dass die Annahme das Ergebnis bewegt (−10 % gegen
+−100 %), damit sie als das sichtbar bleibt, was sie ist: eine ungeprüfte Zahl.
+
+**R19 · Zählung:** Die Zahl der verschwundenen Titel und die angewandte Annahme stehen als
+Hinweis am Ergebnis.
+
 ## Phase 6 — Ergebnis vom 24.09.2026
 
 **Bestanden.** Die Formeln liegen in `metrics.py`, damit Portfolio und Index nachweislich
@@ -573,7 +611,7 @@ Aufbau auf einer Kopie hätte gegen die alte Tabelle geschrieben und wäre gesch
 
 > **Reihenfolge-Hinweis, der Geld wert ist:** Phase 7 muss **vor** Phase 8 laufen. Ein Point-in-Time-Backtest über ein Universum, das aus den heutigen Überlebenden besteht, liefert ein zu gutes Ergebnis — und keines der Abnahmekriterien von Phase 8 würde das bemerken, weil sie nur Meldedaten und Ausführungskurse prüfen. Deshalb wird zuerst das historische Universum gebaut, dann die Umschichtungsschleife darauf gesetzt. Die unabhängige Gegenprüfung findet erst statt, wenn beide stehen.
 
-- [ ] **Phase 7: Historisches Universum und Delisting-Behandlung**
+- [x] **Phase 7: Historisches Universum und Delisting-Behandlung** — *gemessen, Ergebnis: überlebendenbasiert (0/20)*
       **Done when:** `ticker_history` ist aus der SEC-Einreichungshistorie, den Deckblatt-Tickerangaben der Einreichungen und den beobachteten Kurszeiträumen aufgebaut, **nicht** aus der heutigen Ticker-Liste; **die Wiederfindungsquote ist gemessen**: aus dem eigenen Datenbestand werden 20 CIKs gezogen, die 2014 noch einen Jahresbericht einreichten und seit 2019 nichts mehr — für wie viele davon liefert `ticker_history` einen Ticker, und für wie viele davon liegen Kurse vor? Beide Quoten stehen im Bericht und in der Oberfläche; verschwindende Titel bekommen die ausgewiesene Delisting-Rendite statt des letzten Kurses, ein Test mit simuliertem Delisting ist grün.
       **Steps:**
       - `ticker_history` aufbauen; Deckblattangabe `dei:TradingSymbol` nutzen, wo vorhanden, sonst über die Einreichungsdatei

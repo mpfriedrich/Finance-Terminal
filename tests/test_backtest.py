@@ -256,3 +256,57 @@ def test_a_build_id_distinguishes_builds_rather_than_naming_the_source():
     b = bt.short_build_id("free (SEC XBRL + yfinance)|2026-09-24|prices=1842999")
     assert a != b and len(a) == len(b) == 10
     assert bt.short_build_id("") == "—"
+
+
+# --- R18: a name that stops trading does not politely hold its value -----------------
+
+def delisting_market():
+    """AAA trades the whole way and doubles; DEAD stops halfway at an unchanged price."""
+    dates = pd.bdate_range(dt.date(2024, 1, 1), periods=100).date
+    step = 2.0 ** (1 / 99)
+    rows = [("AAA", d, 10.0 * step**i, 10.0 * step**i) for i, d in enumerate(dates)]
+    rows += [("DEAD", d, 10.0, 10.0) for d in dates[:50]]
+    rows += [("^SP500TR", d, 100.0, 100.0) for d in dates]
+    return synthetic_market(rows), dates
+
+
+def test_a_delisted_name_takes_the_stated_loss_instead_of_holding_its_price():
+    """Half the money in a doubling stock, half in one that vanishes at −30%:
+    100 × (0.5 × 2.0 + 0.5 × 0.7) = 135, worked out by hand."""
+    con, dates = delisting_market()
+    h = pd.DataFrame({"ticker": ["AAA", "DEAD"], "weight": [0.5, 0.5],
+                      "market_cap": [5e9, 5e9]})
+    free = CostModel(commission=0.0, spread_tiers=((float("inf"), 0.0),))
+    r = bt.buy_and_hold(con, h, dates[0], dates[-1], costs=free, delisting_return=-0.30)
+    assert r.portfolio[-1] == pytest.approx(135.0, rel=1e-9)
+
+
+def test_the_delisting_assumption_is_a_setting_that_moves_the_result():
+    """[A17] is an unverified number, so it has to be visibly adjustable."""
+    con, dates = delisting_market()
+    h = pd.DataFrame({"ticker": ["AAA", "DEAD"], "weight": [0.5, 0.5],
+                      "market_cap": [5e9, 5e9]})
+    free = CostModel(commission=0.0, spread_tiers=((float("inf"), 0.0),))
+    mild = bt.buy_and_hold(con, h, dates[0], dates[-1], costs=free, delisting_return=-0.10)
+    harsh = bt.buy_and_hold(con, h, dates[0], dates[-1], costs=free, delisting_return=-1.00)
+    assert mild.portfolio[-1] > harsh.portfolio[-1]
+    assert harsh.portfolio[-1] == pytest.approx(100.0, rel=1e-9)   # 0.5×2.0 + 0.5×0.0
+
+
+def test_the_disappearance_is_counted_and_named(delisted=None):
+    """R19: how many left, and the assumption applied to them, both on the result."""
+    con, dates = delisting_market()
+    h = pd.DataFrame({"ticker": ["AAA", "DEAD"], "weight": [0.5, 0.5],
+                      "market_cap": [5e9, 5e9]})
+    r = bt.buy_and_hold(con, h, dates[0], dates[-1])
+    assert any("DEAD" in n and "stopped trading" in n for n in r.notes)
+    assert any("-30%" in n or "−30%" in n for n in r.notes)
+
+
+def test_a_name_that_trades_to_the_end_is_not_treated_as_delisted():
+    con, dates = delisting_market()
+    h = pd.DataFrame({"ticker": ["AAA"], "weight": [1.0], "market_cap": [5e9]})
+    free = CostModel(commission=0.0, spread_tiers=((float("inf"), 0.0),))
+    r = bt.buy_and_hold(con, h, dates[0], dates[-1], costs=free)
+    assert r.portfolio[-1] == pytest.approx(200.0, rel=1e-9)
+    assert not any("stopped trading" in n for n in r.notes)

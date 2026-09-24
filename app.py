@@ -39,7 +39,7 @@ if not st.runtime.exists():
 
 from portfolio_lab import ui
 from portfolio_lab.config import CACHE_DIR, MARKET_DB, USER_DB, CostModel, Settings, secret
-from portfolio_lab.data import industry
+from portfolio_lab.data import history as hist, industry
 from portfolio_lab.data.free import FreeSource
 from portfolio_lab.data.schema import open_market, open_user
 from portfolio_lab.screen import translate as T
@@ -101,6 +101,12 @@ def _store():
 @st.cache_data(ttl=600)
 def _frame(asof: dt.date) -> pd.DataFrame:
     return _market_source().screening_frame(asof)
+
+
+@st.cache_data(ttl=3600)
+def _universe_verdict() -> str:
+    """What the historical universe actually is, from the last measurement (Phase 7)."""
+    return hist.universe_verdict(hist.stored_recovery(_market_source().con))
 
 
 @st.cache_data(ttl=3600)
@@ -197,8 +203,7 @@ with st.sidebar:
     st.caption(
         "US common stock on NYSE, Nasdaq and CBOE. Funds, commodity trusts and blank-"
         "cheque shells are excluded by the filer's own SEC industry code; REITs are kept. "
-        "**Delisted companies are not in the data at all**, so any backward-looking "
-        "number here is flattered by survivors."
+        + _universe_verdict()
     )
     if not secret("ANTHROPIC_API_KEY"):
         st.error("ANTHROPIC_API_KEY missing from .env.local. Chat is off.")
@@ -616,7 +621,9 @@ with tab_screen:
                     src.con, start_on, last_bar, settings.risk_free_fallback)
                 result = bktest.buy_and_hold(
                     src.con, picks, start_on, last_bar, costs=model,
-                    risk_free=rate, data_fingerprint=snapshot.fingerprint(),
+                    risk_free=rate, delisting_return=settings.delisting_return,
+                    data_fingerprint=snapshot.fingerprint(),
+                    universe_verdict=_universe_verdict(),
                 )
                 st.session_state[f"bt_rate_{chosen}"] = (rate, rate_source)
                 if result is None:

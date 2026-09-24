@@ -112,7 +112,9 @@ def buy_and_hold(
     costs: CostModel | None = None,
     benchmark: str = BENCHMARK,
     risk_free: float = 0.02,
+    delisting_return: float = -0.30,
     data_fingerprint: str = "",
+    universe_verdict: str = "",
 ) -> BacktestResult | None:
     """Buy `holdings` at their weights on `start`, hold to `end`, never rebalance (R16b).
 
@@ -153,9 +155,28 @@ def buy_and_hold(
     if wide.empty:
         return None
 
-    # Forward-fill AFTER the entry check: a halted name holds its last price, it does not
-    # borrow a future one.
+    # A name whose bars stop before the window ends did not politely hold its value
+    # there. Carrying the last close forward to the end is the single most flattering
+    # assumption a backtest can make, because the companies that stop trading are rarely
+    # the ones that did well. So the stated delisting return is applied once, at the last
+    # bar, and the position is held at that level afterwards (R18).
+    last_bar = wide.apply(lambda col: col.last_valid_index())
+    window_end = wide.index[-1]
+    gone = [c for c in wide.columns
+            if last_bar[c] is not None and (window_end - last_bar[c]).days > 10]
+
     wide = wide.ffill()
+    for column in gone:
+        stopped = last_bar[column]
+        final = wide.loc[stopped, column] * (1.0 + delisting_return)
+        wide.loc[wide.index > stopped, column] = final
+    if gone:
+        notes.append(
+            f"{len(gone)} position(s) stopped trading before the end of the window "
+            f"({', '.join(sorted(gone))}). A delisting return of {delisting_return:.0%} "
+            "was applied at the last bar instead of carrying the last price forward — "
+            "the assumption is a setting, and it moves the result (R18, [A17])."
+        )
 
     held = holdings[holdings.ticker.isin(tradable)].copy()
     weights = held.set_index("ticker")["weight"].reindex(wide.columns).fillna(0.0)
@@ -212,7 +233,7 @@ def buy_and_hold(
         entry_cost_total=float((weights * cost_fraction).sum()),
         turnover=0.0,
         data_fingerprint=data_fingerprint,
-        label=stage_a_label(benchmark),
+        label=stage_a_label(benchmark, universe_verdict),
         notes=notes,
     )
 
@@ -230,17 +251,20 @@ def short_build_id(fingerprint: str) -> str:
     return hashlib.sha1(fingerprint.encode()).hexdigest()[:10] if fingerprint else "—"
 
 
-def stage_a_label(benchmark: str = BENCHMARK) -> str:
+def stage_a_label(benchmark: str = BENCHMARK, universe_verdict: str = "") -> str:
     """The warning that travels with every Stage A chart (R12).
 
     Written out rather than abbreviated, because the two uncorrected biases both push the
     result the same way — upward — and a reader who skims needs to meet that fact.
     """
-    return (
+    text = (
         "Stage A · buy and hold, no rebalancing. "
         f"Corrected: dividends are reinvested on both sides ({benchmark} is a total-return "
-        "series), and trading costs are charged once at entry, tiered by company size. "
+        "series), trading costs are charged once at entry tiered by company size, and a "
+        "position that stops trading takes the stated delisting loss rather than holding "
+        "its last price. "
         "NOT corrected: the companies were chosen using today's filings, so the basket is "
         "hindsight; and delisted companies are absent from the universe, so survivors "
         "flatter the result. Both errors point upward."
     )
+    return f"{text} {universe_verdict}".strip()

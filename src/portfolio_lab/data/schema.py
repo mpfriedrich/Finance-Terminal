@@ -121,6 +121,18 @@ MARKET_MIGRATIONS: list[str] = [
     # the open and the close.
     "ALTER TABLE prices ADD COLUMN IF NOT EXISTS high DOUBLE;",
     "ALTER TABLE prices ADD COLUMN IF NOT EXISTS low DOUBLE;",
+    # 012 — how much of the vanished world could be reconstructed (Phase 7). Stored
+    # rather than recomputed, because the answer belongs on screen next to every
+    # backward-looking number and recomputing it means reading a million JSON files.
+    """
+    CREATE TABLE IF NOT EXISTS universe_recovery (
+        measured_at    TIMESTAMP NOT NULL,
+        n_sample       INTEGER   NOT NULL,
+        n_with_ticker  INTEGER   NOT NULL,
+        n_with_prices  INTEGER   NOT NULL,
+        PRIMARY KEY (measured_at)
+    );
+    """,
 ]
 
 USER_MIGRATIONS: list[str] = [
