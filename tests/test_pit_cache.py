@@ -100,10 +100,27 @@ def test_an_empty_frame_is_not_written(tmp_path):
     assert not cache.path_for(day).exists()
 
 
-def test_a_half_written_file_cannot_be_read_as_a_universe(tmp_path):
-    """Written under a temporary name and renamed, so an interrupted run leaves either
-    the whole frame or nothing — never a truncated universe that screens fine."""
+def test_an_interrupted_write_leaves_nothing_readable(tmp_path, monkeypatch):
+    """The original version of this test performed a SUCCESSFUL write and checked that no
+    .partial file remained — which stays green even if the temp-name-and-rename is
+    deleted. It never simulated an interruption. This one does."""
     src = CountingSource()
     cache = FrameCache(src, tmp_path, "build-A")
-    cache.frame_for(dt.date(2020, 1, 2))
-    assert not list(cache.root.glob("*.partial"))
+    day = dt.date(2020, 1, 2)
+
+    real_to_parquet = pd.DataFrame.to_parquet
+
+    def die_halfway(self, path, *args, **kwargs):
+        real_to_parquet(self, path, *args, **kwargs)   # the temporary file now exists
+        raise KeyboardInterrupt("killed mid-write")
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", die_halfway)
+    with pytest.raises(KeyboardInterrupt):
+        cache.frame_for(day)
+
+    monkeypatch.undo()
+    # The real path must not exist, so the next run recomputes instead of reading a
+    # truncated universe that would screen perfectly well.
+    assert not cache.path_for(day).exists()
+    again = cache.frame_for(day)
+    assert len(again) == 2

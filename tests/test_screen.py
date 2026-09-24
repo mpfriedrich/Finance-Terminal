@@ -417,3 +417,18 @@ def test_a_frame_without_the_column_still_screens():
 def test_the_floor_appears_in_the_plain_language_description():
     lines = " ".join(PortfolioSpec(size=10).describe())
     assert "traded on ≥ 40 of the last 60 sessions" in lines
+
+
+def test_a_frame_with_no_fundamentals_at_all_screens_empty_rather_than_crashing():
+    """A point-in-time backtest walking back far enough reaches a date where nothing has
+    been filed yet. That is a real date, not an error — and it used to raise
+    `Series * None` deep inside the metric derivation."""
+    bare = pd.DataFrame({
+        "ticker": ["AAA", "BBB"], "cik": [1, 2], "price": [10.0, 20.0],
+        "data_age_days": [30, 30], "median_dollar_volume_60d": [5e6, 5e6],
+        "trading_days_60": [60, 60],
+    })
+    r = run_screen(bare, PortfolioSpec(size=10))
+    assert r.n_universe == 2
+    assert r.picks.empty          # no share count, so nothing is eligible
+    assert "no share count" in r.exclusions

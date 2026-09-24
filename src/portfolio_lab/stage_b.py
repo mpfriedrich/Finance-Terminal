@@ -106,6 +106,7 @@ class StageBResult:
     metrics: dict
     rebalances: pd.DataFrame          # one row per rebalance: date, names, turnover, cost
     turnover: float                   # average annualised turnover
+    ever_held: list[str]              # every name the rule ever bought
     data_fingerprint: str
     label: str
     notes: list[str] = field(default_factory=list)
@@ -133,10 +134,12 @@ def run(
     frequency: str = "quarterly",
     benchmark: str = "^SP500TR",
     risk_free: float = 0.02,
+    delisting_return: float = -0.30,
     label: str = "",
     data_fingerprint: str = "",
     frame_for=None,
     cost_tier_market_cap: float = 0.0,
+    exclude: set[str] | None = None,
 ) -> StageBResult | None:
     """Re-screen at each rebalance date and trade into the result at the next open.
 
@@ -158,7 +161,15 @@ def run(
             notes.append(f"{screen_date}: no universe at that date, position kept")
             continue
         result = run_screen(frame, spec)
-        chosen_at[screen_date] = _weights_from(result.picks.head(spec.size))
+        picks = result.picks
+        if exclude:
+            # Used by the sensitivity check (R20): drop one name and see whether the
+            # whole result was standing on it. Excluded at SELECTION, not afterwards, so
+            # the position it would have taken goes to the next name down — which is
+            # what would actually have happened.
+            picks = picks[~picks.ticker.astype(str).str.upper().isin(
+                {t.upper() for t in exclude})]
+        chosen_at[screen_date] = _weights_from(picks.head(spec.size))
         if not chosen_at[screen_date]:
             notes.append(f"{screen_date}: nothing passed, moved to cash")
 
@@ -167,63 +178,95 @@ def run(
     if bars.empty:
         return None
     sessions = pd.Index(sorted(bars.date.unique()))
-    closes = bars.pivot_table(index="date", columns="ticker", values="close_adj").ffill()
+    raw_closes = bars.pivot_table(index="date", columns="ticker", values="close_adj")
+    # The last real bar has to be found BEFORE the forward fill, or every column runs to
+    # the end of the window and nothing ever looks delisted. Stage A gets this right; the
+    # first version here did not, and the R18 test caught it.
+    last_bar = {t: raw_closes[t].last_valid_index() for t in raw_closes.columns}
+    closes = raw_closes.ffill()
     opens = bars.pivot_table(index="date", columns="ticker", values="open_adj")
+
+    # A name whose bars stop before the window ends did not hold its value there (R18).
+    # Its last close is not a price anyone could have sold at; the stated delisting loss
+    # is, and the proceeds return to cash at that point rather than sitting in a position
+    # that cannot be traded.
+    window_end = sessions[-1]
+    gone_after = {t: d for t, d in last_bar.items()
+                  if d is not None and (window_end - d).days > 10}
 
     holdings: dict[str, float] = {}       # ticker -> shares (in adjusted terms)
     cash = 1.0                            # everything starts in cash, value 1.0
     value_by_date: dict[dt.date, float] = {}
     rebalance_rows: list[dict] = []
+    delisted: list[str] = []
+    stuck_events = 0
 
     pending = {d: next_session(sessions, d) for d in chosen_at}
 
+    def priced_at(table, session, ticker):
+        if ticker not in table.columns:
+            return None
+        value = table.at[session, ticker]
+        return None if pd.isna(value) or value <= 0 else float(value)
+
     for session in sessions:
-        # value the book at today's close
-        held_value = sum(
+        # 1. Names that have just gone dark are realised at the stated delisting return.
+        for ticker in [t for t in holdings if t in gone_after and session > gone_after[t]]:
+            final = closes.at[gone_after[ticker], ticker] * (1.0 + delisting_return)
+            cash += holdings.pop(ticker) * final
+            delisted.append(ticker)
+
+        due = [d for d, fill in pending.items() if fill == session]
+        for screen_date in due:
+            target = chosen_at[screen_date]
+            # 2. The book is valued AT THE OPEN, because that is the moment the money is
+            # deployed. Sizing it at the close of the same session — as this loop did
+            # until an independent review caught it — re-levers the portfolio by
+            # close/open at every rebalance. On a flat market with one 30% spike on a
+            # fill day, a position nobody traded at that price turned into a 30% gain.
+            tradable = {t: priced_at(opens, session, t)
+                        for t in set(target) | set(holdings)}
+            tradable = {t: p for t, p in tradable.items() if p}
+            # A holding without an open today cannot be sold today. It keeps its shares
+            # rather than being liquidated for free, and its value stays out of the money
+            # being redeployed.
+            stuck = {t: s for t, s in holdings.items() if t not in tradable}
+            if stuck:
+                stuck_events += 1
+            sellable = sum(shares * tradable[t] for t, shares in holdings.items()
+                           if t in tradable)
+            total = cash + sellable
+
+            traded = 0.0
+            new_holdings: dict[str, float] = dict(stuck)
+            for ticker, weight in target.items():
+                price = tradable.get(ticker)
+                if not price:
+                    continue
+                want = total * weight
+                held_now = holdings.get(ticker, 0.0) * price if ticker in tradable else 0.0
+                traded += abs(want - held_now)
+                new_holdings[ticker] = want / price
+            for ticker, shares in holdings.items():
+                if ticker in tradable and ticker not in target:
+                    traded += abs(shares * tradable[ticker])
+
+            turnover_fraction = traded / total if total else 0.0
+            tier = costs.spread_for(cost_tier_market_cap) + costs.commission
+            charge = total * turnover_fraction * tier
+
+            spent = sum(shares * tradable[t] for t, shares in new_holdings.items()
+                        if t in tradable)
+            cash = max(total - spent, 0.0) - charge
+            holdings = new_holdings
+
+        # 3. The curve is marked at the close, after whatever happened during the day.
+        value_by_date[session] = cash + sum(
             shares * closes.at[session, ticker]
             for ticker, shares in holdings.items()
             if ticker in closes.columns and not pd.isna(closes.at[session, ticker])
         )
-        value_by_date[session] = cash + held_value
-
-        due = [d for d, fill in pending.items() if fill == session]
-        if not due:
-            continue
         for screen_date in due:
-            target = chosen_at[screen_date]
-            total = value_by_date[session]
-            # sell everything at today's open, then buy the target at the same open
-            priced = {t: opens.at[session, t] for t in set(target) | set(holdings)
-                      if t in opens.columns and not pd.isna(opens.at[session, t])}
-            old_value = {t: holdings.get(t, 0.0) * priced.get(t, 0.0) for t in holdings}
-            traded = 0.0
-            new_holdings: dict[str, float] = {}
-            for ticker, weight in target.items():
-                price = priced.get(ticker)
-                if not price or price <= 0:
-                    continue
-                want = total * weight
-                traded += abs(want - old_value.get(ticker, 0.0))
-                new_holdings[ticker] = want / price
-            for ticker, value in old_value.items():
-                if ticker not in target:
-                    traded += abs(value)
-
-            turnover_fraction = traded / total if total else 0.0
-            # Cost is charged on what actually changed hands, at the tier of the names
-            # being traded. One rate for the basket is close enough here and wrong in an
-            # obvious direction: it understates a basket of micro-caps, so the cost is
-            # taken from the names bought.
-            tier = costs.spread_for(cost_tier_market_cap) + costs.commission
-            charge = total * turnover_fraction * tier
-
-            holdings = new_holdings
-            cash = max(total - sum(v * priced.get(t, 0.0) for t, v in holdings.items()), 0.0)
-            cash -= charge
-            value_by_date[session] = cash + sum(
-                shares * closes.at[session, t] for t, shares in holdings.items()
-                if t in closes.columns and not pd.isna(closes.at[session, t])
-            )
             rebalance_rows.append({
                 "screened_on": screen_date,
                 "filled_on": session,
@@ -232,12 +275,27 @@ def run(
                 "cost": charge / total if total else 0.0,
             })
 
+    if delisted:
+        notes.append(
+            f"{len(delisted)} position(s) stopped trading during the run "
+            f"({', '.join(sorted(set(delisted))[:8])}). Each was realised at "
+            f"{delisting_return:.0%} from its last close rather than held at it (R18); "
+            "the assumption is a setting and it moves the result."
+        )
+    if stuck_events:
+        notes.append(
+            f"{stuck_events} rebalance(s) met a holding with no opening price that day. "
+            "It was kept rather than sold, because a position you cannot price is one you "
+            "cannot trade — selling it into the gap would have been a free exit."
+        )
+
     curve = pd.Series(value_by_date).sort_index()
     curve = 100.0 * curve / curve.iloc[0]
     bench = _benchmark_curve(getattr(source, "con", None), benchmark, curve.index)
 
     years = max((curve.index[-1] - curve.index[0]).days, 1) / 365.25
     rebalances = pd.DataFrame(rebalance_rows)
+    ever_held = sorted({name for picks in chosen_at.values() for name in picks})
     annual_turnover = (
         float(rebalances.turnover.sum() / years) if not rebalances.empty else 0.0
     )
@@ -252,6 +310,7 @@ def run(
         metrics=summary,
         rebalances=rebalances,
         turnover=annual_turnover,
+        ever_held=ever_held,
         data_fingerprint=data_fingerprint,
         label=label or stage_b_label(),
         notes=notes,
@@ -278,9 +337,14 @@ def stage_b_label(universe_verdict: str = "") -> str:
     """What stage B fixed, and what it could not (R12)."""
     text = (
         "Stage B · re-screened at every rebalance date. "
-        "Corrected: only filings already published at each date are used, the first "
-        "filed version wins over later restatements, orders fill at the NEXT session's "
-        "open, and turnover is charged at the cost tier of the names actually traded. "
+        "Corrected: only filings already published at each date are used, the first filed "
+        "version wins over later restatements, orders are both PRICED AND SIZED at the "
+        "next session's open, a position that stops trading takes the stated delisting "
+        "loss, and one that cannot be priced on a rebalance day is kept rather than sold "
+        "into the gap. "
+        "Costs are charged on what changed hands at the most expensive tier, which "
+        "overstates them for large companies — deliberately, since the alternative is to "
+        "understate them for small ones. "
         "NOT corrected: the universe holds only companies that still exist."
     )
     return f"{text} {universe_verdict}".strip()

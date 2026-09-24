@@ -102,8 +102,11 @@ def test_the_run_holds_nothing_it_could_not_have_known_about():
     result = stage_b.run(src, spec, dt.date(2023, 2, 15), dt.date(2023, 5, 31),
                          costs=FREE, benchmark="^SP500TR")
     assert result is not None
-    # Before June only AAA is visible at all, so every rebalance in this window held it.
-    assert (result.rebalances.names == 1).all()
+    # The NAMES, not the count. This assertion used to read `names == 1`, which is a
+    # count and is true whichever company was bought — it would have stayed green with
+    # the look-ahead fully broken. An independent review caught that.
+    assert result.ever_held == ["AAA"]
+    assert "BBB" not in result.ever_held
 
 
 # --- rule 2: the first filing wins ----------------------------------------------------
@@ -205,6 +208,103 @@ def test_the_label_still_admits_the_survivors():
     """Point-in-time discipline fixes look-ahead and does nothing at all about the
     companies that are missing because they failed."""
     label = stage_b.stage_b_label("Universe: SURVIVOR-BASED. 0 of 20 recovered.")
-    assert "NEXT session's open" in label
+    assert "next session's open" in label
     assert "first filed version wins" in label
     assert "SURVIVOR-BASED" in label
+
+
+def test_the_label_does_not_claim_a_cost_tier_it_does_not_use():
+    """It claimed costs were charged 'at the cost tier of the names actually traded'
+    while every trade paid the most expensive tier. Overstating a cost is conservative;
+    claiming a precision that does not exist is not, and the plan bans it either way."""
+    label = stage_b.stage_b_label()
+    assert "names actually traded" not in label
+    assert "most expensive tier" in label
+
+
+def test_the_label_names_the_sizing_and_the_delisting_rule():
+    """Both were claimed by stage A and silently absent from stage B."""
+    label = stage_b.stage_b_label()
+    assert "SIZED" in label
+    assert "delisting" in label
+
+
+# --- the trade is SIZED at the open too, not just priced there ------------------------
+
+def flat_with_spike(spike_day, open_px=10.0, close_px=13.0):
+    """Every price 10, except one day that opens at 10 and closes at `close_px`."""
+    days = pd.bdate_range("2023-01-02", "2023-12-29").date
+    return days, [("AAA", d, open_px, close_px if d == spike_day else 10.0,
+                   close_px if d == spike_day else 10.0,
+                   close_px if d == spike_day else 10.0, 1_000_000) for d in days]
+
+
+def one_name_source(rows):
+    return build_source(
+        facts(1001, book=1_000_000_000.0, shares=100_000_000, filed=dt.date(2022, 12, 15)),
+        listings={"AAA": (1001, None, None)}, prices=rows)
+
+
+def test_a_spike_on_the_fill_day_is_not_turned_into_a_gain():
+    """The bug this test exists for: the book was valued at the fill day's CLOSE and the
+    money deployed at its OPEN, which re-levers the portfolio by close/open at every
+    single rebalance. On a market that never moves except for one 30% spike on a fill
+    day — a price nobody traded at — the run reported +30%.
+
+    Measured on the live store the same defect was worth +0.92 percentage points a year.
+    """
+    days, rows = flat_with_spike(dt.date(2023, 4, 3))
+    spec = PortfolioSpec(size=1, min_dollar_volume=0, min_trading_days_60=0)
+    r = stage_b.run(one_name_source(rows), spec, days[0], days[-1],
+                    costs=FREE, frequency="quarterly")
+    assert r.metrics["total_return"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_a_slump_on_the_fill_day_is_not_turned_into_a_loss_either():
+    """The mirror image. The original R16 test used a fixture where close < open, which
+    is the one sign under which the sizing bug pushes the answer DOWN — so it could not
+    see it. Both directions now."""
+    days, rows = flat_with_spike(dt.date(2023, 4, 3), close_px=7.0)
+    spec = PortfolioSpec(size=1, min_dollar_volume=0, min_trading_days_60=0)
+    r = stage_b.run(one_name_source(rows), spec, days[0], days[-1],
+                    costs=FREE, frequency="quarterly")
+    assert r.metrics["total_return"] == pytest.approx(0.0, abs=1e-9)
+
+
+# --- R18 in stage B, not only in stage A ---------------------------------------------
+
+def two_names_one_dies():
+    """AAA trades all year at 10. BBB trades at 10 and stops at the end of March."""
+    days = pd.bdate_range("2023-01-02", "2023-12-29").date
+    rows = [("AAA", d, 10.0, 10.0, 10.0, 10.0, 1_000_000) for d in days]
+    rows += [("BBB", d, 10.0, 10.0, 10.0, 10.0, 1_000_000)
+             for d in days if d <= dt.date(2023, 3, 31)]
+    src = build_source(
+        facts(1001, book=1_000_000_000.0, shares=100_000_000, filed=dt.date(2022, 12, 15))
+        + facts(1002, book=1_000_000_000.0, shares=100_000_000, filed=dt.date(2022, 12, 15)),
+        listings={"AAA": (1001, None, None), "BBB": (1002, None, None)}, prices=rows)
+    return days, src
+
+
+def test_a_position_that_stops_trading_takes_the_stated_loss():
+    """Half in a name that goes nowhere, half in one that vanishes at -30%: the book is
+    worth 100 × (0.5 + 0.5 × 0.7) = 85. Stage A did this; stage B did not, and held the
+    dead name at its last close instead — which is the single most flattering assumption
+    a backtest can make."""
+    days, src = two_names_one_dies()
+    spec = PortfolioSpec(size=2, min_dollar_volume=0, min_trading_days_60=0)
+    r = stage_b.run(src, spec, days[0], days[-1], costs=FREE,
+                    frequency="buy_and_hold", delisting_return=-0.30)
+    assert r.portfolio[-1] == pytest.approx(85.0, rel=1e-6)
+    assert any("stopped trading" in n for n in r.notes)
+
+
+def test_the_delisting_assumption_moves_the_stage_b_result_too():
+    days, src = two_names_one_dies()
+    spec = PortfolioSpec(size=2, min_dollar_volume=0, min_trading_days_60=0)
+    mild = stage_b.run(src, spec, days[0], days[-1], costs=FREE,
+                       frequency="buy_and_hold", delisting_return=-0.10)
+    total = stage_b.run(src, spec, days[0], days[-1], costs=FREE,
+                        frequency="buy_and_hold", delisting_return=-1.00)
+    assert mild.portfolio[-1] == pytest.approx(95.0, rel=1e-6)
+    assert total.portfolio[-1] == pytest.approx(50.0, rel=1e-6)

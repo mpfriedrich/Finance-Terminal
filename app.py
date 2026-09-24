@@ -52,6 +52,8 @@ from portfolio_lab.screen.valuation import Assumptions
 import time
 
 from portfolio_lab import backtest as bktest
+from portfolio_lab import holdout
+from portfolio_lab import sensitivity as sens
 from portfolio_lab import stage_b as bstage
 from portfolio_lab.pit_cache import FrameCache
 from portfolio_lab import coverage as cov
@@ -636,10 +638,31 @@ with tab_screen:
         frequency = c2.selectbox(
             "Rebalance", ["quarterly", "annual", "buy_and_hold"], index=0,
             key=f"pit_freq_{chosen}")
-        dates = bstage.rebalance_dates(pit_start, asof, frequency)
+        # R21: the last two years are out of the picture until someone says otherwise.
+        unlock = st.checkbox(
+            f"Unlock the withheld period (the last {settings.holdout_years} years)",
+            value=False, key=f"pit_unlock_{chosen}",
+            help="Tune on what you can see; open this once at the end. Opening it is "
+                 "recorded on the run.")
+        try:
+            hw = holdout.window(asof, pit_start, settings.holdout_years, unlock)
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+        st.caption(hw.describe())
+        burned = holdout.burn_count(store, spec.fingerprint(), snapshot.fingerprint())
+        if burned:
+            st.warning(holdout.burn_warning(burned))
+
+        dates = bstage.rebalance_dates(hw.start, hw.end, frequency)
         ready = sum(1 for d in dates if cache.path_for(d).exists())
-        go_pit = c3.button("Run point-in-time", use_container_width=True,
+        c4, c5 = st.columns([1, 1])
+        go_pit = c4.button("Run point-in-time", use_container_width=True,
                            key=f"pit_go_{chosen}")
+        go_sens = c5.button("Run with sensitivity checks", use_container_width=True,
+                            key=f"pit_sens_{chosen}",
+                            help="The same run started six months earlier and later, and "
+                                 "again without the holding it leaned on most.")
 
         if ready < len(dates):
             st.warning(
@@ -650,24 +673,29 @@ with tab_screen:
                 "any screen, is then fast. The cache changes speed and nothing else."
             )
 
-        if go_pit:
+        if go_pit or go_sens:
+            shared = dict(
+                costs=settings.cost, frequency=frequency,
+                risk_free=mx.risk_free_rate(
+                    src.con, hw.start, hw.end, settings.risk_free_fallback)[0],
+                label=bstage.stage_b_label(_universe_verdict()),
+                data_fingerprint=snapshot.fingerprint(), frame_for=cache.frame_for,
+            )
             with st.spinner(f"Re-screening {len(dates)} dates"):
                 started = time.time()
-                out = bstage.run(
-                    src, spec, pit_start, asof, costs=settings.cost,
-                    frequency=frequency, risk_free=mx.risk_free_rate(
-                        src.con, pit_start, asof, settings.risk_free_fallback)[0],
-                    label=bstage.stage_b_label(_universe_verdict()),
-                    data_fingerprint=snapshot.fingerprint(),
-                    frame_for=cache.frame_for,
-                )
+                out = bstage.run(src, spec, hw.start, hw.end, **shared)
+                report = (sens.run(src, spec, hw.start, hw.end, **shared)
+                          if go_sens else None)
                 st.session_state[f"pit_result_{chosen}"] = out
+                st.session_state[f"pit_sens_{chosen}_result"] = report
                 st.session_state[f"pit_seconds_{chosen}"] = time.time() - started
             if out is not None:
                 store.record_run(
                     chosen, "stage_b", spec.fingerprint(), snapshot.fingerprint(),
                     out.dates[0], out.dates[-1],
-                    {"frequency": frequency, "dates": len(dates)}, out.metrics)
+                    {"frequency": frequency, "dates": len(dates),
+                     "sensitivity": bool(go_sens)}, out.metrics,
+                    holdout_unlocked=unlock)
 
         out = st.session_state.get(f"pit_result_{chosen}")
         if out is None and go_pit:
@@ -718,9 +746,23 @@ with tab_screen:
                     }), numeric={"names"}, ticker_col="screened"),
                         unsafe_allow_html=True)
 
+            report = st.session_state.get(f"pit_sens_{chosen}_result")
+            if report is not None:
+                st.markdown("#### Does it survive being poked?")
+                table = sens.as_table(report)
+                st.markdown(ui.grid(pd.DataFrame({
+                    "variation": table["variation"],
+                    "return p.a.": table["return p.a."].map(ui.pct),
+                    "vs index": table["vs index"].map(ui.pct),
+                    "max drawdown": table["max drawdown"].map(ui.pct),
+                }), numeric=set(), ticker_col="variation"), unsafe_allow_html=True)
+                st.caption(report.verdict())
+
             for note in out.notes[:5]:
                 st.warning(note)
             st.warning(out.label)
+            if hw.unlocked:
+                st.warning(hw.describe())
             seconds = st.session_state.get(f"pit_seconds_{chosen}", 0.0)
             tried = store.backtest_count(spec.fingerprint(), out.data_fingerprint)
             st.caption(

@@ -9,9 +9,12 @@ and a half minutes** against a five-minute budget.
 The plan's own instruction for exactly this case is to cache the per-date intermediate
 results until the budget is met, which is what this does. Two properties make it safe:
 
-  * **The cache is keyed by the data build.** Free price sources restate adjusted closes
-    and the SEC publishes corrections, so a frame computed last month is not the same
-    frame. A new build gets new files rather than stale ones (R22).
+  * **The cache is keyed by the data build** — source, newest bar, row counts. That
+    catches a rebuild, a deeper download and any new rows. It does NOT catch a value
+    corrected in place: a restated close written over an existing row changes neither the
+    row count nor the newest date, and the cached frame then survives a correction it
+    should not have. `clear()` or a bumped `CACHE_VERSION` is the answer, and this
+    paragraph exists because the previous one claimed the gap did not exist.
   * **It is spec-independent.** The expensive part is the point-in-time assembly, not the
     filtering. So one warm-up serves every strategy afterwards — which matters, because
     trying many specs is precisely what the person will do, and it is also precisely what
@@ -28,7 +31,11 @@ from pathlib import Path
 
 import pandas as pd
 
-CACHE_VERSION = "v1"
+# Bumped whenever the ASSEMBLY changes — a fix in pit.py, a new column, a different
+# floor. Without that, 29 MB of frames built by the previous logic keep being served and
+# the fix silently does nothing. It is a manual constant because nothing can detect the
+# change for us; forgetting it is the trap, so it is named here rather than buried.
+CACHE_VERSION = "v2"
 
 
 def _build_id(fingerprint: str) -> str:

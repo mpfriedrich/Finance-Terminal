@@ -133,7 +133,11 @@ def derive_metrics(frame: pd.DataFrame) -> pd.DataFrame:
             return pd.Series(np.nan, index=out.index, dtype="float64")
         return pd.to_numeric(out[name], errors="coerce")
 
-    out["market_cap"] = out["price"] * out.get("shares_outstanding")
+    # `col`, not `out.get`: a missing column comes back from .get() as None, and
+    # `Series * None` raises. The helper right above exists precisely to avoid that, and
+    # this one line was walking past it — which turned a screening date with no visible
+    # filings into a crash rather than an empty screen.
+    out["market_cap"] = col("price") * col("shares_outstanding")
 
     def ratio(numer: pd.Series, denom_col: str) -> pd.Series:
         denom = col(denom_col)
@@ -247,6 +251,10 @@ def run_screen(
 
     max_age = spec.max_filing_age_months * 31
     drop(data["price"].notna(), "no current price")
+    # The column can be absent entirely on a date before anything was filed, which is a
+    # universe where nothing is eligible — not an error, and not a crash.
+    if "shares_outstanding" not in data.columns:
+        data = data.assign(shares_outstanding=np.nan)
     drop(data["shares_outstanding"].notna(), "no share count")
     drop(data["data_age_days"].fillna(10**6) <= max_age,
          f"filing older than {spec.max_filing_age_months} months")

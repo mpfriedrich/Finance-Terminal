@@ -396,6 +396,68 @@ Zwei kleinere Befunde aus der Durchsicht am 23.09.:
   `shares_outstanding` erklärt, warum 426 Titel mangels Aktienzahl ausgeschlossen
   werden, und `ticker_history` ist die Voraussetzung für Phase 7.
 
+## Gegenprüfung Phase 7 + 8 — Ergebnis vom 25.09.2026
+
+Der Plan verlangt vor Phase 8 eine Gegenprüfung durch jemanden, der den Code nicht
+geschrieben hat. Sie hat stattgefunden. **Verdikt: Phase 7 bestanden, Phase 8
+durchgefallen.** Zehn Befunde, die schwersten drei:
+
+**1. Der Handel wurde zum Eröffnungskurs ausgeführt, aber zum SCHLUSSKURS bemessen.**
+Das ist Rückschau, und sie zeigt nach oben. Reproduziert: flacher Markt, ein einziger
+Kurssprung von 10 auf 13 am Ausführungstag, niemand handelt dort — der Lauf meldete
+**+30 %**. Das Depot wurde bei *jeder* Umschichtung um `Schluss/Eröffnung` neu gehebelt.
+Der Prüfer bezifferte es auf **+0,92 Punkte pro Jahr** und 14 % des Endvermögens.
+Behoben; das Buch wird jetzt zum Eröffnungskurs bewertet, weil dort das Geld eingesetzt
+wird. Der alte R16-Test konnte es nicht sehen: sein Prüffall hatte `Schluss < Eröffnung`,
+das einzige Vorzeichen, unter dem der Fehler nach unten zeigt.
+
+**2. Stufe B hatte überhaupt keine Delisting-Rendite.** R18 war nur in Stufe A umgesetzt,
+der Plan behauptete es für beide. Ein Titel, dessen Kurse aufhören, wurde zum letzten
+Kurs gehalten **und** zum letzten Kurs kostenlos verkauft. Heute folgenlos, weil im
+Bestand kein einziger Titel tot ist — und genau deshalb gefährlich: mit der bezahlten
+Quelle (Phase 10) käme es sofort zum Tragen. Behoben, von Hand nachgerechnet: halb in
+einem flachen Titel, halb in einem verschwindenden → 85,00.
+
+**3. Umschlag und Kosten konnten auf einem echten Handel null sein.** Eine Position ohne
+Eröffnungskurs am Umschichtungstag fiel aus der Berechnung, blieb aber im eingesetzten
+Kapital — halbes Depot bewegt, Umschlag 0,000000, Kosten 0. Behoben: was nicht bepreist
+werden kann, wird gehalten statt verkauft, und der Hinweis dazu steht am Ergebnis.
+
+**Weiter behoben:** das Etikett behauptete eine Kostenstaffelung, die nicht stattfindet
+(jetzt: „teuerste Stufe, überschätzt große Firmen absichtlich"); es verschwieg die
+Positionsbemessung und das Delisting; ein Screening-Datum ohne sichtbare Meldungen ließ
+den Lauf abstürzen (`Series * None`); und drei Tests bestanden aus falschen Gründen —
+darunter einer, der eine **Anzahl** prüfte statt der **Namen** und mit vollständig
+kaputter Rückschau grün geblieben wäre, und einer, der eine Unterbrechung beim Schreiben
+prüfen sollte, ohne je zu unterbrechen.
+
+**Offen, bewusst nicht in derselben Sitzung behoben:**
+
+* **`period_start`-Verschiebung bei Korrekturen** (`pit.py`): Eine Neueinreichung, die den
+  Periodenbeginn um Tage verschiebt, landet in einer anderen Partition und überlebt als
+  „früheste Fassung ihrer eigenen Periode". Gemessen **32.463** betroffene Gruppen.
+  Richtung unbestimmt, aber es verletzt eine absolute Regel (R13). Der naheliegende Fix
+  — nur nach `period_end` partitionieren — würde Quartal und Geschäftsjahr mit gleichem
+  Periodenende vermischen; es braucht eine Bucket-Bildung nach Periodenlänge. Das ist
+  eine überlegte Änderung, keine Abendreparatur.
+* **`ticker_history` wird von Stufe B nicht benutzt.** Das Kriterium sagt „das Universum
+  aus Phase 7"; tatsächlich kommt es weiter aus `securities`. Zahlenmäßig identisch (die
+  kursbasierten Zeilen sind dieselben Überlebenden), aber das Kriterium ist damit **nicht
+  erfüllt** und wird hier so festgehalten statt abgehakt.
+* **Der Cache-Schlüssel erkennt Korrekturen an Ort und Stelle nicht** (Quelle, jüngster
+  Balken, Zeilenzahlen ändern sich dabei nicht). Dokumentiert statt behauptet;
+  `CACHE_VERSION` ist jetzt `v2` und die Regel zum Hochzählen steht im Modul.
+* **R19 für Stufe B** ist als Hinweis umgesetzt (Delistings, nicht bepreisbare
+  Positionen), aber ohne die Zählung „wie viele Titel verließen das Universum".
+
+**Wirkung auf die Zahlen, gleiche Bedingungen vorher/nachher:**
+
+| Variante | vorher | nachher | ggü. Index vorher → nachher |
+|---|---|---|---|
+| KGV ≤ 5 & KBV ≤ 2, quartalsweise | 4,17 % | **3,53 %** | −10,05 → **−10,68** |
+| dasselbe, jährlich | 11,95 % | **11,69 %** | −2,27 → **−2,53** |
+| KBV ≤ 1, 20 Titel, jährlich | 15,77 % | **15,22 %** | +1,55 → **+1,01** |
+
 ## Phase 7 — Ergebnis vom 24.09.2026: die Messung fällt aus, und das ist das Ergebnis
 
 **Abgeschlossen, mit dem Ausgang, den der Prüfer vorhergesagt hatte.** `ticker_history`
@@ -621,7 +683,7 @@ Aufbau auf einer Kopie hätte gegen die alte Tabelle geschrieben und wäre gesch
       - Zählung und Anzeige nach R19
       **Covers:** R18, R19
 
-- [ ] **Phase 8: Point-in-Time-Backtest (Fundamentaldaten)**
+- [ ] **Phase 8: Point-in-Time-Backtest (Fundamentaldaten)** — *Gegenprüfung 25.09.2026: durchgefallen, drei schwere Befunde behoben, drei offen; siehe oben*
       **Done when:** quartalsweise Umschichtung, die je Stichtag **das Universum aus Phase 7** und ausschließlich die bis dahin gemeldeten Bilanzdaten benutzt; **drei Tests sind grün:** ein Datensatz mit späterem Meldedatum gelangt nicht in die Auswahl; eine nachträgliche Korrektur verdrängt die ursprüngliche Fassung nicht; ein Titel, der zum Stichtag noch nicht notiert war oder schon verschwunden ist, erscheint nicht in der Auswahl. Der Test nach R16 belegt die Ausführung zur Folgetags-Eröffnung. Das Etikett nennt, welche Verzerrungen korrigiert sind und welche nicht — mit der in Phase 7 gemessenen Quote. Ein voller Durchlauf über den gesamten belastbaren Zeitraum braucht **höchstens 5 Minuten**; wird das überschritten, werden Zwischenergebnisse je Stichtag zwischengespeichert, bis es eingehalten ist.
       **Steps:**
       - Stichtagsabfrage über Meldedatum, Auswahlregel „früheste Fassung" (R13)
@@ -631,7 +693,7 @@ Aufbau auf einer Kopie hätte gegen die alte Tabelle geschrieben und wäre gesch
       **Covers:** R13, R16
       **Wichtige Phase:** Ergebnis von einem unbeteiligten Prüfer gegen die Abnahmekriterien von Phase 7 **und** 8 zusammen gegenlesen lassen — hier entscheidet sich, ob die Zahlen etwas wert sind. Befunde abarbeiten, bis er ohne Einwand durchgeht.
 
-- [ ] **Phase 9: Empfindlichkeit, Testzähler, zurückgehaltener Zeitraum**
+- [x] **Phase 9: Empfindlichkeit, Testzähler, zurückgehaltener Zeitraum**
       **Done when:** der Bericht zeigt Startdatum ±6 Monate und das Ergebnis ohne den stärksten Einzeltitel neben dem Hauptergebnis; der Zähler „diese Spezifikation wurde N-mal auf diesen Daten getestet" steht am Ergebnis und erhöht sich nachweislich; die letzten 2 Jahre sind standardmäßig zurückgehalten und erscheinen erst nach ausdrücklicher Freischaltung, die im Lauf vermerkt wird.
       **Steps:**
       - Mehrfachläufe mit verschobenem Start und ohne den stärksten Titel
