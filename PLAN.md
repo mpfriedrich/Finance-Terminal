@@ -263,7 +263,7 @@ Grundhaltung: **laut scheitern**. Eine klare Fehlermeldung ist besser als eine G
 
 ## Open Items (nichts blockiert den Baubeginn)
 
-* **Handelsfrequenz als eigene Grenze (24.09.2026).** Die Liquiditätsgrenze prüft die Höhe
+* ~~**Handelsfrequenz als eigene Grenze (24.09.2026).**~~ — **ist umgesetzt** (`PortfolioSpec.min_trading_days_60 = 40`, gezählt in `prices.session_coverage`, als eigener Ausschlussgrund gezählt und angezeigt); der Eintrag hier war nur nicht nachgezogen (festgestellt 24.09.2026, Cloud-Sitzung). Die Liquiditätsgrenze prüft die Höhe
   des Umsatzes, nicht seine Regelmäßigkeit. Vorschlag: eine Mindestzahl an Handelstagen im
   Fenster verlangen (etwa 40 der letzten 60 Sitzungen) und die Ausgeschlossenen, wie alle
   anderen Grenzen, getrennt zählen und anzeigen. Ändert die Ergebnisse bestehender
