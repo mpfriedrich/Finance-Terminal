@@ -88,10 +88,14 @@ def sf1_frame() -> pd.DataFrame:
                 "liabilitiesc": 90e6, "sharesbas": shares, "sharefactor": factor,
             }
             rows.append({**base, "dimension": "ARQ", "revenue": rev, "netinc": ni,
-                         "ncfo": ocf, "capex": capex})
+                         "ncfo": ocf, "capex": capex, "opinc": 1.5 * ni,
+                         "depamor": 0.1 * rev, "intexp": 0.02 * rev,
+                         "taxexp": 0.25 * 1.33 * ni, "ebt": 1.33 * ni, "gp": 0.4 * rev})
             if end.month == 12:
                 year = {**base, "dimension": "ARY", "revenue": 4 * rev, "netinc": 4 * ni,
-                        "ncfo": 4 * ocf, "capex": 4 * capex}
+                        "ncfo": 4 * ocf, "capex": 4 * capex, "opinc": 6 * ni,
+                        "depamor": 0.4 * rev, "intexp": 0.08 * rev,
+                        "taxexp": 1.33 * ni, "ebt": 5.32 * ni, "gp": 1.6 * rev}
                 rows.append(year)
                 if ticker == "AAA":
                     rows.append({**year, "dimension": "MRY", "equity": RESTATED_AAA_EQUITY,

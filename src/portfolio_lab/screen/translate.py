@@ -37,7 +37,13 @@ approximation the person did not ask for is worse than an honest gap.
 "price to profit"/"p/e"/"earnings" = price_to_earnings; "p/s"/"sales" = price_to_sales; \
 "debt to equity"/"d/e"/"gearing"/"leverage" = debt_to_equity; \
 "net margin"/"profit margin" = net_margin (a FRACTION: 10% is 0.10, not 10); \
-"roe" = return_on_equity; "intrinsic value"/"fair value"/"dcf" = price_to_intrinsic \
+"roe" = return_on_equity; "roic"/"return on capital" = return_on_invested_capital; \
+"roa" = return_on_assets; "ev/ebitda"/"ebitda multiple" = ev_to_ebitda; "ev/ebit" = \
+ev_to_ebit; "ev/sales"/"ev/revenue" = ev_to_sales; "net debt/ebitda"/"leverage \
+multiple" = net_debt_to_ebitda; "interest cover" = interest_coverage; "growth"/"revenue \
+growth"/"sales growth" = revenue_growth (year on year, a FRACTION); "operating margin"/ \
+"ebit margin" = operating_margin; "gross margin" = gross_margin; "ebitda margin" = \
+ebitda_margin; "intrinsic value"/"fair value"/"dcf" = price_to_intrinsic \
 (below 1 means the market pays less than the model's value). \
 "2bn"/"2b" = 2000000000. "max 2/1" or "max 2:1" means a ratio of at most 2.
 - "price to cash" is ambiguous and must NOT be guessed. price_to_cash compares the \

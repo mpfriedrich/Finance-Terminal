@@ -19,7 +19,9 @@ import datetime as dt
 import duckdb
 import pandas as pd
 
-DURATION_METRICS = ("revenue", "net_income", "operating_cash_flow", "capex")
+DURATION_METRICS = ("revenue", "net_income", "operating_cash_flow", "capex",
+                    "operating_income", "depreciation_amortization", "interest_expense",
+                    "income_tax", "pretax_income", "gross_profit")
 # Balance-sheet items: a value at one moment, not over a span. Share counts are handled
 # separately by share_counts(), which has to cope with both shapes and with filers who
 # tag counts in thousands.
@@ -216,7 +218,8 @@ def instant_values(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFram
     return df
 
 
-def ttm_values(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFrame:
+def ttm_values(con: duckdb.DuckDBPyConnection, asof: dt.date,
+               metrics: tuple[str, ...] = DURATION_METRICS) -> pd.DataFrame:
     """Trailing-twelve-months figures for span metrics.
 
     Method, in order of preference, recorded per row in `method`:
@@ -228,7 +231,7 @@ def ttm_values(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFrame:
     df = _visible(con, asof)
     if df.empty:
         return df
-    df = df[df.metric.isin(DURATION_METRICS) & df.period_start.notna()].copy()
+    df = df[df.metric.isin(metrics) & df.period_start.notna()].copy()
     if df.empty:
         return df
 
@@ -286,7 +289,8 @@ def ttm_values(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFrame:
 FOREIGN_FORMS = ("20-F", "40-F")
 
 # Amounts that carry a currency and are converted to USD; share counts and ages do not.
-MONEY_FIELDS = tuple(INSTANT_METRICS) + tuple(f"{m}_ttm" for m in DURATION_METRICS)
+MONEY_FIELDS = (tuple(INSTANT_METRICS) + tuple(f"{m}_ttm" for m in DURATION_METRICS)
+                + ("revenue_ttm_prior",))
 
 # A rate older than this on the screen date is not today's rate.
 FX_MAX_AGE_DAYS = 10
@@ -392,6 +396,11 @@ def fundamentals_wide(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataF
     out = wide.join(ages)
     if not methods.empty:
         out = out.join(methods)
+    # Revenue a year earlier, AS IT WAS KNOWN a year earlier, for growth. Both years are
+    # converted at the same rate below, so growth is the company's, not the currency's.
+    prior = ttm_values(con, asof - dt.timedelta(days=365), metrics=("revenue",))
+    if not prior.empty:
+        out = out.join(prior.set_index("cik")["value"].rename("revenue_ttm_prior"))
     out = to_usd(out.reset_index(), con, asof)
     # Which filers are foreign private issuers, by the form of their latest filing:
     # their US listing may be an ADR, and listing.apply needs to know.

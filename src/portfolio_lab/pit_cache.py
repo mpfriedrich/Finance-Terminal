@@ -40,7 +40,8 @@ import pandas as pd
 # v5: the first filing of a period speaks for it across tags, not per tag.
 # v6: first filing is found before the age limit is applied.
 # v7: foreign filers — amounts converted to USD, shares on the listed-share basis.
-CACHE_VERSION = "v7"
+# v8: EBIT, D&A, interest, tax, gross profit and prior-year revenue in the frame.
+CACHE_VERSION = "v8"
 
 
 def _build_id(fingerprint: str) -> str:

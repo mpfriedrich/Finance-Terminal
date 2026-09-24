@@ -136,6 +136,49 @@ def _unit_kind(unit: str) -> str | None:
     return None
 
 
+# Income-statement lines for enterprise-value multiples, returns on capital and the cost
+# of debt (added 2026-09-24): EBIT and D&A make EBITDA; tax and pre-tax income give the
+# effective tax rate; interest expense gives the cost of debt. Same caveat as above —
+# chosen by concept, measured by measure_coverage(), not assumed complete.
+_INCOME_LINES: dict[str, list[tuple[str, str]]] = {
+    "operating_income": [
+        ("us-gaap", "OperatingIncomeLoss"),
+        ("ifrs-full", "ProfitLossFromOperatingActivities"),
+    ],
+    "depreciation_amortization": [
+        ("us-gaap", "DepreciationDepletionAndAmortization"),
+        ("us-gaap", "DepreciationAndAmortization"),
+        ("us-gaap", "DepreciationAmortizationAndAccretionNet"),
+        ("ifrs-full", "DepreciationAndAmortisationExpense"),
+        ("ifrs-full", "DepreciationAmortisationAndImpairmentLossReversalOfImpairmentLoss"
+                      "RecognisedInProfitOrLoss"),
+    ],
+    "interest_expense": [
+        ("us-gaap", "InterestExpense"),
+        ("us-gaap", "InterestExpenseNonoperating"),
+        ("us-gaap", "InterestExpenseDebt"),
+        ("ifrs-full", "FinanceCosts"),
+        ("ifrs-full", "InterestExpense"),
+    ],
+    "income_tax": [
+        ("us-gaap", "IncomeTaxExpenseBenefit"),
+        ("ifrs-full", "IncomeTaxExpenseContinuingOperations"),
+    ],
+    "pretax_income": [
+        ("us-gaap", "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItems"
+                    "NoncontrollingInterest"),
+        ("us-gaap", "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterest"
+                    "AndIncomeLossFromEquityMethodInvestments"),
+        ("ifrs-full", "ProfitLossBeforeTax"),
+    ],
+    "gross_profit": [
+        ("us-gaap", "GrossProfit"),
+        ("ifrs-full", "GrossProfit"),
+    ],
+}
+for _metric, _candidates in _INCOME_LINES.items():
+    TAG_MAP[_metric] = [(tax, tag, MONEY) for tax, tag in _candidates]
+
 # Reverse index so one pass over a filer's facts can classify every tag it meets.
 _TAG_LOOKUP: dict[tuple[str, str, str], tuple[str, int]] = {
     (tax, tag, "money" if unit == MONEY else unit): (metric, rank)
@@ -146,7 +189,9 @@ _TAG_LOOKUP: dict[tuple[str, str, str], tuple[str, int]] = {
 # Metrics reported over a span (income statement, cash flow) vs at an instant (balance
 # sheet, share counts). Spans get summed to trailing-twelve-months at query time, which is
 # why period_start has to survive ingestion.
-DURATION_METRICS = {"revenue", "net_income", "operating_cash_flow", "capex"}
+DURATION_METRICS = {"revenue", "net_income", "operating_cash_flow", "capex",
+                    "operating_income", "depreciation_amortization", "interest_expense",
+                    "income_tax", "pretax_income", "gross_profit"}
 
 
 def _parse_date(value: str | None) -> dt.date | None:
