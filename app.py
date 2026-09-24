@@ -72,7 +72,7 @@ from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
-from portfolio_lab import alerts, comps, export, fred, fts, insiders, paper, risk, world
+from portfolio_lab import alerts, comps, deals, export, fred, fts, insiders, paper, risk, world
 from portfolio_lab import wacc as W
 from portfolio_lab import summary as ai_summary
 
@@ -482,9 +482,9 @@ def _paper_section(origin: str, key: str, opener, default_name: str,
 
 
 (tab_screen, tab_monitor, tab_research, tab_options, tab_strategy, tab_lab, tab_books,
- tab_macro, tab_commodities, tab_calendar, tab_news) = st.tabs(
-    ["SCREEN", "MONITOR", "RESEARCH", "OPTIONS", "STRATEGY", "LAB", "BOOKS", "MACRO",
-     "COMMODITIES", "CALENDAR", "NEWS"]
+ tab_deals, tab_macro, tab_commodities, tab_calendar, tab_news) = st.tabs(
+    ["SCREEN", "MONITOR", "RESEARCH", "OPTIONS", "STRATEGY", "LAB", "BOOKS", "DEALS",
+     "MACRO", "COMMODITIES", "CALENDAR", "NEWS"]
 )
 
 with tab_screen:
@@ -2846,6 +2846,143 @@ with tab_books:
                         "Close this book", key=f"close_{b['id']}"):
                     paper.close_book(store.con, b["id"])
                     st.rerun()
+
+
+with tab_deals:
+    st.markdown("#### Precedent transactions — what acquirers paid")
+    st.caption(
+        "Enter the deal terms from the press release; every multiple is computed from "
+        "the target's SEC filings as they stood on the announcement date, so no figure "
+        "published after the deal enters it. A delisted target can be given by CIK."
+    )
+    with st.expander("Add a deal", expanded=deals.listing(store.con).empty):
+        d1, d2, d3 = st.columns(3)
+        d_target = d1.text_input("Target (ticker or CIK)", key="deal_target")
+        d_acq = d2.text_input("Acquirer", key="deal_acquirer")
+        d_date = d3.date_input("Announced", value=asof or dt.date.today(),
+                               max_value=dt.date.today(), key="deal_date")
+        d4, d5, d6 = st.columns(3)
+        d_offer = d4.number_input("Offer per share ($, 0 = not given)", min_value=0.0,
+                                  value=0.0, step=0.5, key="deal_offer")
+        d_equity = d5.number_input("Equity value ($m, 0 = offer × shares)", min_value=0.0,
+                                   value=0.0, step=100.0, key="deal_equity")
+        d_unaff = d6.number_input("Unaffected price ($, 0 = last close before)",
+                                  min_value=0.0, value=0.0, step=0.5, key="deal_unaff")
+        d_cons = st.selectbox("Consideration", ["cash", "stock", "cash and stock", "other"],
+                              key="deal_cons")
+        d_note = st.text_input("Note (source, conditions)", key="deal_note")
+        if st.button("Add deal", key="deal_add"):
+            try:
+                deals.add(store.con, d_target, d_date, d_acq,
+                          equity_value=d_equity * 1e6 or None,
+                          offer_price=d_offer or None,
+                          unaffected_price=d_unaff or None,
+                          consideration=d_cons, note=d_note)
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+    deal_rows, deal_stats = deals.table(src.con, store.con)
+    if deal_rows.empty:
+        st.info("No deals yet.")
+    else:
+        def _x(v):
+            return "—" if v is None or pd.isna(v) else f"{v:,.1f}x"
+
+        mult_labels = {"ev_to_revenue": "EV/Sales", "ev_to_ebitda": "EV/EBITDA",
+                       "ev_to_ebit": "EV/EBIT", "price_to_earnings": "P/E",
+                       "price_to_book": "P/B", "premium": "premium"}
+        for col in list(mult_labels) + ["equity_value", "enterprise_value", "error"]:
+            if col not in deal_rows.columns:
+                deal_rows[col] = None
+        shown_deals = pd.DataFrame({
+            "target": deal_rows["target"].astype(str),
+            "acquirer": deal_rows["acquirer"].astype(str),
+            "announced": deal_rows["announced"].astype(str),
+            "equity": deal_rows["equity_value"].map(
+                lambda v: "—" if v is None or pd.isna(v) else ui.money(v)),
+            "EV": deal_rows["enterprise_value"].map(
+                lambda v: "—" if v is None or pd.isna(v) else ui.money(v)),
+            **{mult_labels[c]: deal_rows[c].map(_x) for c in mult_labels if c != "premium"},
+            "premium": deal_rows["premium"].map(
+                lambda v: "—" if v is None or pd.isna(v) else ui.pct(v, 0)),
+        })
+        if not deal_stats.empty:
+            summary_rows = pd.DataFrame({
+                "target": ["median", "mean", "high", "low"],
+                "acquirer": [""] * 4, "announced": [""] * 4, "equity": [""] * 4,
+                "EV": [f"n = {int(deal_stats.at['n', 'ev_to_ebitda'])}"
+                       if "ev_to_ebitda" in deal_stats.columns else ""] + [""] * 3,
+                **{mult_labels[c]: [
+                    (ui.pct(deal_stats.at[k, c], 0) if c == "premium"
+                     and not pd.isna(deal_stats.at[k, c]) else
+                     "—" if pd.isna(deal_stats.at[k, c]) else _x(deal_stats.at[k, c]))
+                    for k in ("median", "mean", "high", "low")]
+                   for c in mult_labels if c in deal_stats.columns},
+            })
+            shown_deals = pd.concat([shown_deals, summary_rows], ignore_index=True)
+        st.markdown(ui.grid(shown_deals, numeric={"equity", "EV", *mult_labels.values()},
+                            signed={"premium"}, ticker_col="target"),
+                    unsafe_allow_html=True)
+        for r in deal_rows.itertuples():
+            if isinstance(r.error, str) and r.error:
+                st.caption(f"{r.target} ({r.announced}): {r.error}")
+        st.caption(
+            "EV = equity value + the target's net debt (debt − cash) on file at the "
+            "announcement. TTM figures are the four quarters filed by then. Premium is "
+            "the offer over the unaffected price — the last close before the "
+            "announcement unless one was entered; a leak before that date hides part "
+            "of it."
+        )
+
+        subj_opts = sorted(_frame(asof).ticker.astype(str).unique()) if asof else []
+        subject = st.selectbox("Apply the precedent medians to", [""] + subj_opts,
+                               key="deal_subject")
+        if subject:
+            enriched_d = derive_metrics(_frame(asof))
+            srow = enriched_d[enriched_d.ticker.astype(str) == subject]
+            implied_d = (deals.apply_to(deal_stats, srow.iloc[0]) if len(srow)
+                         else pd.DataFrame())
+            if implied_d.empty:
+                st.info("None of the median multiples can be applied — the company's "
+                        "figures are missing or not positive.")
+            else:
+                st.markdown(ui.grid(pd.DataFrame({
+                    "multiple": implied_d["multiple"].map(mult_labels),
+                    "precedent median": implied_d["precedent median"].map(_x),
+                    "implied equity": implied_d["implied equity value"].map(ui.money),
+                    "per share": implied_d["implied price"].map(ui.num),
+                    "vs price": implied_d["vs price"].map(lambda v: ui.pct(v, 0)),
+                }), numeric={"precedent median", "implied equity", "per share"},
+                    signed={"vs price"}, ticker_col="multiple"), unsafe_allow_html=True)
+                st.caption(
+                    "A takeover value: it includes the control premium buyers paid, so "
+                    "it sits above what the trading comps imply for the same company.")
+
+        st.download_button(
+            "Export deals to Excel",
+            data=export.workbook(
+                {"Deals": deal_rows.drop(columns=["id"], errors="ignore"),
+                 "Statistics": deal_stats.reset_index(names="statistic")
+                 if not deal_stats.empty else pd.DataFrame()},
+                title="Precedent transactions",
+                source="Deal terms entered by hand; target figures from SEC filings "
+                       "as of each announcement",
+                as_of=asof),
+            file_name=export.filename("precedent_deals", asof),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="export_deals")
+
+        with st.expander("Remove a deal"):
+            gone = st.selectbox(
+                "Deal", deal_rows["id"].tolist(), key="deal_remove_pick",
+                format_func=lambda i: " · ".join(
+                    str(x) for x in deal_rows.loc[deal_rows.id == i,
+                                                  ["target", "acquirer", "announced"]]
+                    .iloc[0]))
+            if st.button("Remove", key="deal_remove"):
+                deals.remove(store.con, gone)
+                st.rerun()
 
 
 with tab_macro:

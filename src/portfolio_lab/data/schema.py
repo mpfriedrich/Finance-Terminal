@@ -186,6 +186,22 @@ MARKET_MIGRATIONS: list[str] = [
 ]
 
 USER_MIGRATIONS: list[str] = [
+    # 022 — precedent transactions entered by hand (deals.py); multiples are computed
+    # from the target's filings as of the announcement date, not stored.
+    """
+    CREATE TABLE IF NOT EXISTS deals (
+        id                VARCHAR PRIMARY KEY,
+        target            VARCHAR NOT NULL,
+        acquirer          VARCHAR,
+        announced         DATE    NOT NULL,
+        equity_value      DOUBLE,
+        offer_price       DOUBLE,
+        unaffected_price  DOUBLE,
+        consideration     VARCHAR,
+        note              VARCHAR,
+        created_at        TIMESTAMP NOT NULL
+    );
+    """,
     # 021 — alert rules (alerts.py); what fired is kept by the checker in a JSON file.
     """
     CREATE TABLE IF NOT EXISTS alerts (
