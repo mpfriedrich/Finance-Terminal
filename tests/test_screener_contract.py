@@ -34,10 +34,21 @@ def _fixture_case():
 
 
 def _live_case():
+    """The live source, or a skip when a build currently holds the store.
+
+    DuckDB gives a writer exclusive access, so a price download in another terminal locks
+    this out. That is a busy machine, not a broken seam — erroring here would train
+    everyone to ignore a red suite while a build runs.
+    """
+    import duckdb
+
     from portfolio_lab.data.free import FreeSource
     from portfolio_lab.data.schema import open_market
 
-    con = open_market(MARKET_DB, read_only=True)
+    try:
+        con = open_market(MARKET_DB, read_only=True)
+    except (duckdb.IOException, RuntimeError) as exc:
+        pytest.skip(f"market store is locked by another process: {exc}")
     src = FreeSource(con)
     return src, src.latest_equity_date()
 

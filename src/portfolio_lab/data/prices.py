@@ -165,3 +165,50 @@ def median_dollar_volume(
         """,
         [asof, window],
     ).fetch_df()
+
+
+def suspicious_series(
+    con: duckdb.DuckDBPyConnection,
+    jump: float = 0.80,
+    gap_days: int = 90,
+) -> pd.DataFrame:
+    """Tickers whose history looks like two different companies glued together.
+
+    A symbol is reassigned after a company disappears, and a free price source will
+    happily serve the old company's bars and the new one's under the same name. Splicing
+    them produces a security that never existed, usually with a spectacular return across
+    the join — which is exactly the kind of name a cheapness screen then falls in love
+    with.
+
+    Two signatures, both computed on the SPLIT-ADJUSTED close so that a 10-for-1 split
+    (a −90% move in the raw close) is not mistaken for one:
+
+      * a single-day move larger than `jump`
+      * a gap of more than `gap_days` calendar days between consecutive bars
+
+    Neither proves recycling on its own — a biotech can genuinely fall 85% in a day, and
+    a halt can last months. This is a list to look at, not a list to delete.
+    """
+    return con.execute(
+        """
+        WITH steps AS (
+            SELECT ticker, date, close_adj,
+                   LAG(close_adj) OVER (PARTITION BY ticker ORDER BY date) AS prev,
+                   date_diff('day', LAG(date) OVER (PARTITION BY ticker ORDER BY date),
+                             date) AS gap
+            FROM prices
+            WHERE close_adj IS NOT NULL AND close_adj > 0
+        )
+        SELECT ticker,
+               COUNT(*) FILTER (WHERE prev IS NOT NULL
+                                AND abs(close_adj / prev - 1) > ?) AS big_moves,
+               COUNT(*) FILTER (WHERE gap > ?) AS long_gaps,
+               MAX(abs(close_adj / prev - 1)) FILTER (WHERE prev IS NOT NULL) AS worst_move,
+               MAX(gap) AS longest_gap
+        FROM steps
+        GROUP BY ticker
+        HAVING big_moves > 0 OR long_gaps > 0
+        ORDER BY big_moves DESC, long_gaps DESC
+        """,
+        [jump, gap_days],
+    ).fetch_df()

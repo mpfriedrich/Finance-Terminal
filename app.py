@@ -50,6 +50,7 @@ from dataclasses import replace
 from portfolio_lab.screen.spec import Filter, spec_to_json
 from portfolio_lab.screen.valuation import Assumptions
 from portfolio_lab import backtest as bktest
+from portfolio_lab import coverage as cov
 from portfolio_lab import briefing as bfg
 from portfolio_lab import business as bz
 from portfolio_lab import macro as mc
@@ -363,6 +364,13 @@ with tab_screen:
         if hi > 0:
             effective = effective.with_filter(Filter("market_cap", "<=", hi * 1e9))
         res = run_screen(_frame(asof), effective, assumptions)
+
+        # Criterion 1(e): coverage was measured in phase 1 and written to a table. A
+        # measurement nobody reads protects nobody, so the filters that depend on a
+        # thinly reported field say so here.
+        thin = cov.thin_for([f.metric for f in effective.filters], src.con)
+        if not thin.empty and not spec.is_hand_picked:
+            st.warning(cov.sentence(thin))
 
         st.markdown("#### Holdings" if spec.is_hand_picked else "#### Candidates")
         # Filled after the table, because the HELD count comes from what is ticked there.

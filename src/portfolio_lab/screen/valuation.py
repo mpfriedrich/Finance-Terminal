@@ -98,7 +98,13 @@ def graham_number(eps: pd.Series, book_value_per_share: pd.Series) -> pd.Series:
     e = pd.to_numeric(eps, errors="coerce")
     b = pd.to_numeric(book_value_per_share, errors="coerce")
     ok = (e > 0) & (b > 0)
-    return pd.Series(np.where(ok, np.sqrt(22.5 * e * b), np.nan), index=e.index)
+    # The product is masked BEFORE the root, not after. np.where evaluates both branches,
+    # so passing the raw product took the square root of every loss-making company's
+    # negative number first and discarded it afterwards — harmless in the result, but it
+    # printed a RuntimeWarning on every screen and every test run, which teaches everyone
+    # to ignore warnings.
+    product = (22.5 * e * b).where(ok)
+    return pd.Series(np.sqrt(product), index=e.index)
 
 
 def add_valuation(frame: pd.DataFrame, a: Assumptions = Assumptions()) -> pd.DataFrame:

@@ -135,7 +135,10 @@ def test_the_stored_index_really_is_a_total_return_series():
 
     if not MARKET_DB.exists():
         pytest.skip("no local market store")
-    con = open_market(MARKET_DB, read_only=True)
+    try:
+        con = open_market(MARKET_DB, read_only=True)
+    except (duckdb.IOException, RuntimeError) as exc:
+        pytest.skip(f"market store is locked by another process: {exc}")
     start, end = dt.date(2015, 9, 30), dt.date(2025, 9, 30)
 
     def cagr(symbol: str, column: str) -> float | None:
