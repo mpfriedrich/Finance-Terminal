@@ -14,7 +14,7 @@ import time
 
 from portfolio_lab.config import MARKET_DB
 from portfolio_lab.data.schema import finish_rebuild, open_market_for_rebuild
-from portfolio_lab import world
+from portfolio_lab import fred, world
 from portfolio_lab.data import history, prices as px, universe
 
 FULL_WINDOW_DAYS = 460
@@ -63,6 +63,14 @@ extra = sorted({r[0] for r in con.execute(
     "OR ticker IN (SELECT UNNEST(?))", [world.all_symbols()]).fetchall()})
 if extra:
     px.fetch_into_store(con, extra, start, end)
+# Macro series (scripts/build_fred.py), refreshed only if they were stored once. A FRED
+# outage must not fail the price build, so each series is tried on its own.
+if con.execute("SELECT COUNT(*) FROM macro_series").fetchone()[0]:
+    for sid in fred.SERIES:
+        try:
+            fred.store(con, fred.download(sid))
+        except Exception:                                            # noqa: BLE001
+            print(f"  FRED {sid}: not refreshed", flush=True)
 universe.observed_ranges(con)
 # ticker_history's price windows are what the universe is read from; keep them current.
 history.refresh_price_windows(con)

@@ -72,7 +72,7 @@ from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
-from portfolio_lab import comps, export, paper, world
+from portfolio_lab import comps, export, fred, paper, world
 from portfolio_lab import wacc as W
 from portfolio_lab import summary as ai_summary
 
@@ -2683,6 +2683,55 @@ with tab_books:
 
 
 with tab_macro:
+    st.markdown("#### The economy")
+    board = fred.dashboard(src.con)
+    if board["latest"].notna().sum() == 0:
+        st.info("No macro series stored yet. Run once: `uv run python scripts/build_fred.py` "
+                "— FRED needs no key, and build_prices.py keeps the series current.")
+    else:
+        def _reading(v, unit):
+            if v is None or pd.isna(v):
+                return "—"
+            if unit == "%":
+                return f"{v:.1f}%"
+            if unit == "k jobs":
+                return f"{v:+,.0f}k"
+            return f"{v:,.1f} {unit}" if unit not in ("claims",) else f"{v:,.0f}"
+
+        mcols = st.columns(2)
+        for i, (group, g) in enumerate(board.groupby("group", sort=False)):
+            with mcols[i % 2]:
+                st.markdown(f"**{group}**")
+                st.markdown(ui.grid(pd.DataFrame({
+                    "series": g["series"],
+                    "latest": [_reading(v, u) for v, u in zip(g["latest"], g["unit"])],
+                    "previous": [_reading(v, u) for v, u in zip(g["previous"], g["unit"])],
+                    "period": [pd.Timestamp(p).strftime("%Y-%m")
+                               if p is not None and not pd.isna(p) else "—"
+                               for p in g["period"]],
+                }), numeric={"latest", "previous"}, ticker_col="series"),
+                    unsafe_allow_html=True)
+        st.caption(
+            "From FRED (St. Louis Fed). Inflation, prices, output and wages as the change "
+            "on a year earlier; GDP as the annualised change on the previous quarter; "
+            "payrolls as the monthly change. `period` is the month or quarter the figure "
+            "describes — it is published weeks later. Consensus forecasts and surprises "
+            "are a paid dataset and are not shown.")
+        m1, m2 = st.columns([3, 1])
+        macro_pick = m1.multiselect(
+            "Series", options=list(fred.SERIES),
+            format_func=lambda sid: fred.SERIES[sid][0],
+            default=["CPIAUCSL", "CPILFESL", "FEDFUNDS"], key="macro_pick",
+            label_visibility="collapsed")
+        macro_since = m2.selectbox("Since", ["5Y", "10Y", "20Y"], key="macro_since",
+                                   label_visibility="collapsed")
+        if macro_pick:
+            start_m = dt.date.today() - dt.timedelta(days=365 * int(macro_since[:-1]))
+            lines = pd.concat([fred.history(src.con, sid, start_m) for sid in macro_pick],
+                              axis=1)
+            if not lines.empty:
+                st.line_chart(lines, height=300)
+
     st.markdown("#### The curve, and what it prices")
     snap = mc.rate_snapshot(src.con)
     if snap.empty:

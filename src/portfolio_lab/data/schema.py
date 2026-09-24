@@ -156,6 +156,15 @@ MARKET_MIGRATIONS: list[str] = [
         detail       VARCHAR
     );
     """,
+    # 020 — macro series from FRED (fred.py): observation date and value, as published.
+    """
+    CREATE TABLE IF NOT EXISTS macro_series (
+        series_id  VARCHAR NOT NULL,
+        date       DATE    NOT NULL,
+        value      DOUBLE,
+        PRIMARY KEY (series_id, date)
+    );
+    """,
     # 017 — ticker_history's key gains the source. Without it a filing window and a
     # price window starting on the same day collided (Nutrien: first 10-K and first bar
     # both 2018-01-02), and every price build after the Phase 7 build failed. DuckDB
