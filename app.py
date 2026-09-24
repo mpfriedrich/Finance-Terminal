@@ -306,7 +306,7 @@ def _lab_price_chart(con, ticker: str, result, rule) -> None:
                open * (close_adj / NULLIF(close, 0)) AS open,
                high * (close_adj / NULLIF(close, 0)) AS high,
                low  * (close_adj / NULLIF(close, 0)) AS low,
-               close_adj AS close
+               close_adj AS close, volume
         FROM prices WHERE ticker = ? AND date BETWEEN ? AND ? ORDER BY date
         """,
         [ticker, result.dates[0], result.dates[-1]],
@@ -319,15 +319,14 @@ def _lab_price_chart(con, ticker: str, result, rule) -> None:
             px_rule["close"], rule.band_days, rule.band_k))
     trades = result.fills[result.fills.ticker == ticker] if not result.fills.empty \
         else result.fills
-    candles = bool(px_rule[["high", "low"]].notna().all(axis=1).mean() > 0.9)
     st.plotly_chart(
-        charts.price_figure(px_rule, ticker, bands=bands, candles=candles,
-                            trades=trades),
+        charts.price_figure(px_rule, ticker, bands=bands, trades=trades),
         use_container_width=True, key=f"lab_px_{ticker}")
     n_buy = int((trades.side == "buy").sum()) if not trades.empty else 0
     st.caption(
         f"▲ {n_buy} buys, ▼ {len(trades) - n_buy} sells, each at the open after the "
-        "close that triggered it. Prices adjusted for splits and dividends."
+        "close that triggered it. Prices adjusted for splits and dividends; volume "
+        "below, with its 15-day average."
     )
 
 
@@ -1279,10 +1278,10 @@ with tab_research:
                         # a short one draws candles.
                         can_candle = rs.has_intraday_range(view)
                         candles = c_b.toggle(
-                            "Candles below", value=can_candle, disabled=not can_candle,
+                            "Candles", value=False, disabled=not can_candle,
                             key=f"candles_{ticker}_{span}",
-                            help="The same days as candles in a panel under the line, "
-                                 "on a shared time axis." if can_candle else
+                            help="Candles instead of the line. Volume stays underneath "
+                                 "either way." if can_candle else
                             "Stored bars carry no high/low for this range.",
                         )
                         bands = c_c.toggle(

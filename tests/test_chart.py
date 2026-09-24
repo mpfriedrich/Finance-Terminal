@@ -5,6 +5,7 @@ filing behind it, so the arithmetic is pinned down here rather than eyeballed.
 """
 import numpy as np
 import pandas as pd
+import pytest
 
 from portfolio_lab import research as rs
 
@@ -73,42 +74,63 @@ def test_a_single_usable_bar_is_not_a_candle_chart():
     assert rs.has_intraday_range(one) is False
 
 
-# --- the two-panel layout -------------------------------------------------------------
+# --- the two-panel layout: price on top, volume below ---------------------------------
 
 def _bars(n=30):
     dates = pd.bdate_range("2026-01-05", periods=n)
     close = np.linspace(10, 12, n)
+    close[5] = 9.0                                        # one down day
     return pd.DataFrame({"date": dates, "open": close - 0.1, "high": close + 0.2,
-                         "low": close - 0.2, "close": close})
+                         "low": close - 0.2, "close": close,
+                         "volume": np.arange(1, n + 1) * 1000.0})
 
 
-def test_candles_sit_under_the_line_on_a_shared_time_axis():
+def test_price_sits_on_top_and_volume_underneath_on_one_time_axis():
     from portfolio_lab import charts
 
-    fig = charts.price_figure(_bars(), "AAA", candles=True)
-    kinds = {t.type: (t.xaxis, t.yaxis) for t in fig.data}
-    assert kinds["scatter"] == ("x", "y"), "the line belongs in the top panel"
-    assert kinds["candlestick"] == ("x2", "y2"), "the candles belong underneath"
+    fig = charts.price_figure(_bars(), "AAA")
+    where = {(t.type, t.name): (t.xaxis, t.yaxis) for t in fig.data}
+    assert where[("scatter", "AAA")] == ("x", "y"), "the price line is the top panel"
+    assert where[("bar", "volume")] == ("x2", "y2"), "volume is the bottom panel"
     assert fig.layout.xaxis.matches == "x2" or fig.layout.xaxis2.matches == "x"
 
 
-def test_without_candles_there_is_one_panel():
+def test_candles_replace_the_line_on_top_and_volume_stays_below():
     from portfolio_lab import charts
 
-    fig = charts.price_figure(_bars(), "AAA", candles=False)
+    fig = charts.price_figure(_bars(), "AAA", candles=True)
+    kinds = {t.type: t.yaxis for t in fig.data}
+    assert kinds["candlestick"] == "y" and kinds["bar"] == "y2"
+    assert not any(t.type == "scatter" and t.name == "AAA" for t in fig.data)
+
+
+def test_volume_bars_take_the_colour_of_the_day_and_carry_their_average():
+    from portfolio_lab import charts, ui
+
+    fig = charts.price_figure(_bars(), "AAA")
+    bars = next(t for t in fig.data if t.type == "bar")
+    assert bars.marker.color[5] == ui.DOWN and bars.marker.color[6] == ui.UP
+    avg = next(t for t in fig.data if t.name.endswith("avg volume"))
+    assert pd.isna(avg.y[13]) and avg.y[14] == pytest.approx(8_000.0)
+
+
+def test_without_volume_there_is_one_panel():
+    from portfolio_lab import charts
+
+    fig = charts.price_figure(_bars().drop(columns="volume"), "AAA")
     assert {t.type for t in fig.data} == {"scatter"}
     assert "xaxis2" not in fig.layout.to_plotly_json()
 
 
-def test_trades_are_marked_on_the_line():
+def test_trades_are_marked_on_the_price():
     from portfolio_lab import charts
 
     bars = _bars()
     trades = pd.DataFrame({"date": [bars.date[3], bars.date[20]],
                            "price": [10.3, 11.4], "side": ["buy", "sell"]})
-    fig = charts.price_figure(bars, "AAA", candles=True, trades=trades)
-    names = [t.name for t in fig.data]
-    assert "buy" in names and "sell" in names
+    fig = charts.price_figure(bars, "AAA", trades=trades)
+    marks = {t.name: t.yaxis for t in fig.data if t.name in ("buy", "sell")}
+    assert marks == {"buy": "y", "sell": "y"}
 
 
 def test_a_store_without_index_series_still_has_the_lookup_columns():
