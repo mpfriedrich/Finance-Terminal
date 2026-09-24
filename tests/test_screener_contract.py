@@ -53,9 +53,19 @@ def _live_case():
     return src, src.latest_equity_date()
 
 
-@pytest.fixture(scope="module", params=["fixture", "free"])
-def frame_and_spec(request):
-    """(source name, screening frame). Built once per source: the live one costs seconds."""
+@pytest.fixture(scope="module", params=["fixture", "free", "paid"])
+def frame_and_spec(request, tmp_path_factory):
+    """(source name, screening frame). Built once per source: the live one costs seconds.
+
+    "paid" is the Sharadar translation (Phase 10) over hand-made files in that layout,
+    since no subscription exists; the criterion is that this series runs unchanged
+    against it.
+    """
+    if request.param == "paid":
+        from tests.paid_fixture import END, build_store
+
+        return request.param, build_store(
+            tmp_path_factory.mktemp("sharadar")).screening_frame(END)
     if request.param == "free":
         if not MARKET_DB.exists():
             pytest.skip("no local market store — the live half of the seam cannot run")

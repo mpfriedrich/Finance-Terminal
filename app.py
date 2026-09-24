@@ -38,10 +38,11 @@ if not st.runtime.exists():
     )
 
 from portfolio_lab import ui
-from portfolio_lab.config import CACHE_DIR, MARKET_DB, USER_DB, CostModel, Settings, secret
+from portfolio_lab.config import CACHE_DIR, USER_DB, CostModel, Settings, secret
 from portfolio_lab.data import history as hist, industry
-from portfolio_lab.data.free import FreeSource
-from portfolio_lab.data.schema import open_market, open_user
+from portfolio_lab.data.paid import MissingKey
+from portfolio_lab.data.schema import open_user
+from portfolio_lab.data.sources import SourceNotReady, open_selected
 from portfolio_lab.screen import translate as T
 from portfolio_lab.screen.engine import derive_metrics, merge_selection, run_screen
 from portfolio_lab.screen.valuation import add_valuation
@@ -80,7 +81,10 @@ st.markdown(ui.CSS, unsafe_allow_html=True)
 def _market():
     # Read-only: the app never writes market data, and holding the write lock would stop
     # every build script from running while the app is open.
-    return FreeSource(open_market(MARKET_DB, read_only=True)), MARKET_DB.stat().st_ino
+    # Which store is opened is a setting (Phase 10): the free one by default, the paid
+    # Sharadar store with PORTFOLIO_LAB_SOURCE=paid.
+    source, path = open_selected(Settings(), read_only=True)
+    return source, path, path.stat().st_ino
 
 
 def _market_source():
@@ -92,9 +96,9 @@ def _market_source():
     prices indefinitely and give no sign that anything had changed. Comparing the inode
     is how you notice a file was replaced rather than edited.
     """
-    source, opened_inode = _market()
+    source, path, opened_inode = _market()
     try:
-        if MARKET_DB.stat().st_ino != opened_inode:
+        if path.stat().st_ino != opened_inode:
             _market.clear()
             _frame.clear()
             st.rerun()
@@ -140,7 +144,13 @@ CAP_BANDS = {
     "Mega (> $200bn)": (200.0, 0.0),
 }
 
-src, store, settings = _market_source(), _store(), Settings()
+try:
+    src = _market_source()
+except (MissingKey, SourceNotReady) as exc:
+    # A chosen source that cannot open yet is a setup step, not a crash: say which one.
+    st.error(str(exc))
+    st.stop()
+store, settings = _store(), Settings()
 asof = src.latest_equity_date()
 age = (dt.date.today() - asof).days if asof else None
 counts = src.snapshot().row_counts

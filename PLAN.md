@@ -722,7 +722,8 @@ Aufbau auf einer Kopie hätte gegen die alte Tabelle geschrieben und wäre gesch
       - Ein Satz zur Überanpassung im Bericht
       **Covers:** R20, R21
 
-- [ ] **Phase 10: Umschalter auf die bezahlte Datenquelle**
+- [x] **Phase 10: Umschalter auf die bezahlte Datenquelle** — *gebaut am 24.09.2026 (Cloud-Sitzung), gegen den echten Dienst ungeprüft*
+      **Ergebnis:** `PORTFOLIO_LAB_SOURCE=free|paid` in `.env.local` wählt die Quelle (`Settings.data_source`, `data/sources.py`). `data/paid.py` übersetzt Sharadar TICKERS/SF1/SEP in **dasselbe Schema** in eine eigene Datei `data/paid.duckdb` (`scripts/build_paid.py`); `PaidSource` ist `FreeSource` auf dieser Datei, es gibt also keine zweite Abfragelogik, die abdriften könnte. Nur die Dimensionen ARQ/ARY (as reported) werden geladen; MR* wäre Rückschau (R13). Nur „Domestic Common Stock“. Ohne Schlüssel, ohne gebauten Bestand oder bei unbekannter Wahl erscheint in der App eine Meldung mit dem fehlenden Schritt; in der laufenden App geprüft. Die Screener-Testreihe (`tests/test_screener_contract.py`) läuft unverändert über einen im Sharadar-Layout von Hand gebauten Bestand (`tests/paid_fixture.py`), dazu 12 Tests in `tests/test_paid.py`. Anleitung im README („Switching to the paid data source“). **Offen:** Der Download (`paid.download_table`) ist ungetestet, weil es kein Abo gibt und der Container Nasdaq nicht erreicht; das Tabellenlayout stammt aus der veröffentlichten Beschreibung. Beim ersten echten Lauf die Ausgabe prüfen: die Zahl der Delistings mit Kursen muss in die Tausende gehen.
       **Done when:** eine Einstellung wählt die Datenquelle; ohne Schlüssel erscheint eine klare Meldung statt eines Absturzes; die Screener-Testreihe aus Phase 2 läuft unverändert gegen die gewählte Quelle; eine kurze Anleitung beschreibt, was der Nutzer beim Wechsel tun muss und welche Verzerrung damit wegfällt.
       **Steps:**
       - `PaidSource` gegen dieselbe Schnittstelle
