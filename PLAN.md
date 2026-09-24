@@ -689,6 +689,19 @@ Auf Zuruf des Nutzers, außerhalb der Phasenliste:
   SCREEN-Trackings erscheinen dort auf 10.000 gerechnet. In der laufenden App geprüft.
   Dabei gefunden und behoben: ein Klick konnte in Streamlit zwei identische Depots
   anlegen — gleiche Depots innerhalb von 30 s gelten jetzt als derselbe Klick.
+* **KI-Zusammenfassung** (RESEARCH, Knopf „Write AI summary“, `summary.py`): Claude
+  (`claude-opus-5`, mit serverseitigem Fallback bei einer Ablehnung) schreibt aus einem
+  Datenblatt der App — Kennzahlen, Jahres- und Quartalszahlen wie zuerst gemeldet,
+  Restatements, Kursverhalten, Vergleichsfirmen — eine kurze Einschätzung mit festen
+  Abschnitten (Wachstum, Bilanz, Bewertung, Für, Gegen, Vor dem Handeln prüfen). Nur
+  diese Zahlen, keine Empfehlung, kein Kursziel. Je Datenstand gespeichert
+  (`ai_summaries`), ein zweiter Klick kostet nichts. Claude-Skills zur Aktienbewertung
+  gab es nicht; sie wären auch überflüssig, weil die Zahlen aus der App selbst kommen.
+  **Ungetestet gegen die echte API** (kein Schlüssel und kein Zugang in der
+  Cloud-Sitzung); der Aufruf ist gegen die SDK-Signatur (anthropic 1.7.0) geprüft und
+  mit einem nachgebauten Client getestet. Beim ersten echten Klick die Antwort ansehen.
+  Nebenbei behoben: ohne gespeicherte Index-/Rohstoffreihen stürzte der RESEARCH-Reiter
+  bei jeder Tickereingabe ab (`price_only_symbols` ohne Spalten).
 * **Nicht umgesetzt: Papiergeld im OPTIONS-Reiter.** Ein Optionsdepot live zu bewerten
   braucht tägliche Optionspreise, die der Bestand nicht hat; es mit Black-Scholes und
   eingefrorener Volatilität zu bewerten, sähe wie ein Marktwert aus und wäre keiner.

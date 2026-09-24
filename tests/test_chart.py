@@ -109,3 +109,16 @@ def test_trades_are_marked_on_the_line():
     fig = charts.price_figure(bars, "AAA", candles=True, trades=trades)
     names = [t.name for t in fig.data]
     assert "buy" in names and "sell" in names
+
+
+def test_a_store_without_index_series_still_has_the_lookup_columns():
+    """The research tab filters this frame by `symbol` for every ticker typed; without
+    any index or commodity series stored it used to come back with no columns."""
+    import duckdb
+
+    from portfolio_lab.data.schema import MARKET_MIGRATIONS, _apply
+
+    con = duckdb.connect(":memory:")
+    _apply(con, MARKET_MIGRATIONS)
+    frame = rs.price_only_symbols(con)
+    assert frame.empty and "symbol" in frame.columns

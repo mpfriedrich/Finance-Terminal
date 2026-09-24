@@ -261,6 +261,17 @@ USER_MIGRATIONS: list[str] = [
         PRIMARY KEY (book_id, ticker)
     );
     """,
+    # 016 — AI summaries of a company, keyed by the data build they were written from
+    # (summary.py), so the same question on the same data is not paid for twice.
+    """
+    CREATE TABLE IF NOT EXISTS ai_summaries (
+        ticker            VARCHAR   NOT NULL,
+        data_fingerprint  VARCHAR   NOT NULL,
+        text              VARCHAR   NOT NULL,
+        model             VARCHAR,
+        created_at        TIMESTAMP NOT NULL
+    );
+    """,
 ]
 
 

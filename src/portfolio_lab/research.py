@@ -634,7 +634,10 @@ def price_only_symbols(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
                     else "commodity / macro")
             rows.append({"symbol": symbol, "name": label, "kind": kind,
                          "bars": r[0], "from": r[1], "to": r[2]})
-    return pd.DataFrame(rows)
+    # The columns even when there are no rows: a store without any index or commodity
+    # series returned a frame with no `symbol` column, and the research tab's lookup on
+    # it raised for every ticker typed.
+    return pd.DataFrame(rows, columns=["symbol", "name", "kind", "bars", "from", "to"])
 
 
 COMMODITIES = {

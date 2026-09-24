@@ -73,6 +73,7 @@ from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
 from portfolio_lab import paper
+from portfolio_lab import summary as ai_summary
 
 st.set_page_config(page_title="Portfolio Lab", page_icon="◫", layout="wide")
 st.markdown(ui.CSS, unsafe_allow_html=True)
@@ -1143,6 +1144,47 @@ with tab_research:
                     "Live quote for this company only. The screener stays on one common "
                     f"date ({asof}); mixing a live price into a ranking would favour it."
                 )
+
+            # ------------------------------------------------------------ AI summary
+            data_fp = src.snapshot().fingerprint()
+            have = ai_summary.stored(store.con, ticker, data_fp)
+            with st.container(border=True):
+                a1, a2 = st.columns([3, 1])
+                a1.markdown("#### AI summary")
+                label = "Write again" if have else "Write AI summary"
+                if a2.button(label, key=f"ai_sum_{ticker}", use_container_width=True):
+                    if not secret("ANTHROPIC_API_KEY"):
+                        st.error("ANTHROPIC_API_KEY missing from .env.local.")
+                    else:
+                        with st.spinner("Reading the filings and prices…"):
+                            try:
+                                sheet = ai_summary.data_sheet(
+                                    src.con, ticker, cik, me, asof, frame=enriched)
+                                result = ai_summary.summarize(sheet)
+                            except Exception as exc:                 # noqa: BLE001
+                                result = {"text": None, "error": str(exc)}
+                        if result.get("text"):
+                            ai_summary.save(store.con, ticker, data_fp, result)
+                            have = ai_summary.stored(store.con, ticker, data_fp)
+                        else:
+                            st.error(result.get("error") or "No summary came back.")
+                shown = have or ai_summary.latest(store.con, ticker)
+                if shown:
+                    st.markdown(shown["text"])
+                    stamp = pd.Timestamp(shown["created_at"]).strftime("%Y-%m-%d %H:%M")
+                    st.caption(
+                        f"Written {stamp} by {shown['model']} from this app's own figures "
+                        "only — no outside news, no recommendation."
+                        + ("" if have else " Written on an older data build; the numbers "
+                           "may have moved since. Press the button for a fresh one.")
+                    )
+                else:
+                    st.caption(
+                        "A short write-up from the figures on this page — valuation, the "
+                        "history as first filed, restatements, price behaviour and peers. "
+                        "The model may only argue from those numbers and does not "
+                        "recommend buying or selling. Uses your Anthropic API key."
+                    )
 
             def _open_research_book(name, amount):
                 last = src.con.execute(
