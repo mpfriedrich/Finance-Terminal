@@ -129,3 +129,53 @@ def test_wide_view_carries_age_and_method(con):
     assert "data_age_days" in wide.columns
     assert "net_income_method" in wide.columns
     assert set(wide.cik) >= {1, 2, 3}
+
+
+@pytest.fixture()
+def shifted():
+    """Restatements that move period_start by a few days — the shape the independent
+    review found in 32,463 groups of the real data (PLAN.md, Gegenprüfung 25.09.2026).
+    Partitioning on the exact period_start put each version in its own partition, so the
+    restatement survived as "the earliest filing of its own period"."""
+    c = duckdb.connect(":memory:")
+    _apply(c, MARKET_MIGRATIONS)
+    rows = [
+        # --- CIK 8: FY2023 revenue 500, restated to 800 with a start two days earlier ---
+        (8, "revenue", 500.0, D(2023, 1, 1), D(2023, 12, 31), D(2024, 2, 15), "h1", "Revenues", 0),
+        (8, "revenue", 800.0, D(2022, 12, 30), D(2023, 12, 31), D(2024, 8, 20), "h2", "Revenues", 0),
+        # --- CIK 9: four quarters; Q4 restated from 40 to 90 with a shifted start ---
+        (9, "net_income", 10.0, D(2023, 1, 1), D(2023, 3, 31), D(2023, 5, 1), "i1", "NetIncomeLoss", 0),
+        (9, "net_income", 20.0, D(2023, 4, 1), D(2023, 6, 30), D(2023, 8, 1), "i2", "NetIncomeLoss", 0),
+        (9, "net_income", 30.0, D(2023, 7, 1), D(2023, 9, 30), D(2023, 11, 1), "i3", "NetIncomeLoss", 0),
+        (9, "net_income", 40.0, D(2023, 10, 1), D(2023, 12, 31), D(2024, 2, 1), "i4", "NetIncomeLoss", 0),
+        (9, "net_income", 90.0, D(2023, 9, 29), D(2023, 12, 31), D(2024, 9, 1), "i5", "NetIncomeLoss", 0),
+        # --- CIK 10: a quarter and a nine-month YTD span ending on the same day are
+        #     different periods, and must not be merged by the fix ---
+        (10, "revenue", 30.0, D(2023, 7, 1), D(2023, 9, 30), D(2023, 11, 1), "j1", "Revenues", 0),
+        (10, "revenue", 75.0, D(2023, 1, 1), D(2023, 9, 30), D(2023, 11, 1), "j1", "Revenues", 0),
+    ]
+    c.executemany(
+        "INSERT INTO fundamentals (cik, metric, value, period_start, period_end, filed, "
+        "accession, xbrl_tag, tag_rank) VALUES (?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    return c
+
+
+def test_restatement_with_shifted_start_does_not_displace_the_original(shifted):
+    """R13: a restatement stays invisible as a replacement even when it moves the
+    period's start date by a couple of days."""
+    ttm = pit.ttm_values(shifted, D(2025, 1, 1))
+    row = ttm[(ttm.cik == 8) & (ttm.metric == "revenue")]
+    assert row.value.iloc[0] == pytest.approx(500.0), "shifted restatement leaked"
+
+
+def test_restated_quarter_with_shifted_start_does_not_displace_the_original(shifted):
+    ttm = pit.ttm_values(shifted, D(2025, 1, 1))
+    row = ttm[(ttm.cik == 9) & (ttm.metric == "net_income")]
+    assert row.value.iloc[0] == pytest.approx(100.0), "restated quarter leaked into TTM"
+
+
+def test_spans_of_different_length_ending_together_stay_separate(shifted):
+    vis = pit._visible(shifted, D(2025, 1, 1))
+    assert sorted(vis[vis.cik == 10].value) == [30.0, 75.0]

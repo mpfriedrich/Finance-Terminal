@@ -35,7 +35,8 @@ import pandas as pd
 # floor. Without that, 29 MB of frames built by the previous logic keep being served and
 # the fix silently does nothing. It is a manual constant because nothing can detect the
 # change for us; forgetting it is the trap, so it is named here rather than buried.
-CACHE_VERSION = "v2"
+# v3: restatements are matched by period end and length class, not exact start.
+CACHE_VERSION = "v3"
 
 
 def _build_id(fingerprint: str) -> str:

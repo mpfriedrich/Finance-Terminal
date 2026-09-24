@@ -139,7 +139,9 @@ def annual_history(con: duckdb.DuckDBPyConnection, cik: int) -> pd.DataFrame:
         WITH first_filed AS (
             SELECT cik, metric, value, period_start, period_end, filed,
                    ROW_NUMBER() OVER (
-                       PARTITION BY cik, metric, period_start, period_end
+                       -- period_end only: the WHERE already fixes the length class,
+                       -- and a restatement may shift the start by days (see pit.py).
+                       PARTITION BY cik, metric, period_end
                        ORDER BY filed ASC, tag_rank ASC
                    ) AS rn
             FROM fundamentals
@@ -467,7 +469,7 @@ def quarterly_trend(con: duckdb.DuckDBPyConnection, cik: int, quarters: int = 12
         WITH first_filed AS (
             SELECT metric, value, period_start, period_end, filed,
                    ROW_NUMBER() OVER (
-                       PARTITION BY metric, period_start, period_end
+                       PARTITION BY metric, period_end
                        ORDER BY filed ASC, tag_rank ASC
                    ) AS rn
             FROM fundamentals

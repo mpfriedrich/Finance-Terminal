@@ -38,15 +38,32 @@ ANNUAL_MIN, ANNUAL_MAX = 330, 400
 QUARTER_MIN, QUARTER_MAX = 80, 100
 
 
+# A period is identified by its END and its LENGTH CLASS, not by its exact start. Filers
+# restate a period with a start moved by a day or two; partitioning on the exact start put
+# each version in its own partition, and the restatement survived as "the earliest filing
+# of its own period" (32,463 groups in the real data, PLAN.md Gegenprüfung 25.09.2026).
+# Partitioning on the end alone would merge a quarter with the nine-month or annual span
+# ending the same day, so the length is bucketed: the two classes TTM reads get their
+# tolerance windows, anything else rounds to whole months.
+_SPAN_BUCKET = f"""
+    CASE
+        WHEN period_start IS NULL THEN NULL
+        WHEN date_diff('day', period_start, period_end) BETWEEN {ANNUAL_MIN} AND {ANNUAL_MAX} THEN 12
+        WHEN date_diff('day', period_start, period_end) BETWEEN {QUARTER_MIN} AND {QUARTER_MAX} THEN 3
+        ELSE CAST(round(date_diff('day', period_start, period_end) / 30.44) AS INTEGER)
+    END
+"""
+
+
 def _visible(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFrame:
     """All facts filed on or before `asof`, earliest filing per period kept."""
     return con.execute(
-        """
+        f"""
         WITH visible AS (
             SELECT cik, metric, value, period_start, period_end, filed, tag_rank,
                    ROW_NUMBER() OVER (
-                       PARTITION BY cik, metric, period_start, period_end
-                       ORDER BY filed ASC, tag_rank ASC
+                       PARTITION BY cik, metric, period_end, {_SPAN_BUCKET}
+                       ORDER BY filed ASC, tag_rank ASC, period_start ASC
                    ) AS rn
             FROM fundamentals
             WHERE filed <= ?

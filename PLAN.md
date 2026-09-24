@@ -440,6 +440,15 @@ prüfen sollte, ohne je zu unterbrechen.
   — nur nach `period_end` partitionieren — würde Quartal und Geschäftsjahr mit gleichem
   Periodenende vermischen; es braucht eine Bucket-Bildung nach Periodenlänge. Das ist
   eine überlegte Änderung, keine Abendreparatur.
+* ~~**`period_start`-Verschiebung bei Korrekturen**~~ — **behoben am 24.09.2026 (Cloud-
+  Sitzung):** `pit._visible` partitioniert jetzt nach `period_end` **und Längenklasse**
+  (Jahr 330–400 Tage, Quartal 80–100, sonst gerundete Monate), die früheste Meldung
+  gewinnt. Quartal und Neun-Monats-Spanne mit gleichem Ende bleiben getrennt. Dieselbe
+  Lücke steckte in `research.py` (Jahres- und Quartalshistorie) und ist dort mit behoben.
+  Drei neue Tests in `tests/test_pit.py`; der Quartalsfall schlug vorher fehl (150 statt
+  100). `CACHE_VERSION` → `v3`. **Noch nicht gemessen:** die Wirkung auf die drei
+  Varianten der Tabelle unten. Das braucht `data/market.duckdb`, die nur lokal liegt:
+  `scripts/warm_pit_cache.py` neu laufen lassen, dann die drei Läufe wiederholen.
 * **`ticker_history` wird von Stufe B nicht benutzt.** Das Kriterium sagt „das Universum
   aus Phase 7"; tatsächlich kommt es weiter aus `securities`. Zahlenmäßig identisch (die
   kursbasierten Zeilen sind dieselben Überlebenden), aber das Kriterium ist damit **nicht
@@ -683,7 +692,7 @@ Aufbau auf einer Kopie hätte gegen die alte Tabelle geschrieben und wäre gesch
       - Zählung und Anzeige nach R19
       **Covers:** R18, R19
 
-- [ ] **Phase 8: Point-in-Time-Backtest (Fundamentaldaten)** — *Gegenprüfung 25.09.2026: durchgefallen, drei schwere Befunde behoben, drei offen; siehe oben*
+- [ ] **Phase 8: Point-in-Time-Backtest (Fundamentaldaten)** — *Gegenprüfung 25.09.2026: durchgefallen, drei schwere Befunde behoben; von den offenen ist `period_start` am 24.09. behoben, `ticker_history`, Cache-Schlüssel und R19-Zählung stehen noch aus; siehe oben*
       **Done when:** quartalsweise Umschichtung, die je Stichtag **das Universum aus Phase 7** und ausschließlich die bis dahin gemeldeten Bilanzdaten benutzt; **drei Tests sind grün:** ein Datensatz mit späterem Meldedatum gelangt nicht in die Auswahl; eine nachträgliche Korrektur verdrängt die ursprüngliche Fassung nicht; ein Titel, der zum Stichtag noch nicht notiert war oder schon verschwunden ist, erscheint nicht in der Auswahl. Der Test nach R16 belegt die Ausführung zur Folgetags-Eröffnung. Das Etikett nennt, welche Verzerrungen korrigiert sind und welche nicht — mit der in Phase 7 gemessenen Quote. Ein voller Durchlauf über den gesamten belastbaren Zeitraum braucht **höchstens 5 Minuten**; wird das überschritten, werden Zwischenergebnisse je Stichtag zwischengespeichert, bis es eingehalten ist.
       **Steps:**
       - Stichtagsabfrage über Meldedatum, Auswahlregel „früheste Fassung" (R13)
