@@ -274,7 +274,7 @@ Grundhaltung: **laut scheitern**. Eine klare Fehlermeldung ist besser als eine G
 **Vier Restschwächen, die der unabhängige Prüfer stehen ließ — sie sind nicht behoben, sondern benannt:**
 
 - **Der wahrscheinlichste Ausgang von Phase 7 ist der Unter-50-%-Fall.** Der Ticker steht erst in jüngeren Einreichungen im Deckblatt, und die kostenlose Kursquelle wirft verschwundene Titel heraus. Realistisch läuft Stufe B also auf einem überlebendenbasierten Universum und sagt das auch so. **Phase 7 ist kein Versprechen, dass die Überlebensverzerrung kostenlos verschwindet** — sie misst, wie groß der Rest ist. Vollständig behoben wird sie erst durch die bezahlte Quelle (Phase 10).
-- **`[A15]` und `[A16]` sind ungeprüfte Verfügbarkeitsannahmen** (Total-Return-Indexreihe über die Kursquelle, Zinsreihe ohne Schlüssel). Beide können beim ersten Lauf auf die Ersatzlösung zwingen; sichtbare Folge wäre die weitere Toleranz von 60 Basispunkten in R11.
+- ~~**`[A15]` und `[A16]` sind ungeprüfte Verfügbarkeitsannahmen**~~ — **beide erledigt (24.09.2026).** `[A15]`: `^SP500TR` liegt für 2010–2026 vor, kein Rückfall auf `SPY`, die 25-bp-Toleranz aus R11 gilt und wird eingehalten (gemessen 11 bp). `[A16]`: der risikolose Zins kommt aus `^IRX` (13-Wochen-US-Schatzwechsel) über dieselbe Kursquelle — kein FRED, kein Schlüssel; der feste Wert aus den Einstellungen greift nur, wenn für das Fenster keine Zinsreihe gespeichert ist, und die Oberfläche nennt jeweils, welcher von beiden benutzt wurde.
 - **`[A10]` und `[A17]` sind ungeprüfte Zahlen, die das Ergebnis bewegen** — die gestaffelten Spannen und die Delisting-Rendite von −30 %. Bei einem Portfolio aus kleinen Werten hängt das Ergebnis spürbar an beiden. Beide sind änderbar, und Phase 9 zeigt den Einfluss — geprüft wurden sie nicht.
 - **Bedeutung von „cap to price max 1/1"** — wörtlich ergäbe das die Aktienzahl. Bis zur Klärung gilt: R3 greift, das Modell meldet den Teil als unverstanden, und die App fragt im Chat nach, statt zu raten. Kandidaten, die die App zur Auswahl anbietet: Kurs-Umsatz-Verhältnis, Kurs-Cashflow-Verhältnis, Marktkapitalisierung ≤ Kurs (unwahrscheinlich). **Eine Antwort darauf ersetzt später einfach einen Eintrag im Filterschema.**
 - **Bezahlte Datenquelle ja/nein** — bis dahin alles kostenlos; Phase 10 legt den Anschluss bereit (user, Q5).
@@ -396,6 +396,56 @@ Zwei kleinere Befunde aus der Durchsicht am 23.09.:
   `shares_outstanding` erklärt, warum 426 Titel mangels Aktienzahl ausgeschlossen
   werden, und `ticker_history` ist die Voraussetzung für Phase 7.
 
+## Phase 6 — Ergebnis vom 24.09.2026
+
+**Bestanden.** Die Formeln liegen in `metrics.py`, damit Portfolio und Index nachweislich
+von derselben Funktion gemessen werden — ein Index, der nach einer anderen Regel gerechnet
+wird als das Portfolio, das er beurteilen soll, verschiebt jeden Vergleich um die Differenz
+der Methoden.
+
+**Jede Formel gegen eine analytisch bekannte Reihe, Toleranz 1 Basispunkt** (22 Tests in
+`tests/test_metrics.py`):
+
+| Kennzahl | Prüfreihe | Erwartung |
+|---|---|---|
+| Rendite p. a. | +1 % monatlich über 5 Jahre (das Beispiel aus dem Plan) | 12,6825 % |
+| Rendite p. a. | Verdopplung über genau 2 Jahre | 41,379 % |
+| Schwankung p. a. | Renditen wechseln exakt ±1 % | geschlossene Form 0,01·√(n/(n−1))·√252 |
+| Schwankung p. a. | konstantes Wachstum | exakt 0 |
+| Max. Rückgang | 100 → 70 → Erholung | exakt −30 % |
+| Max. Rückgang | Verdopplung, dann Halbierung | **−50 %**, nicht 0 — gemessen vom laufenden Hoch |
+| Sharpe | flache Linie | undefiniert statt unendlich |
+| Abweichung zum Index | Portfolio = Index | exakt 0 |
+| Abweichung zum Index | dauerhafter Vorsprung, gleicher Verlauf | **0** — gleiche Fahrt, nur höher |
+| Umschlag | Kaufen-und-Halten | 0 |
+
+**Risikoloser Zins:** `^IRX`, der 13-Wochen-US-Schatzwechsel, gemittelt über das
+Backtest-Fenster, bezogen über dieselbe Kursquelle wie alles andere — damit ist `[A16]`
+ohne FRED und ohne Schlüssel erledigt. Liegt für das Fenster keine Reihe vor, greift der
+Wert aus den Einstellungen, und die Oberfläche schreibt dazu, welcher von beiden benutzt
+wurde. Ein Sharpe gegen einen ungenannten Zins ist mit nichts vergleichbar, auch nicht mit
+dem eigenen vom Vormonat.
+
+**R23 — Formulierungsprüfung, automatisch.** `wording.py` führt die verbotenen
+Formulierungen; ein Test läuft über **alle** Zeichenketten der Oberfläche (per AST, ohne
+Docstrings). Er prüft zuerst sich selbst: elf Beispielsätze müssen erkannt, sechs
+harmlose (»buy and hold«) durchgelassen werden — ein Wächter, der nichts fängt, besteht
+auf jeder Codebasis. Zwei echte Treffer beim ersten Lauf, beide berechtigt entschärft:
+
+* `briefing.py` enthält die Anweisung an das Modell *„never recommend buying or selling"* —
+  eine Verbotsformulierung, keine Empfehlung. Die Prüfung erkennt jetzt Verneinungen im
+  Umfeld von 40 Zeichen.
+* `research.py` führt *„strong buy"* als **Analysten**-Bewertungsklasse. Das ist fremde
+  Rede, als Datum ausgewiesen; die Ausnahme steht namentlich in `ATTRIBUTED`, gilt nur bei
+  exakter Übereinstimmung, und die Bildunterschrift sagt jetzt ausdrücklich, dass diese
+  Einstufungen von Wall-Street-Analysten stammen und nicht von dieser App.
+
+Dazu die Abhängigkeitsprüfung: keine Broker- oder Orderbibliothek in `pyproject.toml`.
+Und ein Test hält fest, dass der Hinweis am Seitenfuß (»places no orders, connects to no
+broker, recommends no security«) eine **gerenderte** Zeichenkette bleibt — die erste
+Fassung dieses Tests war auf den Modul-Docstring hereingefallen, der das Richtige sagt,
+aber niemandem.
+
 ## Phase 5 — Ergebnis vom 24.09.2026
 
 **Bestanden.** `backtest.py` rechnet Stufe A: einmal kaufen, halten, gegen den S&P 500
@@ -511,7 +561,7 @@ Aufbau auf einer Kopie hätte gegen die alte Tabelle geschrieben und wäre gesch
       - Grafik plus Etikett nach R12
       **Covers:** R8, R10, R11, R12, R17, R22
 
-- [ ] **Phase 6: Kennzahlen für Entscheidungen über echtes Geld**
+- [x] **Phase 6: Kennzahlen für Entscheidungen über echtes Geld**
       **Done when:** Rendite p. a., Schwankungsbreite, Sharpe, maximaler Rückgang (Tagesbasis), Abweichung zum Index und Umschlagshäufigkeit stehen für Portfolio **und** Index in der Tabelle; **jede Formel ist gegen eine synthetische Reihe geprüft, deren richtiges Ergebnis sich von Hand ausrechnen lässt** (z. B. konstant +1 % monatlich über 5 Jahre → bekannte Rendite p. a., Rückgang null; eine Reihe mit genau einem Einbruch bekannter Tiefe → bekannter maximaler Rückgang), Toleranz 1 Basispunkt; der risikolose Zins ist definiert und seine Quelle im Code benannt; die automatische Formulierungsprüfung der Oberfläche läuft grün.
       **Steps:**
       - Kennzahlenmodul, Tests gegen die synthetischen Reihen zuerst

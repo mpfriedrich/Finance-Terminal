@@ -39,6 +39,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from . import metrics as mx
 from .config import CostModel
 
 BENCHMARK = "^SP500TR"
@@ -78,51 +79,13 @@ def _bars(con: duckdb.DuckDBPyConnection, tickers: list[str],
 
 INITIAL = 100.0
 
-
-def annualised_return(curve: pd.Series, years: float, base: float | None = None) -> float:
-    """Compound annual growth, measured against the CAPITAL COMMITTED.
-
-    `base` matters more than it looks. The portfolio curve starts a little below 100,
-    because the entry cost is paid before anything can grow. Annualising from that lower
-    first value would quietly measure the return on what survived the trade instead of on
-    what was put in — and the tiered cost model, the whole point of R8, would disappear
-    from the headline number while still showing up in the total return. It did exactly
-    that in the first run of this module.
-    """
-    if years <= 0 or curve.empty:
-        return float("nan")
-    start = curve.iloc[0] if base is None else base
-    if start <= 0:
-        return float("nan")
-    return float((curve.iloc[-1] / start) ** (1.0 / years) - 1.0)
-
-
-def annualised_volatility(curve: pd.Series) -> float:
-    """Standard deviation of daily returns, scaled by √252.
-
-    Daily, not monthly: a drawdown that matters happens inside a month, and the plan asks
-    for the daily figure explicitly (R9).
-    """
-    returns = curve.pct_change().dropna()
-    if len(returns) < 2:
-        return float("nan")
-    return float(returns.std(ddof=1) * np.sqrt(TRADING_DAYS))
-
-
-def max_drawdown(curve: pd.Series) -> float:
-    """Worst peak-to-trough fall, as a negative fraction, on daily closes."""
-    if curve.empty:
-        return float("nan")
-    peak = curve.cummax()
-    return float((curve / peak - 1.0).min())
-
-
-def sharpe(curve: pd.Series, years: float, risk_free: float,
-           base: float | None = None) -> float:
-    vol = annualised_volatility(curve)
-    if not np.isfinite(vol) or vol == 0:
-        return float("nan")
-    return float((annualised_return(curve, years, base) - risk_free) / vol)
+# The formulas live in metrics.py, where each one is pinned to a series whose answer can
+# be worked out by hand (Phase 6). Re-exported here so existing callers keep working and,
+# more importantly, so there is exactly one implementation of "annual return" in the app.
+annualised_return = mx.annual_return
+annualised_volatility = mx.annual_volatility
+max_drawdown = mx.max_drawdown
+sharpe = mx.sharpe
 
 
 def entry_costs(holdings: pd.DataFrame, costs: CostModel) -> pd.Series:
@@ -225,24 +188,10 @@ def buy_and_hold(
         )
 
     years = max((curve.index[-1] - curve.index[0]).days, 1) / 365.25
-    metrics: dict[str, float | None] = {
-        "total_return": float(curve.iloc[-1] / INITIAL - 1.0),
-        "annual_return": annualised_return(curve, years, base=INITIAL),
-        "volatility": annualised_volatility(curve),
-        "sharpe": sharpe(curve, years, risk_free, base=INITIAL),
-        "max_drawdown": max_drawdown(curve),
-        "turnover": 0.0,
-    }
-    if bench_curve is not None:
-        metrics |= {
-            "benchmark_total_return": float(bench_curve.iloc[-1] / INITIAL - 1.0),
-            "benchmark_annual_return": annualised_return(bench_curve, years, base=INITIAL),
-            "benchmark_volatility": annualised_volatility(bench_curve),
-            "benchmark_sharpe": sharpe(bench_curve, years, risk_free, base=INITIAL),
-            "benchmark_max_drawdown": max_drawdown(bench_curve),
-            "excess_annual": annualised_return(curve, years, base=INITIAL)
-            - annualised_return(bench_curve, years, base=INITIAL),
-        }
+    metrics = mx.summary(
+        curve, bench_curve, years, risk_free,
+        base=INITIAL, turnover=mx.turnover_of_buy_and_hold(),
+    )
 
     last = wide.iloc[-1]
     detail = held.copy()

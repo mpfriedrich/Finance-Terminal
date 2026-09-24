@@ -53,6 +53,7 @@ from portfolio_lab import backtest as bktest
 from portfolio_lab import briefing as bfg
 from portfolio_lab import business as bz
 from portfolio_lab import macro as mc
+from portfolio_lab import metrics as mx
 from portfolio_lab import options as op
 from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
@@ -611,11 +612,13 @@ with tab_screen:
                 snapshot = src.snapshot()
                 model = settings.cost if charge else CostModel(
                     commission=0.0, spread_tiers=((float("inf"), 0.0),))
+                rate, rate_source = mx.risk_free_rate(
+                    src.con, start_on, last_bar, settings.risk_free_fallback)
                 result = bktest.buy_and_hold(
                     src.con, picks, start_on, last_bar, costs=model,
-                    risk_free=settings.risk_free_fallback,
-                    data_fingerprint=snapshot.fingerprint(),
+                    risk_free=rate, data_fingerprint=snapshot.fingerprint(),
                 )
+                st.session_state[f"bt_rate_{chosen}"] = (rate, rate_source)
                 if result is None:
                     st.session_state[f"bt_result_{chosen}"] = None
                 else:
@@ -648,25 +651,34 @@ with tab_screen:
                     curve[result.benchmark_symbol] = result.benchmark
                 st.line_chart(curve, height=280, color=[ui.AMBER, ui.CYAN])
 
+                # Every figure R9 asks for, portfolio and index side by side, both
+                # computed by the same function so the yardstick cannot differ from the
+                # thing it measures.
                 rows = [
                     ("Return p.a.", m["annual_return"], m.get("benchmark_annual_return")),
                     ("Total return", m["total_return"], m.get("benchmark_total_return")),
                     ("Volatility p.a.", m["volatility"], m.get("benchmark_volatility")),
                     ("Max drawdown", m["max_drawdown"], m.get("benchmark_max_drawdown")),
+                    ("Deviation from index", m.get("tracking_error"), None),
                 ]
                 table = pd.DataFrame({
                     "metric": [r[0] for r in rows] + ["Sharpe", "Turnover"],
                     "portfolio": [ui.pct(r[1]) for r in rows]
                                  + [ui.num(m["sharpe"]), "0.00"],
                     result.benchmark_symbol or "index":
-                        [ui.pct(r[2]) for r in rows]
+                        [ui.pct(r[2]) if r[2] is not None else "—" for r in rows]
                         + [ui.num(m.get("benchmark_sharpe")), "—"],
                 })
                 st.markdown(ui.grid(table, numeric=set(), ticker_col="metric"),
                             unsafe_allow_html=True)
+                rate, rate_source = st.session_state.get(
+                    f"bt_rate_{chosen}", (settings.risk_free_fallback, "settings"))
                 st.caption(
                     "Turnover is zero by construction: stage A buys once and holds, so "
-                    "costs are charged at entry only (R16b)."
+                    "costs are charged at entry only (R16b). Deviation from the index is "
+                    "the annualised standard deviation of the daily difference — how "
+                    "differently the portfolio travelled, not how far behind it ended. "
+                    f"Sharpe uses a risk-free rate of {rate:.2%} ({rate_source})."
                 )
 
                 for note in result.notes:
@@ -1283,7 +1295,11 @@ with tab_research:
                         st.markdown(ui.stats(
                             [(k.upper(), str(v), "amber" if v else "") for k, v in r.items()]
                         ), unsafe_allow_html=True)
-                        st.caption(f"Consensus as of {view.get('ratings_period', '—')}.")
+                        st.caption(
+                            f"Consensus as of {view.get('ratings_period', '—')}. These are "
+                            "Wall Street analysts' own ratings, reported as data — this "
+                            "app does not rate anything."
+                        )
                     t_ = view.get("targets") or {}
                     if t_.get("mean"):
                         cells = [(k.upper(), ui.num(v), "")
