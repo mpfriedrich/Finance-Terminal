@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from portfolio_lab import options as op
 from portfolio_lab.options import (
     black_scholes, expected_move, implied_volatility, implied_vs_realised,
 )
@@ -191,3 +192,55 @@ def test_every_preset_is_made_of_known_leg_kinds():
         for kind, ratio, qty in legs:
             assert kind in ("call", "put", "share")
             assert qty != 0
+
+
+# --- the cone: the market's range for every day, not just for one expiry -------------
+
+def _term(days=(7, 30, 90), ivs=(0.35, 0.30, 0.28)):
+    return pd.DataFrame({"expiry": [f"e{d}" for d in days], "days": list(days),
+                         "atm_iv": list(ivs)})
+
+
+def test_the_cone_opens_with_the_square_root_of_time():
+    """Four times the days is twice the width — the property that makes it a cone and
+    not a wedge. A band drawn linearly in time would overstate the near term badly."""
+    flat = _term(days=(10, 40), ivs=(0.30, 0.30))
+    cone = op.expected_move_cone(100.0, flat).set_index("day")
+    width_10 = cone.loc[10, "high_1"] - 100.0
+    width_40 = cone.loc[40, "high_1"] - 100.0
+    assert width_40 == pytest.approx(2 * width_10, rel=1e-9)
+
+
+def test_the_cone_is_centred_on_todays_price():
+    cone = op.expected_move_cone(100.0, _term())
+    assert (cone["mid"] == 100.0).all()
+    # numpy arrays, not Series: comparing a Series with approx() collapses to a single
+    # bool and hides which rows disagreed.
+    assert (cone.high_1 - 100.0).to_numpy() == pytest.approx((100.0 - cone.low_1).to_numpy())
+
+
+def test_the_outer_band_is_twice_the_inner_one():
+    cone = op.expected_move_cone(100.0, _term())
+    assert (cone.high_2 - 100.0).to_numpy() == pytest.approx(
+        (2 * (cone.high_1 - 100.0)).to_numpy())
+
+
+def test_the_width_interpolates_between_the_expiries_that_exist():
+    """Options for day 15 do not exist. Holding the front-month volatility flat across
+    three months would draw a band the market is not quoting."""
+    cone = op.expected_move_cone(100.0, _term()).set_index("day")
+    assert 0.30 < cone.loc[15, "atm_iv"] < 0.35
+    assert cone.loc[7, "atm_iv"] == pytest.approx(0.35)
+    assert cone.loc[90, "atm_iv"] == pytest.approx(0.28)
+
+
+def test_the_cone_agrees_with_the_single_expiry_calculation():
+    """Same maths, two presentations — they must not drift apart."""
+    cone = op.expected_move_cone(100.0, _term()).set_index("day")
+    single = op.expected_move(100.0, 0.30, 30)
+    assert cone.loc[30, "high_1"] == pytest.approx(single["high_1"], rel=1e-9)
+
+
+def test_no_chain_means_no_cone_rather_than_a_flat_line():
+    assert op.expected_move_cone(100.0, pd.DataFrame()).empty
+    assert op.expected_move_cone(0.0, _term()).empty

@@ -171,3 +171,23 @@ def summary(
         "tracking_error": tracking_error(portfolio, benchmark),
     }
     return out
+
+
+def current_risk_free(
+    con: duckdb.DuckDBPyConnection, fallback: float = 0.02
+) -> tuple[float, str]:
+    """Today's 13-week bill yield, as a fraction, plus where it came from and when.
+
+    An option price depends on the rate, so leaving it as a slider invites the user to
+    tune an input the market has already decided — and a slider that changes a fair value
+    is a knob for making the number you wanted. The bill yield is downloaded with
+    everything else; there is nothing to set.
+    """
+    row = con.execute(
+        "SELECT close, date FROM prices WHERE ticker = ? AND close IS NOT NULL "
+        "ORDER BY date DESC LIMIT 1",
+        [RISK_FREE_SYMBOL],
+    ).fetchone()
+    if row and row[0] is not None:
+        return float(row[0]) / 100.0, f"{RISK_FREE_SYMBOL} close of {row[1]}"
+    return fallback, "settings fallback (no bill yield stored)"

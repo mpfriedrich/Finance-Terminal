@@ -250,6 +250,47 @@ def expected_move(spot: float, iv: float, days: int) -> dict:
     }
 
 
+def expected_move_cone(
+    spot: float, term: pd.DataFrame, horizon_days: int | None = None
+) -> pd.DataFrame:
+    """The market's own range for every day between now and the last expiry.
+
+    Where `expected_move` answers "how far by this one date", this answers "how far by
+    each date", which is the shape people actually picture: a band that opens up with
+    the square root of time, because uncertainty accumulates with time and not with its
+    square.
+
+    The width at day d uses the at-the-money volatility of the nearest expiries on either
+    side, interpolated — options for day d itself usually do not exist, and holding the
+    front-month volatility flat across three months would draw a band the market is not
+    quoting.
+
+    What the band is NOT: a forecast, or a promise. It is the volatility the market is
+    charging for, converted into a distance. Roughly two thirds of outcomes historically
+    land inside the inner band and 95% inside the outer one — except that real returns
+    have fatter tails than the bell curve, so the outer band is the optimistic reading.
+    """
+    if not spot or term is None or term.empty:
+        return pd.DataFrame()
+    term = term.sort_values("days")
+    last = int(horizon_days or term.days.max())
+    if last <= 0:
+        return pd.DataFrame()
+
+    days = np.arange(1, last + 1)
+    iv = np.interp(days, term.days.to_numpy(float), term.atm_iv.to_numpy(float))
+    sigma = spot * iv * np.sqrt(days / 365.0)
+    return pd.DataFrame({
+        "day": days,
+        "atm_iv": iv,
+        "low_2": spot - 2 * sigma,
+        "low_1": spot - sigma,
+        "mid": np.full_like(sigma, spot),
+        "high_1": spot + sigma,
+        "high_2": spot + 2 * sigma,
+    })
+
+
 def term_structure(surface_df: pd.DataFrame) -> pd.DataFrame:
     """At-the-money implied volatility by expiry.
 

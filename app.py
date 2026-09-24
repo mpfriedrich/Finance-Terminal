@@ -1142,8 +1142,12 @@ with tab_research:
                 if not spot:
                     st.info("No price available, so nothing can be backed out.")
                 else:
-                    rate = st.slider("Risk-free rate %", 0.0, 8.0, 4.0, 0.25,
-                                     key="opt_rate") / 100
+                    # The rate is not an opinion. It is quoted every day, it is already
+                    # downloaded, and a slider on it is a knob for tuning a fair value
+                    # until it says what you hoped.
+                    rate, rate_src = mx.current_risk_free(
+                        src.con, settings.risk_free_fallback)
+                    st.caption(f"Risk-free rate {rate:.2%} — {rate_src}.")
                     with st.spinner("Reading the option chain"):
                         surf = op.surface(ticker, spot, max_expiries=10, risk_free=rate)
                     if surf.empty:
@@ -1191,6 +1195,65 @@ with tab_research:
                                 "real markets produce big moves more often than the curve "
                                 "allows, so the outer band is the optimistic reading."
                             )
+                            # --- the cone: the market's range for every day ---------
+                            cone = op.expected_move_cone(spot, ts)
+                            if not cone.empty:
+                                import plotly.graph_objects as go
+
+                                today = dt.date.today()
+                                x = [today + dt.timedelta(days=int(d)) for d in cone.day]
+                                fig_c = go.Figure()
+                                for lo, hi, shade, name in (
+                                    ("low_2", "high_2", "rgba(255, 158, 27, 0.10)", "95%"),
+                                    ("low_1", "high_1", "rgba(255, 158, 27, 0.22)", "68%"),
+                                ):
+                                    fig_c.add_trace(go.Scatter(
+                                        x=x, y=cone[hi], name=name, mode="lines",
+                                        line=dict(color=ui.AMBER_DIM, width=0.5),
+                                        hoverinfo="skip"))
+                                    fig_c.add_trace(go.Scatter(
+                                        x=x, y=cone[lo], name=name, mode="lines",
+                                        line=dict(color=ui.AMBER_DIM, width=0.5),
+                                        fill="tonexty", fillcolor=shade, hoverinfo="skip"))
+                                fig_c.add_trace(go.Scatter(
+                                    x=x, y=cone["mid"], name="spot today", mode="lines",
+                                    line=dict(color=ui.DATA, width=1, dash="dot")))
+                                # Where options actually exist. Between them the width is
+                                # interpolated, and saying so is the difference between a
+                                # measurement and a drawing.
+                                fig_c.add_trace(go.Scatter(
+                                    x=[today + dt.timedelta(days=int(d)) for d in ts.days],
+                                    y=[spot] * len(ts),
+                                    mode="markers", name="expiries",
+                                    marker=dict(color=ui.CYAN, size=6, symbol="line-ns-open"),
+                                    hovertext=[f"{e} · ATM {v:.1%}"
+                                               for e, v in zip(ts.expiry, ts.atm_iv)],
+                                    hoverinfo="text"))
+                                fig_c.update_layout(
+                                    height=300, margin=dict(l=0, r=0, t=6, b=0),
+                                    paper_bgcolor=ui.BG, plot_bgcolor=ui.BG,
+                                    showlegend=False, hovermode="x unified",
+                                    font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
+                                    xaxis=dict(gridcolor=ui.RULE, color=ui.MUTED),
+                                    yaxis=dict(gridcolor=ui.RULE, color=ui.MUTED, side="right"),
+                                )
+                                st.markdown("#### Where the market thinks the price will be")
+                                st.plotly_chart(fig_c, use_container_width=True,
+                                                key=f"cone_{ticker}")
+                                widest = cone.iloc[-1]
+                                st.caption(
+                                    f"The band opens with the square root of time, because "
+                                    f"uncertainty accumulates with time and not with its "
+                                    f"square. By {x[-1]} the market is charging for a "
+                                    f"two-in-three range of {widest.low_1:,.2f} to "
+                                    f"{widest.high_1:,.2f}. Width comes from the at-the-money "
+                                    "volatility of the nearest expiries on each side "
+                                    "(marked), interpolated in between. It is what options "
+                                    "cost, not a forecast — and the outer band is the "
+                                    "optimistic reading, because real returns have fatter "
+                                    "tails than the bell curve it assumes."
+                                )
+
                             stats_now = rs.price_stats(src.con, ticker)
                             cmp_ = op.implied_vs_realised(atm, stats_now.get("volatility"))
                             if cmp_:
@@ -1415,7 +1478,9 @@ with tab_options:
     else:
         u1, u2 = st.columns([2, 1])
         under = u1.text_input("Underlying", value="AAPL", key="opt_under").strip().upper()
-        rate_b = u2.slider("Risk-free %", 0.0, 8.0, 4.0, 0.25, key="opt_b_rate") / 100
+        rate_b, rate_b_src = mx.current_risk_free(src.con, settings.risk_free_fallback)
+        u2.markdown(ui.stats([("RISK-FREE", f"{rate_b:.2%}", "")]), unsafe_allow_html=True)
+        u2.caption(rate_b_src)
 
         spot_q = rs.live_quote(under) if under else None
         spot_b = (spot_q or {}).get("price")
