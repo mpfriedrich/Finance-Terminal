@@ -72,7 +72,7 @@ from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
-from portfolio_lab import paper, world
+from portfolio_lab import comps, paper, world
 from portfolio_lab import summary as ai_summary
 
 st.set_page_config(page_title="Portfolio Lab", page_icon="◫", layout="wide")
@@ -1565,23 +1565,97 @@ with tab_research:
                     }), numeric={"price", "mkt cap", "p/e", "p/b", "p/s"},
                         ticker_col="year"), unsafe_allow_html=True)
 
-                peer_set = rs.peers(enriched, ticker)
-                if not peer_set.empty:
-                    st.markdown("#### Comparable companies")
-                    st.markdown(ui.grid(pd.DataFrame({
-                        "ticker": peer_set.ticker,
-                        "name": peer_set.name.astype(str).str.slice(0, 24),
-                        "mkt cap": peer_set.market_cap.map(ui.money),
-                        "p/e": peer_set.price_to_earnings.map(ui.num),
-                        "p/b": peer_set.price_to_book.map(ui.num),
-                        "p/s": peer_set.price_to_sales.map(ui.num),
-                        "margin": peer_set.net_margin.map(lambda v: ui.pct(v, 1)),
-                        "d/e": peer_set.debt_to_equity.map(ui.num),
-                    }), numeric={"mkt cap", "p/e", "p/b", "p/s", "d/e"},
-                        signed={"margin"}), unsafe_allow_html=True)
+                # --------------------------------------------------- trading comps
+                st.markdown("#### Trading comps")
+                suggested = rs.peers(enriched, ticker).ticker.astype(str).tolist()[:8]
+                chosen_peers = st.multiselect(
+                    "Peers", options=sorted(enriched.ticker.astype(str).unique()),
+                    default=suggested, key=f"peers_{ticker}",
+                    help="Suggested: same SEC industry, closest in size. Add or remove "
+                         "names — a comps set is a judgement, not a formula.")
+                sheet = comps.sheet(enriched, ticker, chosen_peers) if chosen_peers else {}
+                if not sheet:
+                    st.info("Pick at least one peer.")
+                else:
+                    labels = {c: l for c, l, _ in comps.COLUMNS}
+                    pct_cols = {"ebitda_margin", "return_on_invested_capital",
+                                "revenue_growth"}
+
+                    def _fmt(col, v):
+                        if v is None or pd.isna(v):
+                            return "—"
+                        return ui.pct(v, 1) if col in pct_cols else f"{v:,.1f}x"
+
+                    def _vs(col, v):
+                        if v is None or pd.isna(v):
+                            return "—"
+                        if col in pct_cols:
+                            return f"{v * 100:+.1f} pp"
+                        if col == "net_debt_to_ebitda":
+                            return f"{v:+.1f}x"
+                        return ui.pct(v, 0)
+
+                    shown = [c for c, _, _ in comps.COLUMNS if c in sheet["rows"].columns]
+                    body = pd.DataFrame({
+                        "company": sheet["rows"].ticker.astype(str),
+                        "mkt cap": sheet["rows"].market_cap.map(ui.money),
+                        "EV": sheet["rows"].enterprise_value.map(ui.money),
+                        **{labels[c]: [_fmt(c, v) for v in sheet["rows"][c]] for c in shown},
+                    })
+                    summary = pd.DataFrame({
+                        "company": ["peer median", "peer mean", "peer high", "peer low",
+                                    f"{ticker} vs median"],
+                        "mkt cap": [""] * 5, "EV": [""] * 5,
+                        **{labels[c]: [_fmt(c, sheet["stats"].at[k, c])
+                                       for k in ("median", "mean", "high", "low")]
+                           + [_vs(c, sheet["vs_median"].get(c))] for c in shown},
+                    })
+                    st.markdown(ui.grid(pd.concat([body, summary], ignore_index=True),
+                                        numeric=set(labels.values()) | {"mkt cap", "EV"},
+                                        ticker_col="company"), unsafe_allow_html=True)
                     st.caption(
-                        "Same SEC industry, closest in size. Size is part of it: a small "
-                        "miner and a large one do not trade on the same multiples.")
+                        f"First row is {ticker}; statistics are over the peers only. "
+                        "Point-in-time figures in USD as of the screen date.")
+
+                    implied_v = comps.implied(enriched, ticker, sheet["stats"])
+                    if not implied_v.empty:
+                        st.markdown("#### What the peer multiples imply")
+                        st.markdown(ui.grid(pd.DataFrame({
+                            "multiple": implied_v["multiple"],
+                            "peer median": implied_v["peer median"].map(
+                                lambda v: f"{v:,.1f}x"),
+                            "applied to": implied_v["applied to"].str.replace("_ttm", " TTM")
+                                .str.replace("_", " "),
+                            "implied equity": implied_v["implied equity value"].map(ui.money),
+                            "per share": implied_v["implied price"].map(ui.num),
+                            "vs price": implied_v["vs price"],
+                        }).assign(**{"vs price": lambda d: d["vs price"].map(
+                            lambda v: ui.pct(v, 0))}),
+                            numeric={"peer median", "implied equity", "per share"},
+                            signed={"vs price"}, ticker_col="multiple"),
+                            unsafe_allow_html=True)
+                        st.caption(
+                            "Median multiple × the company's own figure. EV multiples are "
+                            "taken to equity by subtracting net debt; equity multiples are "
+                            "not. A multiple is skipped where the company's figure is not "
+                            "positive. The spread between rows is the honest answer: "
+                            "comps give a range, not a price.")
+
+                if me is not None:
+                    zs = comps.against_history(val, me)
+                    if not zs.empty:
+                        st.markdown("#### Against its own history")
+                        st.markdown(ui.grid(pd.DataFrame({
+                            "multiple": zs["multiple"],
+                            "now": zs["now"].map(lambda v: f"{v:,.1f}x"),
+                            "own average": zs["own average"].map(lambda v: f"{v:,.1f}x"),
+                            "years": zs["years"].astype(str),
+                            "z-score": zs["z-score"].map(lambda v: f"{v:+.1f}"),
+                        }), numeric={"now", "own average", "years"}, signed={"z-score"},
+                            ticker_col="multiple"), unsafe_allow_html=True)
+                        st.caption("How many standard deviations today's multiple sits "
+                                   "from the company's own yearly average. Past years "
+                                   "use the price and figures of their own date.")
 
             # ----------------------------------------------------------------- options
             with sections[4]:
