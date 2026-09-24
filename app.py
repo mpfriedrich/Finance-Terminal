@@ -38,7 +38,7 @@ if not st.runtime.exists():
     )
 
 from portfolio_lab import ui
-from portfolio_lab.config import CACHE_DIR, MARKET_DB, USER_DB, Settings, secret
+from portfolio_lab.config import CACHE_DIR, MARKET_DB, USER_DB, CostModel, Settings, secret
 from portfolio_lab.data import industry
 from portfolio_lab.data.free import FreeSource
 from portfolio_lab.data.schema import open_market, open_user
@@ -49,6 +49,7 @@ from dataclasses import replace
 
 from portfolio_lab.screen.spec import Filter, spec_to_json
 from portfolio_lab.screen.valuation import Assumptions
+from portfolio_lab import backtest as bktest
 from portfolio_lab import briefing as bfg
 from portfolio_lab import business as bz
 from portfolio_lab import macro as mc
@@ -579,6 +580,113 @@ with tab_screen:
         if st.button("Stop tracking and discard", use_container_width=True):
             store.stop_tracking(chosen)
             st.rerun()
+
+    # ------------------------------------------------------------- backtest (stage A)
+    st.markdown("#### Backtest — stage A")
+    if picks.empty:
+        st.caption(
+            "Nothing held yet. The backtest runs on the names ticked above, not on "
+            "everything that passed."
+        )
+    else:
+        bt_tickers = [str(x) for x in picks.ticker]
+        span = src.con.execute(
+            "SELECT MIN(date), MAX(date) FROM prices WHERE ticker IN (SELECT UNNEST(?))",
+            [bt_tickers],
+        ).fetchone()
+        first_bar, last_bar = (span or (None, None))
+        if not first_bar:
+            st.info("No stored price history for these names.")
+        else:
+            c1, c2, c3 = st.columns([1.1, 1.1, 1.2])
+            start_on = c1.date_input(
+                "Start", value=first_bar, min_value=first_bar, max_value=last_bar,
+                key=f"bt_start_{chosen}",
+            )
+            charge = c2.toggle("Trading costs", value=True, key=f"bt_costs_{chosen}",
+                               help="Tiered by market cap; switch off to see what they cost you.")
+            go = c3.button("Run backtest", use_container_width=True, key=f"bt_go_{chosen}")
+
+            if go:
+                snapshot = src.snapshot()
+                model = settings.cost if charge else CostModel(
+                    commission=0.0, spread_tiers=((float("inf"), 0.0),))
+                result = bktest.buy_and_hold(
+                    src.con, picks, start_on, last_bar, costs=model,
+                    risk_free=settings.risk_free_fallback,
+                    data_fingerprint=snapshot.fingerprint(),
+                )
+                if result is None:
+                    st.session_state[f"bt_result_{chosen}"] = None
+                else:
+                    store.record_run(
+                        chosen, "stage_a", spec.fingerprint(), snapshot.fingerprint(),
+                        result.dates[0], result.dates[-1],
+                        {"costs_charged": charge, "positions": len(picks)},
+                        result.metrics,
+                    )
+                    st.session_state[f"bt_result_{chosen}"] = result
+
+            result = st.session_state.get(f"bt_result_{chosen}")
+            if result is None and go:
+                st.info("Not enough overlapping price history to run this basket.")
+            elif result is not None:
+                m = result.metrics
+                st.markdown(ui.stats([
+                    ("FROM", str(result.dates[0]), ""),
+                    ("YEARS", f"{result.years:.1f}", ""),
+                    ("PORTFOLIO P.A.", ui.pct(m["annual_return"]),
+                     "up" if m["annual_return"] >= 0 else "down"),
+                    ("S&P 500 TR P.A.", ui.pct(m.get("benchmark_annual_return")), ""),
+                    ("EXCESS P.A.", ui.pct(m.get("excess_annual")),
+                     "up" if (m.get("excess_annual") or 0) >= 0 else "down"),
+                    ("ENTRY COST", ui.pct(result.entry_cost_total), ""),
+                ]), unsafe_allow_html=True)
+
+                curve = pd.DataFrame({"Portfolio": result.portfolio}, index=result.dates)
+                if result.benchmark:
+                    curve[result.benchmark_symbol] = result.benchmark
+                st.line_chart(curve, height=280, color=[ui.AMBER, ui.CYAN])
+
+                rows = [
+                    ("Return p.a.", m["annual_return"], m.get("benchmark_annual_return")),
+                    ("Total return", m["total_return"], m.get("benchmark_total_return")),
+                    ("Volatility p.a.", m["volatility"], m.get("benchmark_volatility")),
+                    ("Max drawdown", m["max_drawdown"], m.get("benchmark_max_drawdown")),
+                ]
+                table = pd.DataFrame({
+                    "metric": [r[0] for r in rows] + ["Sharpe", "Turnover"],
+                    "portfolio": [ui.pct(r[1]) for r in rows]
+                                 + [ui.num(m["sharpe"]), "0.00"],
+                    result.benchmark_symbol or "index":
+                        [ui.pct(r[2]) for r in rows]
+                        + [ui.num(m.get("benchmark_sharpe")), "—"],
+                })
+                st.markdown(ui.grid(table, numeric=set(), ticker_col="metric"),
+                            unsafe_allow_html=True)
+                st.caption(
+                    "Turnover is zero by construction: stage A buys once and holds, so "
+                    "costs are charged at entry only (R16b)."
+                )
+
+                for note in result.notes:
+                    st.warning(note)
+                st.warning(result.label)
+
+                tried = store.backtest_count(spec.fingerprint(), result.data_fingerprint)
+                other = store.other_data_builds(spec.fingerprint(), result.data_fingerprint)
+                st.caption(
+                    f"This exact screen has been tested {tried}× against this data build "
+                    f"(`{bktest.short_build_id(result.data_fingerprint)}`). The more "
+                    "attempts, the more the "
+                    "best-looking curve is a product of the search rather than of the rule."
+                )
+                if other:
+                    st.warning(
+                        f"{other} earlier run(s) of this screen read a DIFFERENT data "
+                        "build. Free price sources restate adjusted closes, so those "
+                        "curves and this one are not directly comparable (R22)."
+                    )
 
 with tab_research:
     st.markdown('<div class="tl-cmd"><span class="p">&gt;</span></div>', unsafe_allow_html=True)

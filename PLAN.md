@@ -396,6 +396,35 @@ Zwei kleinere Befunde aus der Durchsicht am 23.09.:
   `shares_outstanding` erklärt, warum 426 Titel mangels Aktienzahl ausgeschlossen
   werden, und `ticker_history` ist die Voraussetzung für Phase 7.
 
+## Phase 5 — Ergebnis vom 24.09.2026
+
+**Bestanden.** `backtest.py` rechnet Stufe A: einmal kaufen, halten, gegen den S&P 500
+Total Return. Was dabei gemessen statt angenommen wurde:
+
+| Kriterium | Ergebnis |
+|---|---|
+| R11 · gleiche Renditebasis | `^SP500TR` gegen `^GSPC` (derselbe Index **ohne** Dividenden): **+201 bp/Jahr** über 10 Jahre — das ist der Dividendenbeitrag, und er wäre null, wäre die Reihe fälschlich eine Kursreihe. Gegen `SPY`, denselben Index auf umgekehrtem Weg gebaut (gehandelte Kurse plus echte Ausschüttungen): **11 bp/Jahr** Abstand, der Index oben. Der Plan erlaubt 25 bp. |
+| R8 · Kosten wirksam und gestaffelt | Kosten auf null → Jahresrendite steigt messbar (im Testlauf 9,8 bp/Jahr); Micro-Cap zahlt mehr als Mega-Cap; **fehlende Marktkapitalisierung zahlt die teuerste Stufe**, nicht die billigste |
+| R16b · Stufe A ist Kaufen-und-Halten | Umschlag 0,00 in der Kennzahlentabelle; Kosten nur beim Ersterwerb, per Test auf den Cent nachgerechnet |
+| R17 · Dividenden zum Ex-Tag reinvestiert | Test mit einem Zahler, dessen **Kurs** flach liegt und dessen bereinigte Reihe um 4 % steigt → Endwert exakt 104,00 |
+| R10 · Grafik auf Basis 100 | Portfolio und Index auf gemeinsamer Basis, identische Datumsachse |
+| R12 · Etikett | nennt beide **nicht** korrigierten Verzerrungen (Auswahl mit heutigen Daten, fehlende Delistings) und dass beide nach oben zeigen |
+| R22 · Snapshot-Kennung | jeder Lauf landet in `backtest_runs` mit Kennung des Datenbestands; ein früherer Lauf auf anderem Bestand erzeugt eine Warnung |
+
+**Zwei Befunde aus dem Bau, beide behoben:**
+
+* Die Jahresrendite wurde zunächst vom **Kurvenwert nach Kosten** aus annualisiert. Damit
+  verschwand das gesamte Kostenmodell aus der Schlagzeilenzahl, während es in der
+  Gesamtrendite noch auftauchte — die beiden erzählten verschiedene Geschichten. Jetzt
+  ist das eingesetzte Kapital die Bezugsgröße, und ein Test hält das fest.
+* Ein Backtest, dessen Startdatum weiter zurückreicht als die gespeicherten Kurse,
+  **verkürzte den Zeitraum stillschweigend**. Jetzt steht ein Hinweis am Ergebnis.
+
+**Grenze, die dabei sichtbar wurde:** Der Kursbestand umfasst ein rollendes Fenster von
+460 Tagen, echte Zehnjahres-Rückblicke sind damit nicht möglich. Für die Benchmark-Reihen
+liegen 2010–2026 vor, für die Einzelaktien nicht. Ein tieferer Kursdownload ist eine
+Entscheidung über Zeit und Datenmenge, keine Programmieraufgabe.
+
 ## Nachtrag 24.09.2026 — Branchenfilter und Kerzenchart
 
 **1. Branchenfilter (user).** Die 389 SEC-Bezeichnungen sind präzise und untippbar. Neu
@@ -471,7 +500,7 @@ Aufbau auf einer Kopie hätte gegen die alte Tabelle geschrieben und wäre gesch
       - Startanleitung für den Nutzer schreiben
       **Covers:** R2, R7
 
-- [ ] **Phase 5: Rückblick-Backtest, Kosten, Vergleichsgrafik**
+- [x] **Phase 5: Rückblick-Backtest, Kosten, Vergleichsgrafik** — *Kennzahlen-formeln erst in Phase 6 gegen analytische Reihen geprüft (R9)*
       **Done when:** Grafik Portfolio gegen S&P auf Basis 100 mit Kennzahlentabelle; **der Test nach R11 ist grün — die Indexreihe ist eine Total-Return-Reihe und ihre 10-Jahres-Rendite p. a. liegt innerhalb von 25 Basispunkten zur veröffentlichten S&P-500-TR-Zahl (60 bei `SPY`-Rückfall)**; Stufe A ist als Kaufen-und-Halten mit Umschlag 0 ausgewiesen (R16b); Warnetikett an der Grafik; Kosten wirksam und nach Größenklasse gestaffelt; jeder Lauf trägt eine Snapshot-Kennung.
       **Steps:**
       - Gestaffeltes Kostenmodell `[A10]`

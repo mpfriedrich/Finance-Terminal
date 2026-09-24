@@ -87,6 +87,59 @@ class Store:
         ).fetchone()
         return int(row[0]) if row else 0
 
+    def record_run(
+        self,
+        pid: str,
+        kind: str,
+        spec_fingerprint: str,
+        data_fingerprint: str,
+        start: dt.date | None,
+        end: dt.date | None,
+        params: dict,
+        metrics: dict,
+        holdout_unlocked: bool = False,
+    ) -> str:
+        """Write one backtest result down, stamped with the data build it came from.
+
+        The stamp is the point (R22). Free price sources restate adjusted closes without
+        telling anyone, so the same screen over the same dates can produce a different
+        curve next month. A run that cannot name the build it read is not reproducible,
+        and an irreproducible backtest is an anecdote.
+        """
+        import json
+
+        run_id = uuid.uuid4().hex[:12]
+        self.con.execute(
+            "INSERT INTO backtest_runs (id, portfolio_id, kind, spec_fingerprint, "
+            "data_fingerprint, start_date, end_date, holdout_unlocked, params_json, "
+            "metrics_json, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [run_id, pid, kind, spec_fingerprint, data_fingerprint, start, end,
+             holdout_unlocked, json.dumps(params, default=str),
+             json.dumps(metrics, default=str), dt.datetime.now()],
+        )
+        return run_id
+
+    def runs(self, pid: str, limit: int = 20) -> pd.DataFrame:
+        return self.con.execute(
+            "SELECT id, kind, spec_fingerprint, data_fingerprint, start_date, end_date, "
+            "holdout_unlocked, metrics_json, created_at FROM backtest_runs "
+            "WHERE portfolio_id = ? ORDER BY created_at DESC LIMIT ?",
+            [pid, limit],
+        ).fetch_df()
+
+    def other_data_builds(self, spec_fingerprint: str, data_fingerprint: str) -> int:
+        """How many earlier runs of this same screen read a DIFFERENT data build.
+
+        Non-zero means the curve on screen is not comparable with the one remembered from
+        last time, however identical the screen was (R22).
+        """
+        row = self.con.execute(
+            "SELECT COUNT(*) FROM backtest_runs WHERE spec_fingerprint = ? "
+            "AND data_fingerprint <> ?",
+            [spec_fingerprint, data_fingerprint],
+        ).fetchone()
+        return int(row[0]) if row else 0
+
     # ---- live tracking -----------------------------------------------------------
     def start_tracking(
         self,
