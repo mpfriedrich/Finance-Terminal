@@ -449,15 +449,26 @@ prüfen sollte, ohne je zu unterbrechen.
   100). `CACHE_VERSION` → `v3`. **Noch nicht gemessen:** die Wirkung auf die drei
   Varianten der Tabelle unten. Das braucht `data/market.duckdb`, die nur lokal liegt:
   `scripts/warm_pit_cache.py` neu laufen lassen, dann die drei Läufe wiederholen.
-* **`ticker_history` wird von Stufe B nicht benutzt.** Das Kriterium sagt „das Universum
-  aus Phase 7"; tatsächlich kommt es weiter aus `securities`. Zahlenmäßig identisch (die
-  kursbasierten Zeilen sind dieselben Überlebenden), aber das Kriterium ist damit **nicht
-  erfüllt** und wird hier so festgehalten statt abgehakt.
+* ~~**`ticker_history` wird von Stufe B nicht benutzt.**~~ — **behoben am 24.09.2026
+  (Cloud-Sitzung):** `FreeSource.universe()` liest jetzt `history.universe_at()`: ein
+  Titel gehört zum Stichtag, wenn sein Preisfenster in `ticker_history` ihn abdeckt
+  (10 Tage Kulanz); Stammdaten kommen aus `securities`, ein nur dort bekannter
+  verschwundener Titel bleibt mit leeren Feldern drin. Titel ganz ohne Kurse bleiben wie
+  bisher an jedem Stichtag drin, damit die Ausschluss-Rechnung aufgeht. Die Preisfenster
+  werden jetzt bei jedem `scripts/build_prices.py` mit aufgefrischt
+  (`history.refresh_price_windows`). Sind sie leer oder älter als der neueste Kurs, fällt
+  die Quelle auf `securities` zurück **und der Lauf sagt das im Hinweis**. Vier neue
+  Tests in `tests/test_stage_b.py`, alle vier schlugen vorher fehl. Dabei gefunden und
+  behoben: ein Stichtag, an dem alle Meldungen älter als 400 Tage sind, ließ den Lauf mit
+  `KeyError: 'data_age_days'` abstürzen (schnelle SQL-Fassung in `free.py`; die
+  Referenzfassung in `base.py` hatte die Absicherung schon). `CACHE_VERSION` → `v4`.
+  **Lokal einmal nötig:** `scripts/build_ticker_history.py` oder `scripts/build_prices.py`
+  laufen lassen, damit die Fenster aktuell sind — sonst greift die Rückfallebene.
 * **Der Cache-Schlüssel erkennt Korrekturen an Ort und Stelle nicht** (Quelle, jüngster
   Balken, Zeilenzahlen ändern sich dabei nicht). Dokumentiert statt behauptet;
   `CACHE_VERSION` ist jetzt `v2` und die Regel zum Hochzählen steht im Modul.
-* **R19 für Stufe B** ist als Hinweis umgesetzt (Delistings, nicht bepreisbare
-  Positionen), aber ohne die Zählung „wie viele Titel verließen das Universum".
+* ~~**R19 für Stufe B**~~ — **behoben am 24.09.2026:** der Lauf zählt, wie viele Titel
+  zwischen zwei Stichtagen das Universum verlassen haben, und nennt die ersten acht.
 
 **Wirkung auf die Zahlen, gleiche Bedingungen vorher/nachher:**
 
@@ -692,7 +703,7 @@ Aufbau auf einer Kopie hätte gegen die alte Tabelle geschrieben und wäre gesch
       - Zählung und Anzeige nach R19
       **Covers:** R18, R19
 
-- [ ] **Phase 8: Point-in-Time-Backtest (Fundamentaldaten)** — *Gegenprüfung 25.09.2026: durchgefallen, drei schwere Befunde behoben; von den offenen ist `period_start` am 24.09. behoben, `ticker_history`, Cache-Schlüssel und R19-Zählung stehen noch aus; siehe oben*
+- [ ] **Phase 8: Point-in-Time-Backtest (Fundamentaldaten)** — *Gegenprüfung 25.09.2026: durchgefallen, drei schwere Befunde behoben; von den offenen sind `period_start`, `ticker_history` und R19 am 24.09. behoben; der Cache-Schlüssel ist dokumentiert statt gelöst; es fehlen die Messung der Wirkung auf die Zahlen (braucht die lokale Datenbank) und die erneute unabhängige Gegenprüfung; siehe oben*
       **Done when:** quartalsweise Umschichtung, die je Stichtag **das Universum aus Phase 7** und ausschließlich die bis dahin gemeldeten Bilanzdaten benutzt; **drei Tests sind grün:** ein Datensatz mit späterem Meldedatum gelangt nicht in die Auswahl; eine nachträgliche Korrektur verdrängt die ursprüngliche Fassung nicht; ein Titel, der zum Stichtag noch nicht notiert war oder schon verschwunden ist, erscheint nicht in der Auswahl. Der Test nach R16 belegt die Ausführung zur Folgetags-Eröffnung. Das Etikett nennt, welche Verzerrungen korrigiert sind und welche nicht — mit der in Phase 7 gemessenen Quote. Ein voller Durchlauf über den gesamten belastbaren Zeitraum braucht **höchstens 5 Minuten**; wird das überschritten, werden Zwischenergebnisse je Stichtag zwischengespeichert, bis es eingehalten ist.
       **Steps:**
       - Stichtagsabfrage über Meldedatum, Auswahlregel „früheste Fassung" (R13)

@@ -308,3 +308,78 @@ def test_the_delisting_assumption_moves_the_stage_b_result_too():
                         frequency="buy_and_hold", delisting_return=-1.00)
     assert mild.portfolio[-1] == pytest.approx(95.0, rel=1e-6)
     assert total.portfolio[-1] == pytest.approx(50.0, rel=1e-6)
+
+
+# --- the universe from Phase 7 --------------------------------------------------------
+# The criterion says "das Universum aus Phase 7". Until 24.09.2026 it came from the
+# securities master instead — numerically the same on free data, but the criterion was
+# not met, and a source that did know vanished companies would have been ignored.
+
+from portfolio_lab.data import history  # noqa: E402
+
+
+def phase7_source(windows_to_newest_bar: bool = True) -> FreeSource:
+    """Securities master WITHOUT dates, so only ticker_history can know who was listed.
+
+    BBB trades until 30 June 2023. ZZZ is a vanished company the securities master has
+    never heard of — the shape a survivorship-free source would add.
+    """
+    bbb_days = [d for d in DAYS if d <= dt.date(2023, 6, 30)]
+    rows = (
+        [("AAA", d, 10.0, 10.0, 10.0, 10.0, 1_000_000) for d in DAYS]
+        + [("BBB", d, 10.0, 10.0, 10.0, 10.0, 1_000_000) for d in bbb_days]
+        + [("ZZZ", d, 10.0, 10.0, 10.0, 10.0, 1_000_000) for d in bbb_days]
+    )
+    src = build_source(
+        facts(1001, book=1_000_000_000.0, shares=100_000_000, filed=dt.date(2023, 1, 5))
+        + facts(1002, book=2_000_000_000.0, shares=100_000_000, filed=dt.date(2023, 1, 5))
+        + facts(1009, book=3_000_000_000.0, shares=100_000_000, filed=dt.date(2023, 1, 5)),
+        listings={"AAA": (1001, None, None), "BBB": (1002, None, None)},
+        prices=rows,
+    )
+    history.refresh_price_windows(src.con)
+    src.con.execute(
+        "INSERT INTO ticker_history (cik, ticker, valid_from, valid_to, source) "
+        "VALUES (1009, 'ZZZ', DATE '2023-01-02', DATE '2023-06-30', ?)",
+        [history.SOURCE_PRICES],
+    )
+    if not windows_to_newest_bar:
+        src.con.execute("UPDATE ticker_history SET valid_to = DATE '2023-06-30'")
+    return src
+
+
+def test_the_universe_is_read_from_ticker_history():
+    src = phase7_source()
+    assert src.universe_basis == "ticker_history"
+    during = set(src.universe(dt.date(2023, 5, 1)).ticker)
+    after = set(src.universe(dt.date(2024, 1, 3)).ticker)
+    assert {"AAA", "BBB"} <= during
+    assert "BBB" not in after, "a name past its price window stayed in the universe"
+    assert "AAA" in after
+
+
+def test_a_company_only_ticker_history_knows_is_screened_while_it_was_listed():
+    src = phase7_source()
+    frame = src.screening_frame(dt.date(2023, 5, 1)).set_index("ticker")
+    assert "ZZZ" in frame.index
+    assert frame.at["ZZZ", "book_value"] == 3_000_000_000.0
+    assert "ZZZ" not in set(src.universe(dt.date(2024, 1, 3)).ticker)
+
+
+def test_stale_windows_fall_back_to_the_master_and_the_run_says_so():
+    """Windows that end before the newest bar would make every living company look
+    delisted. The source falls back, and the result must not stay quiet about it."""
+    src = phase7_source(windows_to_newest_bar=False)
+    assert src.universe_basis == "securities"
+    spec = PortfolioSpec(size=1, min_dollar_volume=0, min_trading_days_60=0)
+    r = stage_b.run(src, spec, dt.date(2023, 2, 1), dt.date(2024, 6, 28), costs=FREE)
+    assert any("securities master" in n for n in r.notes)
+
+
+def test_names_that_leave_the_universe_are_counted():
+    """R19: the result says how many names left the universe during the run."""
+    src = phase7_source()
+    spec = PortfolioSpec(size=1, min_dollar_volume=0, min_trading_days_60=0)
+    r = stage_b.run(src, spec, dt.date(2023, 2, 1), dt.date(2024, 6, 28), costs=FREE)
+    assert any("2 name(s) left the universe" in n for n in r.notes), r.notes
+    assert not any("securities master" in n for n in r.notes)

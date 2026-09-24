@@ -155,11 +155,26 @@ def run(
     schedule_dates = [d for d in rebalance_dates(start, end, frequency) if d <= end]
     chosen_at: dict[dt.date, dict[str, float]] = {}
     notes: list[str] = []
+    if getattr(source, "universe_basis", "ticker_history") == "securities":
+        notes.append(
+            "ticker_history is empty or older than the newest prices, so listings came "
+            "from the securities master — today's companies, with no record of when each "
+            "was listed. Rebuild it (scripts/build_ticker_history.py) before trusting "
+            "which names were available on which date."
+        )
+    # R19: who left the universe between two screens. Counted from the frames the screen
+    # actually saw, so it reflects whatever the source knows about listings.
+    previous: set[str] | None = None
+    departed: set[str] = set()
     for screen_date in schedule_dates:
         frame = frame_for(screen_date)
         if frame is None or frame.empty:
             notes.append(f"{screen_date}: no universe at that date, position kept")
             continue
+        members = set(frame.ticker.astype(str))
+        if previous is not None:
+            departed |= previous - members
+        previous = members
         result = run_screen(frame, spec)
         picks = result.picks
         if exclude:
@@ -281,6 +296,12 @@ def run(
             f"({', '.join(sorted(set(delisted))[:8])}). Each was realised at "
             f"{delisting_return:.0%} from its last close rather than held at it (R18); "
             "the assumption is a setting and it moves the result."
+        )
+    if departed:
+        notes.append(
+            f"{len(departed)} name(s) left the universe between rebalance dates "
+            f"({', '.join(sorted(departed)[:8])}). From then on none of them could be "
+            "chosen (R19)."
         )
     if stuck_events:
         notes.append(

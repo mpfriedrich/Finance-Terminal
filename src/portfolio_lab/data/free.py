@@ -1,8 +1,9 @@
 """FreeSource: the SEC + yfinance implementation of DataSource.
 
-`survivorship_free` is False and says so loudly. The universe here is today's listed
-companies; what happened to everyone else is Phase 7's problem and, on free data, may
-stay partly unanswerable (PLAN.md A21).
+`survivorship_free` is False and says so loudly. The universe is read from
+`ticker_history` (Phase 7), so a name is only screened on dates its price window covers;
+but on free data that table holds hardly any vanished companies, so it is still today's
+survivors in practice (PLAN.md A21, Phase 7 measured 0/20).
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import json
 import duckdb
 import pandas as pd
 
-from . import industry, pit, prices as px
+from . import history, industry, pit, prices as px
 from .base import Snapshot
 
 TABLES = ("securities", "fundamentals", "prices", "ticker_history", "shares_outstanding")
@@ -50,7 +51,18 @@ class FreeSource:
             row_counts=counts,
         )
 
+    @property
+    def universe_basis(self) -> str:
+        """Where `universe()` reads listings from, for the run's notes.
+
+        `ticker_history` when its price windows are current; otherwise the securities
+        master, which holds today's survivors only — the result has to say so.
+        """
+        return "ticker_history" if history.windows_current(self.con) else "securities"
+
     def universe(self, asof: dt.date) -> pd.DataFrame:
+        if self.universe_basis == "ticker_history":
+            return history.universe_at(self.con, asof)
         return self.con.execute(
             "SELECT ticker, cik, name, sector, sic, exchange FROM securities "
             "WHERE (first_seen IS NULL OR first_seen <= ?) "
@@ -112,6 +124,12 @@ class FreeSource:
                   .merge(liq, on="ticker", how="left")
                   .merge(shvol, on="ticker", how="left")
                   .merge(sessions, on="ticker", how="left"))
+        # Same guard as build_screening_frame: on a date where every fact is too old to
+        # be visible, the column is missing, and the screen must count everyone as stale
+        # rather than raise. Found by a stage B run whose last screen date lay more than
+        # 400 days after the only filing.
+        if "data_age_days" not in out.columns:
+            out["data_age_days"] = float("nan")
         # The SEC wording stays in `sector`; `industry_group` is the coarse, typeable
         # version of the same fact. Both travel with the row so the screen can filter on
         # one and still show the other.

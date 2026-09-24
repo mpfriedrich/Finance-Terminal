@@ -36,7 +36,8 @@ import pandas as pd
 # the fix silently does nothing. It is a manual constant because nothing can detect the
 # change for us; forgetting it is the trap, so it is named here rather than buried.
 # v3: restatements are matched by period end and length class, not exact start.
-CACHE_VERSION = "v3"
+# v4: the universe is read from ticker_history, and the frame always has data_age_days.
+CACHE_VERSION = "v4"
 
 
 def _build_id(fingerprint: str) -> str:
