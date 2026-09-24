@@ -72,7 +72,7 @@ from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
-from portfolio_lab import comps, paper, world
+from portfolio_lab import comps, export, paper, world
 from portfolio_lab import wacc as W
 from portfolio_lab import summary as ai_summary
 
@@ -649,6 +649,19 @@ with tab_screen:
             )
         else:
             st.caption("Nothing ticked. Tick a row, or use the buttons above.")
+        st.download_button(
+            "Export screen to Excel",
+            data=export.workbook(
+                {"Passed": res.ranked, "Held": picks,
+                 "Excluded": pd.DataFrame(
+                     [{"reason": k, "names": v} for k, v in res.exclusions.items()]),
+                 "Filters": pd.DataFrame([{"metric": f.metric, "op": f.op,
+                                           "value": str(f.value)} for f in spec.filters])},
+                title="Screen: " + "; ".join(spec.describe()),
+                source="SEC XBRL as first filed, daily closes; USD", as_of=asof),
+            file_name=export.filename("screen", asof),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="export_screen")
     else:
         st.info("Nothing passed. The breakdown below names the binding rule.")
 
@@ -1731,6 +1744,33 @@ with tab_research:
                             "book value. When the terminal share is high, the answer is "
                             "mostly the growth-forever guess — which is what the grid shows.")
 
+                st.download_button(
+                    f"Export {ticker} to Excel",
+                    data=export.workbook(
+                        {"Annual as filed": rs.annual_history(src.con, cik),
+                         "Quarterly": rs.quarterly_trend(src.con, cik),
+                         "Valuation history": val,
+                         "Comps": (sheet or {}).get("rows", pd.DataFrame()),
+                         "Comps stats": (sheet or {}).get("stats", pd.DataFrame())
+                             .reset_index(names="statistic")
+                             if (sheet or {}).get("stats") is not None else pd.DataFrame(),
+                         "Implied by peers": locals().get("implied_v", pd.DataFrame()),
+                         "WACC": pd.DataFrame([locals().get("b") or {}]),
+                         "DCF": pd.DataFrame([{k: v for k, v in
+                                               (locals().get("out_dcf") or {}).items()}]),
+                         "DCF sensitivity": (locals().get("grid", pd.DataFrame())
+                                             .reset_index(names="wacc")
+                                             if isinstance(locals().get("grid"),
+                                                           pd.DataFrame) else pd.DataFrame())},
+                        title=f"{ticker} — research",
+                        source=f"SEC XBRL as first filed (history in "
+                               f"{rs.reporting_currency(src.con, cik)}); screen figures "
+                               "in USD; daily closes",
+                        as_of=asof),
+                    file_name=export.filename(f"{ticker}_research", asof),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"export_{ticker}")
+
             # ----------------------------------------------------------------- options
             with sections[4]:
                 spot = (quote or {}).get("price") or prof.get("price")
@@ -2578,6 +2618,25 @@ with tab_books:
 
         st.markdown(ui.grid(_paper_table(valued), ticker_col="book"),
                     unsafe_allow_html=True)
+        daily = pd.DataFrame({
+            f"{v['book']['name']} ({v['book']['origin']})": v["value"]
+            for v in valued if not v.get("empty")})
+        st.download_button(
+            "Export books to Excel",
+            data=export.workbook(
+                {"Books": pd.DataFrame([{
+                    "book": v["book"]["name"], "from": v["book"]["origin"],
+                    "kind": v["book"]["kind"], "since": str(v["book"]["started_on"]),
+                    "money_in": v.get("invested_now"), "value": v.get("value_now"),
+                    "gain": v.get("gain"), "return": v.get("return"),
+                    "sp500tr_return": v.get("benchmark_return")} for v in valued]),
+                 "Daily value": daily.reset_index(names="date") if not daily.empty
+                 else pd.DataFrame()},
+                title="Paper books", source="Stored daily closes; values in USD",
+                as_of=asof),
+            file_name=export.filename("paper_books", asof),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="export_books")
 
         for v in valued:
             b = v["book"]
