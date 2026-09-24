@@ -37,7 +37,8 @@ import pandas as pd
 # change for us; forgetting it is the trap, so it is named here rather than buried.
 # v3: restatements are matched by period end and length class, not exact start.
 # v4: the universe is read from ticker_history, and the frame always has data_age_days.
-CACHE_VERSION = "v4"
+# v5: the first filing of a period speaks for it across tags, not per tag.
+CACHE_VERSION = "v5"
 
 
 def _build_id(fingerprint: str) -> str:
@@ -51,7 +52,11 @@ class FrameCache:
 
     def __init__(self, source, root: Path, data_fingerprint: str = "") -> None:
         self.source = source
-        self.build = _build_id(data_fingerprint)
+        # Where the source read its listings from is part of what a frame IS: frames
+        # cached while it had fallen back to the securities master must not be served
+        # once ticker_history is current again, or the run loses the note saying so.
+        basis = getattr(source, "universe_basis", "")
+        self.build = _build_id(f"{data_fingerprint}|{basis}" if basis else data_fingerprint)
         self.root = Path(root) / CACHE_VERSION / self.build
         self.hits = 0
         self.misses = 0

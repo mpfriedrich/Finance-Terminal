@@ -478,6 +478,45 @@ prüfen sollte, ohne je zu unterbrechen.
 | dasselbe, jährlich | 11,95 % | **11,69 %** | −2,27 → **−2,53** |
 | KBV ≤ 1, 20 Titel, jährlich | 15,77 % | **15,22 %** | +1,55 → **+1,01** |
 
+## Zweite Gegenprüfung Phase 7 + 8 — 24.09.2026 (Cloud-Sitzung)
+
+Ein unabhängiger Prüfer (eigener Agent, hat den Code nicht geschrieben) hat Phase 7 und 8
+nach den Fixes erneut gegen die Abnahmekriterien gelesen und Befunde mit Skripten
+nachgestellt. **Verdikt: Phase 7 bestanden, Phase 8 durchgefallen.** Alle Befunde sind
+abgearbeitet, jeder mit einem Test, der am alten Code scheitert (sieben) bzw. eine
+Mutation erkennt (einer):
+
+1. **Blockierend (R13): Korrektur unter besserem XBRL-Tag verdrängte das Original.**
+   `instant_values` und `share_counts` wählten die früheste Meldung *je Tag* und
+   bevorzugten danach den besseren Tag — ein 10-K/A mit `StockholdersEquity` schlug das
+   10-K mit dem Ersatz-Tag, samt neuer Aktienzahl. Jetzt spricht nur die erste Einreichung
+   einer Periode, der Tag-Vorrang wählt nur unter deren Tags. Ausnahme, bewusst: eine
+   unplausible Aktienzahl (0, 1) in der ersten Einreichung überlässt die Periode der
+   nächsten. **Häufigkeit in den echten Daten ungemessen**, Abfrage dafür:
+   `SELECT COUNT(*) FROM (SELECT cik, metric, period_end, MIN(filed) f0, arg_min(filed, tag_rank) fbest FROM fundamentals WHERE period_start IS NULL GROUP BY ALL) WHERE fbest > f0`
+2. **Kriterium 3 auf dem `ticker_history`-Pfad war ungetestet** — das Entfernen von
+   `valid_from <= asof` blieb grün. Neuer Test mit spät beginnendem Preisfenster.
+3. **R19 nur halb:** jetzt beide Zahlen (verlassen / davon ohne Kurs), auch bei null.
+4. **Kosten wurden zu 0 % geliehen statt vom Anlagebetrag bezahlt** (Aufwärtsverzerrung,
+   bei Buy-and-hold über die ganze Haltedauer). Behoben: 10 → 40 bei 1 % ergibt 396, nicht 399.
+5. **`exclude` (R20, „ohne stärksten Titel“) verkleinerte das Depot** statt den Platz an
+   den nächsten Titel zu geben. Behoben.
+6. **Cache-Schlüssel ignorierte die Universumsbasis** — jetzt Teil des Schlüssels; der
+   Rückfall-Hinweis war zudem falsch formuliert, korrigiert.
+7. **R16 wörtlich** („nur Schlusskurs am Screening-Tag ändern → Füllung unverändert“) hat
+   jetzt einen eigenen Test.
+8. Klein: Benchmark wurde rückwärts aus der Zukunft aufgefüllt, wenn der Index später
+   beginnt (jetzt: kein Vergleich statt eines erfundenen); Umschichtungstermine rutschten
+   nach einem 31. dauerhaft auf den 28. (jetzt vom Start aus gezählt).
+
+Nicht geändert: eine Position, deren Kurse weniger als 10 Tage vor Fensterende enden,
+wird zum letzten Kurs bewertet statt mit Delisting-Abschlag (Datenverzug und Delisting
+sind dort nicht unterscheidbar). `CACHE_VERSION` → `v5`.
+
+**Was für die Abnahme von Phase 8 noch fehlt:** (a) eine dritte Prüfrunde über diese
+Fixes, (b) die Messungen, die nur lokal gehen — 5-Minuten-Grenze mit neu gewärmtem Cache,
+Wirkung auf die drei Vergleichsvarianten, Häufigkeit von Befund 1.
+
 ## Phase 7 — Ergebnis vom 24.09.2026: die Messung fällt aus, und das ist das Ergebnis
 
 **Abgeschlossen, mit dem Ausgang, den der Prüfer vorhergesagt hatte.** `ticker_history`

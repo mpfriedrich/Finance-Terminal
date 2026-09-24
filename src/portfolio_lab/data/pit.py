@@ -111,16 +111,26 @@ def share_counts(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFrame:
     """
     df = con.execute(
         """
-        WITH visible AS (
+        WITH candidates AS (
             SELECT cik, value, period_end, filed, tag_rank,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY cik, period_end, tag_rank
-                       ORDER BY filed ASC, value DESC
-                   ) AS rn
+                   MIN(filed) OVER (PARTITION BY cik, period_end) AS first_filed
             FROM fundamentals
             WHERE filed <= ? AND metric = 'shares_outstanding'
               AND value IS NOT NULL AND value >= ?
               AND date_diff('day', filed, ?) <= ?
+        ),
+        visible AS (
+            -- Only the first filing of a period may speak for it, WHATEVER tag a later
+            -- amendment uses (R13). Earliest-per-tag let a 10-K/A under a better tag
+            -- replace the original count. The floor above is applied first on purpose:
+            -- an original that tagged an impossible count (0, 1) leaves the period to
+            -- the next filing rather than leaving the company without a share count.
+            SELECT cik, value, period_end, filed, tag_rank,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY cik, period_end, tag_rank
+                       ORDER BY value DESC
+                   ) AS rn
+            FROM candidates WHERE filed = first_filed
         ),
         best AS (
             SELECT cik, value, period_end, filed,
@@ -153,17 +163,25 @@ def instant_values(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFram
     """
     df = con.execute(
         """
-        WITH visible AS (
+        WITH candidates AS (
             SELECT cik, metric, value, period_end, filed, tag_rank,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY cik, metric, period_end, tag_rank
-                       ORDER BY filed ASC
-                   ) AS rn
+                   MIN(filed) OVER (PARTITION BY cik, metric, period_end) AS first_date
             FROM fundamentals
             WHERE filed <= ? AND metric IN (SELECT UNNEST(?))
               AND period_start IS NULL
               AND value IS NOT NULL
               AND date_diff('day', filed, ?) <= ?
+        ),
+        visible AS (
+            -- The first filing of a period speaks for it; the tag preference below only
+            -- chooses among the tags THAT filing used. Ranking tags across filings let
+            -- an amendment under a better tag displace the original (R13).
+            SELECT cik, metric, value, period_end, filed, tag_rank,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY cik, metric, period_end, tag_rank
+                       ORDER BY filed ASC
+                   ) AS rn
+            FROM candidates WHERE filed = first_date
         ),
         first_filed AS (SELECT * FROM visible WHERE rn = 1),
         newest AS (

@@ -124,3 +124,16 @@ def test_an_interrupted_write_leaves_nothing_readable(tmp_path, monkeypatch):
     assert not cache.path_for(day).exists()
     again = cache.frame_for(day)
     assert len(again) == 2
+
+
+def test_frames_from_a_fallback_universe_are_not_served_after_it_is_fixed(tmp_path):
+    """The universe basis is part of the cache key (independent review, 24.09.2026)."""
+    from portfolio_lab.pit_cache import FrameCache
+
+    class Source:
+        def __init__(self, basis):
+            self.universe_basis = basis
+
+    fallback = FrameCache(Source("securities"), tmp_path, "same-fingerprint")
+    current = FrameCache(Source("ticker_history"), tmp_path, "same-fingerprint")
+    assert fallback.root != current.root
