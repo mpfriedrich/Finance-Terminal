@@ -227,7 +227,7 @@ def ingest(con: duckdb.DuckDBPyConnection, tickers_csv: Path, sf1_csv: Path,
             """,
             [str(sep_csv)],
         )
-        history.refresh_price_windows(con)
+        history.refresh_price_windows(con, own_transaction=False)
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")

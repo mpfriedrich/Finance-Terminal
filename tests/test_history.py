@@ -103,3 +103,48 @@ def test_an_empty_sample_is_not_reported_as_a_perfect_score():
     assert rec["n"] == 0
     assert rec["ticker_rate"] is None
     assert history.survivor_based(rec)
+
+
+# --- the two sources may start on the same day ---------------------------------------
+
+def test_a_filing_window_and_a_price_window_starting_the_same_day_both_fit():
+    """Nutrien (CIK 1725964) first filed and first traded on 2 January 2018. The key of
+    ticker_history had no source in it, so the price row collided with the filing row
+    and every price build after the Phase 7 build failed (seen on the real store,
+    24.09.2026)."""
+    c = duckdb.connect(":memory:")
+    _apply(c, MARKET_MIGRATIONS)
+    day = dt.date(2018, 1, 2)
+    c.execute("INSERT INTO securities (cik, ticker) VALUES (1725964, 'NTR')")
+    c.execute("INSERT INTO prices (ticker, date, open, close, close_adj, volume) "
+              "VALUES ('NTR', ?, 50, 50, 50, 1000)", [day])
+    c.execute("INSERT INTO ticker_history (cik, ticker, valid_from, valid_to, source) "
+              "VALUES (1725964, 'NTR', ?, NULL, ?)", [day, history.SOURCE_FILINGS])
+    assert history.refresh_price_windows(c) == 1
+    assert c.execute("SELECT COUNT(*) FROM ticker_history").fetchone()[0] == 2
+
+
+def test_an_older_store_keeps_its_rows_when_the_key_is_widened():
+    """A store created before the key included the source is rebuilt in place."""
+    from portfolio_lab.data.schema import _name_of
+
+    c = duckdb.connect(":memory:")
+    widen = next(m for m in MARKET_MIGRATIONS if _name_of(m) == "ticker_history_v2")
+    _apply(c, [m for m in MARKET_MIGRATIONS if m is not widen])
+    c.execute("INSERT INTO ticker_history (cik, ticker, valid_from, valid_to, source) "
+              "VALUES (1, 'OLD', DATE '2010-01-01', NULL, 'sec_submissions_filing_window')")
+    _apply(c, MARKET_MIGRATIONS)
+    assert c.execute("SELECT ticker FROM ticker_history").fetchall() == [("OLD",)]
+    c.execute("INSERT INTO ticker_history (cik, ticker, valid_from, valid_to, source) "
+              "VALUES (1, 'OLD', DATE '2010-01-01', NULL, 'observed_prices')")
+
+
+def test_a_failed_refresh_leaves_the_old_windows_in_place(monkeypatch):
+    c = duckdb.connect(":memory:")
+    _apply(c, MARKET_MIGRATIONS)
+    c.execute("INSERT INTO ticker_history (cik, ticker, valid_from, valid_to, source) "
+              "VALUES (1, 'KEEP', DATE '2020-01-01', NULL, ?)", [history.SOURCE_PRICES])
+    c.execute("DROP TABLE securities")          # makes the INSERT fail after the DELETE
+    with pytest.raises(duckdb.Error):
+        history.refresh_price_windows(c)
+    assert c.execute("SELECT ticker FROM ticker_history").fetchall() == [("KEEP",)]

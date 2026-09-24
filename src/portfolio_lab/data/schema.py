@@ -138,6 +138,24 @@ MARKET_MIGRATIONS: list[str] = [
         PRIMARY KEY (measured_at)
     );
     """,
+    # 017 — ticker_history's key gains the source. Without it a filing window and a
+    # price window starting on the same day collided (Nutrien: first 10-K and first bar
+    # both 2018-01-02), and every price build after the Phase 7 build failed. DuckDB
+    # cannot alter a primary key, so the table is rebuilt with its rows.
+    """
+    CREATE TABLE IF NOT EXISTS ticker_history_v2 (
+        cik         BIGINT  NOT NULL,
+        ticker      VARCHAR NOT NULL,
+        valid_from  DATE    NOT NULL,
+        valid_to    DATE,
+        source      VARCHAR NOT NULL,
+        PRIMARY KEY (cik, ticker, valid_from, source)
+    );
+    INSERT INTO ticker_history_v2 SELECT cik, ticker, valid_from, valid_to, source
+        FROM ticker_history;
+    DROP TABLE ticker_history;
+    ALTER TABLE ticker_history_v2 RENAME TO ticker_history;
+    """,
 ]
 
 USER_MIGRATIONS: list[str] = [
