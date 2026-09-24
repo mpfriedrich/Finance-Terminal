@@ -72,7 +72,7 @@ from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
-from portfolio_lab import comps, export, fred, fts, insiders, paper, world
+from portfolio_lab import comps, export, fred, fts, insiders, paper, risk, world
 from portfolio_lab import wacc as W
 from portfolio_lab import summary as ai_summary
 
@@ -395,6 +395,59 @@ def _paper_table(valued: list[dict]) -> pd.DataFrame:
         frame[col] = frame[col].map(lambda x: ui.pct(x) if x is not None and not pd.isna(x)
                                     else "—")
     return frame
+
+
+def _risk_block(positions: pd.DataFrame, key: str) -> None:
+    """Risk of a set of positions at their weights: historical, three years (risk.py)."""
+    import plotly.graph_objects as go
+
+    st.markdown("**Risk at these weights**")
+    m = risk.measures(src.con, positions, asof)
+    if not m or m.get("error"):
+        st.caption(m.get("error", "No price history for these names.") if m else
+                   "No price history for these names.")
+        return
+    st.markdown(ui.stats([
+        ("VOLATILITY", f"{m['volatility']:.1%}", ""),
+        ("BETA", ui.num(m.get("beta")), ""),
+        ("VAR 95% (1 DAY)", f"{m['var_95']:.2%}", "down"),
+        ("CVAR 95%", f"{m['cvar_95']:.2%}", "down"),
+        ("MAX DRAWDOWN", f"{m['max_drawdown']:.1%}", "down"),
+        ("LARGEST", f"{m['largest_weight']:.0%}", ""),
+        ("EFFECTIVE NAMES", f"{m['effective_names']:.1f}", ""),
+    ]), unsafe_allow_html=True)
+    st.caption(
+        f"{m['days']} trading days, {m['from']} to {m['to']}, at today's weights. VaR: "
+        "the daily loss exceeded on one day in twenty; CVaR: the average loss on those "
+        "days. Effective names: how many equal positions the concentration equals.")
+    r1, r2 = st.columns(2)
+    with r1:
+        ex = risk.exposure(src.con, positions)
+        st.markdown(ui.grid(pd.DataFrame({
+            "industry": ex["sector"].astype(str).str.slice(0, 34),
+            "weight": ex["weight"].map(lambda w: f"{w:.0%}")}),
+            numeric={"weight"}, ticker_col="industry"), unsafe_allow_html=True)
+    with r2:
+        sx = risk.stress(src.con, positions)
+        st.markdown(ui.grid(pd.DataFrame({
+            "crisis": sx["scenario"],
+            "portfolio": sx["portfolio"].map(lambda v: ui.pct(v, 1)),
+            "S&P 500 TR": sx["index"].map(lambda v: ui.pct(v, 1)),
+            "covered": sx["coverage"].map(lambda v: f"{v:.0%}"),
+        }), signed={"portfolio", "S&P 500 TR"}, numeric={"covered"},
+            ticker_col="crisis"), unsafe_allow_html=True)
+        st.caption("Return over each crisis, peak to trough of the S&P 500, had these "
+                   "weights been held; 'covered' is the weight that had prices then.")
+    corr = m["correlation"]
+    if corr.shape[0] > 1:
+        heat = go.Figure(go.Heatmap(z=corr.values, x=list(corr.columns),
+                                    y=list(corr.index), zmin=-1, zmax=1,
+                                    colorscale=[[0, ui.CYAN], [0.5, ui.BG], [1, ui.AMBER]]))
+        heat.update_layout(height=min(120 + 26 * len(corr), 520),
+                           margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor=ui.BG,
+                           plot_bgcolor=ui.BG,
+                           font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10))
+        st.plotly_chart(heat, use_container_width=True, key=f"corr_{key}")
 
 
 def _paper_section(origin: str, key: str, opener, default_name: str,
@@ -2723,6 +2776,12 @@ with tab_books:
                                    f"{pd.Timestamp(fills.iloc[-1]['date']).date()}.")
                     for note in v.get("notes", []):
                         st.caption(note)
+                if b["kind"] == "hold" and not v.get("empty"):
+                    held_pos = (store.holdings(str(b["id"])[6:])
+                                if str(b["id"]).startswith("track-")
+                                else paper.positions(store.con, b["id"]))
+                    if len(held_pos):
+                        _risk_block(held_pos, key=str(b["id"]))
                 if not str(b["id"]).startswith("track-") and st.button(
                         "Close this book", key=f"close_{b['id']}"):
                     paper.close_book(store.con, b["id"])
