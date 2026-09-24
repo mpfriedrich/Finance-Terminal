@@ -64,7 +64,9 @@ from portfolio_lab import macro as mc
 from portfolio_lab import metrics as mx
 from portfolio_lab import numeraire as nm
 from portfolio_lab.lab import engine as lab_engine
+from portfolio_lab.lab import signals as lab_signals
 from portfolio_lab.lab import translate as LT
+from portfolio_lab.lab.spec import StrategySpec
 from portfolio_lab import options as op
 from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
@@ -290,6 +292,42 @@ if not chosen:
     st.stop()
 
 spec = store.get_spec(chosen)
+
+
+def _lab_price_chart(con, ticker: str, result, rule) -> None:
+    """One stock under a rule: price on top with every buy and sell marked where it
+    filled, candles underneath. Drawn on the adjusted basis the rule traded on, so the
+    markers sit on the line rather than a split away from it."""
+    px_rule = con.execute(
+        """
+        SELECT date,
+               open * (close_adj / NULLIF(close, 0)) AS open,
+               high * (close_adj / NULLIF(close, 0)) AS high,
+               low  * (close_adj / NULLIF(close, 0)) AS low,
+               close_adj AS close
+        FROM prices WHERE ticker = ? AND date BETWEEN ? AND ? ORDER BY date
+        """,
+        [ticker, result.dates[0], result.dates[-1]],
+    ).fetch_df()
+    if px_rule.empty:
+        return
+    bands = rule.signal.startswith("bollinger")
+    if bands:
+        px_rule = px_rule.join(lab_signals.bollinger_bands(
+            px_rule["close"], rule.band_days, rule.band_k))
+    trades = result.fills[result.fills.ticker == ticker] if not result.fills.empty \
+        else result.fills
+    candles = bool(px_rule[["high", "low"]].notna().all(axis=1).mean() > 0.9)
+    st.plotly_chart(
+        charts.price_figure(px_rule, ticker, bands=bands, candles=candles,
+                            trades=trades),
+        use_container_width=True, key=f"lab_px_{ticker}")
+    n_buy = int((trades.side == "buy").sum()) if not trades.empty else 0
+    st.caption(
+        f"▲ {n_buy} buys, ▼ {len(trades) - n_buy} sells, each at the open after the "
+        "close that triggered it. Prices adjusted for splits and dividends."
+    )
+
 
 (tab_screen, tab_research, tab_options, tab_strategy, tab_lab, tab_macro,
  tab_commodities, tab_calendar, tab_news) = st.tabs(
@@ -2259,9 +2297,25 @@ with tab_calendar:
 with tab_lab:
     st.markdown('<div class="tl-cmd"><span class="p">&gt;</span></div>',
                 unsafe_allow_html=True)
-    held_now = store.get_spec(chosen).selected
+    lab_mode = st.radio(
+        "Test the rule on", ["Basket you hold", "Single stock"], horizontal=True,
+        key=f"lab_mode_{chosen}",
+    )
+    lab_single = lab_mode == "Single stock"
+    if lab_single:
+        held_default = (store.get_spec(chosen).selected or [""])[0]
+        lab_ticker = st.text_input(
+            "Ticker", value=held_default, key=f"lab_ticker_{chosen}",
+            placeholder="e.g. AAPL",
+        ).strip().upper()
+        held_now = [lab_ticker] if lab_ticker else []
+    else:
+        lab_ticker = ""
+        held_now = store.get_spec(chosen).selected
+    lab_key = f"lab_result_{chosen}_{lab_ticker or 'basket'}"
     if not held_now:
         st.caption(
+            "Type a ticker to test a buy/sell rule on one stock." if lab_single else
             "The lab tests a RULE on the names you hold. Tick some in SCREEN first — "
             "the rule decides when to be in them, not which ones to own."
         )
@@ -2283,7 +2337,7 @@ with tab_lab:
         # calendar tab above was still computing, and Streamlit renders the tabs after
         # it only once the script gets that far.)
         prompt = st.text_input(
-            "Rule", placeholder="50/200 crossover, 15% trailing stop",
+            "Rule", placeholder="buy below the lower Bollinger band, sell at the average, 10% stop",
             label_visibility="collapsed", key=f"lab_prompt_{chosen}",
         )
         if prompt and prompt == st.session_state.get(f"lab_last_{chosen}"):
@@ -2349,20 +2403,28 @@ with tab_lab:
                 benchmark_symbol=bktest.BENCHMARK, risk_free=rate_l,
                 cost_tier_market_cap=median_cap,
             )
-            st.session_state[f"lab_result_{chosen}"] = out
+            # One stock: the question is always "better than just holding it?", so the
+            # same stock, same window, same costs, held throughout, runs alongside.
+            base = (lab_engine.run(bars, StrategySpec(signal="always_in"),
+                                   costs=settings.cost, cost_tier_market_cap=median_cap)
+                    if lab_single and out is not None else None)
+            st.session_state[lab_key] = out
+            st.session_state[lab_key + "_base"] = base
             if out is not None:
                 store.record_run(
                     chosen, "lab", lab_spec.fingerprint(), src.snapshot().fingerprint(),
                     out.dates[0], out.dates[-1],
-                    {"signal": lab_spec.signal, "names": len(held_now)}, out.metrics)
+                    {"signal": lab_spec.signal, "names": len(held_now),
+                     "ticker": lab_ticker or None}, out.metrics)
 
-        out = st.session_state.get(f"lab_result_{chosen}")
+        out = st.session_state.get(lab_key)
+        base = st.session_state.get(lab_key + "_base")
         if out is None and go_lab:
             st.info("No overlapping price history for these names in that window.")
         elif out is not None:
             m = out.metrics
             st.markdown(ui.stats([
-                ("FROM", str(out.dates[0]), ""),
+                ("FROM", str(pd.Timestamp(out.dates[0]).date()), ""),
                 ("YEARS", f"{out.years:.1f}", ""),
                 ("RULE P.A.", ui.pct(m["annual_return"]),
                  "up" if m["annual_return"] >= 0 else "down"),
@@ -2373,10 +2435,25 @@ with tab_lab:
                 ("TRADES", f"{out.trades:,}", ""),
             ]), unsafe_allow_html=True)
 
+            if lab_single:
+                _lab_price_chart(src.con, lab_ticker, out, lab_spec)
             curve = pd.DataFrame({"Rule": out.portfolio}, index=out.dates)
+            colors = [ui.AMBER]
+            if base is not None:
+                curve[f"Buy & hold {lab_ticker}"] = base.portfolio
+                colors.append(ui.MUTED)
             if out.benchmark:
                 curve[out.benchmark_symbol] = out.benchmark
-            st.line_chart(curve, height=300, color=[ui.AMBER, ui.CYAN])
+                colors.append(ui.CYAN)
+            st.line_chart(curve, height=300, color=colors)
+            if base is not None:
+                bm = base.metrics
+                st.caption(
+                    f"Buy & hold {lab_ticker}: {ui.pct(bm['annual_return'])} a year, max "
+                    f"drawdown {ui.pct(bm['max_drawdown'])}. The rule is only worth its "
+                    "trades if it beats this line after costs, or gets close with a "
+                    "smaller drawdown."
+                )
 
             rows = [
                 ("Return p.a.", m["annual_return"], m.get("benchmark_annual_return")),

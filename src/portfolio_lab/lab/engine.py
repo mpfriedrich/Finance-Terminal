@@ -42,6 +42,9 @@ class LabResult:
     turnover: float                  # annualised, one-way
     label: str
     notes: list[str] = field(default_factory=list)
+    # One row per entry or exit: date, ticker, side ("buy"/"sell"), price (the open it
+    # filled at, on the adjusted basis). Resizing a held position is not listed.
+    fills: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     @property
     def years(self) -> float:
@@ -58,8 +61,19 @@ def held_series(prices: pd.Series, spec: StrategySpec) -> pd.Series:
         held = sg.momentum(prices, spec.lookback_days, spec.threshold)
     elif spec.signal == "mean_reversion":
         held = sg.mean_reversion(prices, spec.lookback_days, spec.z_entry, spec.z_exit)
+    elif spec.signal == "bollinger_reversion":
+        held = sg.bollinger_reversion(prices, spec.band_days, spec.band_k)
+    elif spec.signal == "bollinger_breakout":
+        held = sg.bollinger_breakout(prices, spec.band_days, spec.band_k)
+    elif spec.signal == "rsi":
+        held = sg.rsi_signal(prices, spec.rsi_days, spec.rsi_entry, spec.rsi_exit)
+    elif spec.signal == "channel_breakout":
+        held = sg.channel_breakout(prices, spec.breakout_days, spec.exit_days)
+    elif spec.signal == "macd":
+        held = sg.macd_signal(prices, spec.macd_fast, spec.macd_slow, spec.macd_signal)
     else:
         raise ValueError(f"unknown signal: {spec.signal}")
+    held = sg.trend_filter(held, prices, spec.trend_filter_days)
     return sg.apply_stop(held, prices, spec.stop, spec.stop_pct, spec.cooldown_days)
 
 
@@ -141,6 +155,7 @@ def run(
     dates = list(closes.index)
     trades = 0
     traded_total = 0.0
+    fill_rows: list[dict] = []
 
     for i in range(1, len(dates)):
         today, yesterday = dates[i], dates[i - 1]
@@ -155,6 +170,12 @@ def run(
             trades += 1
             traded_total += change
             value *= 1.0 - change * rate
+            for ticker in target.index:
+                was, now = current[ticker] > 1e-12, target[ticker] > 1e-12
+                if was != now:
+                    fill_rows.append({"date": today, "ticker": ticker,
+                                      "side": "buy" if now else "sell",
+                                      "price": float(opens.at[today, ticker])})
             current = target
 
         # 3. the rest of the day, on the new position
@@ -168,8 +189,11 @@ def run(
     years = max((dates[-1] - dates[0]).days, 1) / 365.25
     bench = None
     if benchmark is not None and not benchmark.empty:
-        bench = benchmark.reindex(curve.index).ffill().bfill()
-        bench = 100.0 * bench / bench.iloc[0]
+        # Forward only: a back-fill hands the first days the index's first LATER value
+        # when the index starts after the run (the same defect the stage B review found).
+        wanted = pd.Index(curve.index)
+        bench = benchmark.reindex(benchmark.index.union(wanted)).ffill().reindex(wanted)
+        bench = None if bench.isna().any() else 100.0 * bench / bench.iloc[0]
 
     summary = mx.summary(curve, bench, years, risk_free, base=100.0,
                          turnover=traded_total / years)
@@ -186,6 +210,7 @@ def run(
         turnover=traded_total / years,
         label=lab_label(),
         notes=notes,
+        fills=pd.DataFrame(fill_rows, columns=["date", "ticker", "side", "price"]),
     )
 
 
