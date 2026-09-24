@@ -72,7 +72,7 @@ from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
-from portfolio_lab import paper
+from portfolio_lab import paper, world
 from portfolio_lab import summary as ai_summary
 
 st.set_page_config(page_title="Portfolio Lab", page_icon="◫", layout="wide")
@@ -114,6 +114,16 @@ def _market_source():
 @st.cache_resource
 def _store():
     return Store(open_user(USER_DB))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _yahoo_bars(symbol: str) -> pd.DataFrame:
+    """Five years of daily bars for any Yahoo ticker, held in memory, never stored:
+    a name typed into the research box is not part of the screen's universe."""
+    try:
+        return world.fetch_history(symbol)
+    except Exception:                                                # noqa: BLE001
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=600)
@@ -312,6 +322,19 @@ def _lab_price_chart(con, ticker: str, result, rule) -> None:
         [ticker, result.dates[0], result.dates[-1]],
     ).fetch_df()
     if px_rule.empty:
+        # A Yahoo ticker outside the store: the same bars the rule ran on, on the same
+        # adjusted basis, so the markers sit on the line.
+        yb = _yahoo_bars(ticker)
+        if not yb.empty:
+            factor = yb["close_adj"] / yb["close"].where(yb["close"] != 0)
+            px_rule = pd.DataFrame({
+                "date": yb["date"], "open": yb["open"] * factor,
+                "high": yb["high"] * factor, "low": yb["low"] * factor,
+                "close": yb["close_adj"], "volume": yb["volume"]})
+            px_rule = px_rule[(pd.to_datetime(px_rule.date) >= pd.Timestamp(result.dates[0]))
+                              & (pd.to_datetime(px_rule.date)
+                                 <= pd.Timestamp(result.dates[-1]))]
+    if px_rule.empty:
         return
     bands = rule.signal.startswith("bollinger")
     if bands:
@@ -395,10 +418,10 @@ def _paper_section(origin: str, key: str, opener, default_name: str,
                         unsafe_allow_html=True)
 
 
-(tab_screen, tab_research, tab_options, tab_strategy, tab_lab, tab_books, tab_macro,
- tab_commodities, tab_calendar, tab_news) = st.tabs(
-    ["SCREEN", "RESEARCH", "OPTIONS", "STRATEGY", "LAB", "BOOKS", "MACRO", "COMMODITIES",
-     "CALENDAR", "NEWS"]
+(tab_screen, tab_monitor, tab_research, tab_options, tab_strategy, tab_lab, tab_books,
+ tab_macro, tab_commodities, tab_calendar, tab_news) = st.tabs(
+    ["SCREEN", "MONITOR", "RESEARCH", "OPTIONS", "STRATEGY", "LAB", "BOOKS", "MACRO",
+     "COMMODITIES", "CALENDAR", "NEWS"]
 )
 
 with tab_screen:
@@ -1101,10 +1124,51 @@ with tab_research:
                     "days": sens_np.days.astype(str),
                 }).head(6), numeric={"days"}, signed={"correlation", "beta"},
                     ticker_col="series"), unsafe_allow_html=True)
+        elif matches.empty and not (ybars := _yahoo_bars(query.strip().upper())).empty:
+            # Any Yahoo ticker outside the US universe: BHP.AX, SAP.DE, 7203.T. Price
+            # and volume only — there are no SEC filings behind it (world.py, stage 2).
+            ysym = query.strip().upper()
+            yquote = rs.live_quote(ysym) or {}
+            ycur = yquote.get("currency") or "the listing's currency"
+            st.markdown(ui.kv([
+                ("Symbol", ysym, False),
+                ("Currency", ycur, False),
+                ("History", f"{ybars.date.iloc[0]} to {ybars.date.iloc[-1]} "
+                            f"({len(ybars):,} days, from Yahoo)", False),
+            ]), unsafe_allow_html=True)
+            if yquote.get("price"):
+                tone = "up" if (yquote.get("change") or 0) >= 0 else "down"
+                cells = [("LAST", ui.num(yquote["price"]), tone)]
+                if yquote.get("change") is not None:
+                    cells.append(("CHANGE", ui.pct(yquote["change"]), tone))
+                st.markdown(ui.stats(cells), unsafe_allow_html=True)
+            st.info(
+                f"**{ysym} is outside the US universe**, so there are no SEC filings "
+                "behind it: no fundamentals, no screen, no point-in-time backtest. What "
+                f"works: the chart and risk figures below, in {ycur}, and a buy/sell "
+                "rule on it in LAB → Single stock."
+            )
+            yspan = st.selectbox("Range", ["6M", "1Y", "5Y"], index=1,
+                                 label_visibility="collapsed", key=f"yspan_{ysym}")
+            yview = ybars.join(rs.bollinger(ybars)).tail(
+                {"6M": 126, "1Y": 252, "5Y": 1260}[yspan])
+            ybands = st.toggle("Bollinger 20d", value=False, key=f"ybands_{ysym}")
+            st.plotly_chart(charts.price_figure(yview, ysym, bands=ybands),
+                            use_container_width=True, key=f"ychart_{ysym}")
+            ystats = world.stats(ybars)
+            cells = [(k, ui.pct(ystats[k], 1), "up" if ystats[k] >= 0 else "down")
+                     for k in ("1M", "3M", "6M", "1Y") if ystats.get(k) is not None]
+            if ystats.get("volatility"):
+                cells.append(("VOLATILITY", f"{ystats['volatility']:.0%}", ""))
+            if ystats.get("max_drawdown") is not None:
+                cells.append(("MAX DD 1Y", ui.pct(ystats["max_drawdown"], 1), "down"))
+            st.markdown(ui.stats(cells), unsafe_allow_html=True)
         elif matches.empty:
             st.warning(
-                f"Nothing matches '{query}'. It may be delisted, a fund, or outside the "
-                "US listings this app carries."
+                f"Nothing matches '{query}'. It is not a US listing in this app, and "
+                "Yahoo returned no prices for it — either it has none under that symbol "
+                "or it could not be reached. Other exchanges need Yahoo's suffix, e.g. "
+                "BHP.AX (ASX), SAP.DE (Xetra), 7203.T (Tokyo)."
             )
             if not non_equity.empty:
                 st.caption(
@@ -2213,6 +2277,91 @@ def _watched() -> list[str]:
     return seen
 
 
+with tab_monitor:
+    boards = world.monitor(src.con)
+    stored = sum(int(t["last"].notna().sum()) for t in boards.values() if "last" in t)
+    if not stored:
+        st.info(
+            "The monitor's series are not stored yet. Run once: "
+            "`uv run python scripts/build_world.py` — build_prices.py keeps them "
+            "current after that."
+        )
+    else:
+        def _move(v, symbol):
+            if v is None or pd.isna(v):
+                return "—"
+            if symbol in world.YIELD_SYMBOLS:
+                bp = round(v)
+                return "0 bp" if bp == 0 else f"{bp:+.0f} bp"
+            return ui.pct(v, 2)
+
+        def _board(group: str, frame: pd.DataFrame) -> None:
+            st.markdown(f"#### {group}")
+            rows = pd.DataFrame({
+                "market": frame["label"],
+                "last": [("—" if pd.isna(v) else
+                          f"{v:,.4f}" if ("=X" in sym and v < 20) else f"{v:,.2f}")
+                         for v, sym in zip(frame.get("last", pd.Series(dtype=float)),
+                                           frame["symbol"])],
+                **{h: [_move(v, sym) for v, sym in zip(frame.get(h, [None] * len(frame)),
+                                                        frame["symbol"])]
+                   for h in ("1D", "1W", "1M", "YTD", "1Y")},
+            })
+            st.markdown(ui.grid(rows, numeric={"last"},
+                                signed={"1D", "1W", "1M", "YTD", "1Y"},
+                                ticker_col="market"), unsafe_allow_html=True)
+
+        groups = list(boards.items())
+        left, right = st.columns(2)
+        for i, (group, frame) in enumerate(groups):
+            with (left if i % 2 == 0 else right):
+                _board(group, frame)
+        newest = max((d for t in boards.values() for d in t.get("as_of", pd.Series())
+                      if isinstance(d, dt.date)), default=None)
+        st.caption(
+            f"Daily closes, newest {newest}. Each move compares with the last close on or "
+            "before the start of its window; yields move in basis points. Indices are "
+            "in their own currency and without dividends."
+        )
+
+        st.markdown("#### Side by side")
+        labels = {s: l for g in world.MONITOR.values() for s, l in g}
+        c1, c2 = st.columns([3, 1])
+        picked = c1.multiselect(
+            "Markets", options=list(labels), format_func=lambda s: labels[s],
+            default=["^GSPC", "^AXJO", "^GDAXI", "^N225"], key="monitor_pick",
+            label_visibility="collapsed")
+        span = c2.selectbox("Since", ["1Y", "3Y", "5Y", "10Y"], index=0,
+                            label_visibility="collapsed", key="monitor_span")
+        if picked:
+            since = dt.date.today() - dt.timedelta(days=365 * int(span[:-1]))
+            curves = world.rebased(src.con, picked, since)
+            if curves.empty:
+                st.info("No stored history for these yet.")
+            else:
+                import plotly.graph_objects as go
+
+                cmp_fig = go.Figure()
+                palette = [ui.AMBER, ui.CYAN, ui.UP, "#C792EA", "#F78C6C", "#FFCB6B",
+                           "#89DDFF", ui.DOWN]
+                for i, sym in enumerate(curves.columns):
+                    cmp_fig.add_trace(go.Scatter(
+                        x=curves.index, y=curves[sym], name=labels.get(sym, sym),
+                        line=dict(color=palette[i % len(palette)], width=1.5)))
+                cmp_fig.add_hline(y=100, line=dict(color=ui.MUTED, width=1, dash="dot"))
+                cmp_fig.update_layout(
+                    height=340, margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor=ui.BG,
+                    plot_bgcolor=ui.BG, hovermode="x unified",
+                    font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
+                    legend=dict(orientation="h", y=-0.15),
+                    xaxis=dict(gridcolor=ui.RULE),
+                    yaxis=dict(gridcolor=ui.RULE, side="right"))
+                st.plotly_chart(cmp_fig, use_container_width=True, key="monitor_cmp")
+                st.caption("Each line starts at 100 on its first close in the window, so "
+                           "an index, a currency and gold can share one scale. Price "
+                           "only, in each market's own currency.")
+
+
 with tab_books:
     st.markdown("#### Paper books — every simulated purchase, side by side")
     st.caption(
@@ -2672,6 +2821,12 @@ with tab_lab:
                 """,
                 [list(held_now), lab_start, asof],
             ).fetch_df()
+            if bars.empty and lab_single:
+                # Not in the store: any Yahoo ticker (BHP.AX, SAP.DE), fetched on demand.
+                yb = _yahoo_bars(lab_ticker)
+                if not yb.empty:
+                    yb = yb[pd.to_datetime(yb.date) >= pd.Timestamp(lab_start)]
+                    bars = yb[["ticker", "date", "open_adj", "close_adj"]].dropna()
             bench = src.con.execute(
                 "SELECT date, close_adj FROM prices WHERE ticker = ? "
                 "AND date BETWEEN ? AND ? ORDER BY date",
@@ -2774,6 +2929,14 @@ with tab_lab:
             )
 
         def _open_rule_book(name, amount):
+            stored = src.con.execute(
+                "SELECT COUNT(DISTINCT ticker) FROM prices WHERE ticker IN "
+                "(SELECT UNNEST(?))", [list(held_now)]).fetchone()[0]
+            if stored < len(held_now):
+                raise ValueError(
+                    "A paper book is valued from the stored prices, and this ticker is "
+                    "not in the store (it came from Yahoo on demand). Only US-listed "
+                    "names can be followed as paper books for now.")
             caps_now = _frame(asof).set_index("ticker").reindex(list(held_now))
             cap_now = float(pd.to_numeric(
                 caps_now.get("shares_outstanding", pd.Series(dtype=float)),

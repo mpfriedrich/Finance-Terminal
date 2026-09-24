@@ -701,6 +701,24 @@ Fundamentaldaten. Jetzt:
 zeigt am Ende die Filer je Währung), `scripts/build_fx.py`,
 `scripts/build_listing_ratios.py`, dann `scripts/warm_pit_cache.py`.
 
+## Weltmarkt, Stufe 2 — Markt-Monitor und beliebige Yahoo-Ticker (24.09.2026)
+
+* **MONITOR-Reiter** (`world.py`): Indizes aus Amerika, Europa und Asien-Pazifik (u. a.
+  S&P/ASX 200, DAX, Nikkei), Währungspaare (AUD/USD, EUR/USD, …), US-Zinskurve,
+  Rohstoffe, Krypto — je Letzter Wert, 1T, 1W, 1M, seit Jahresbeginn, 1J; Zinsen in
+  Basispunkten. Jede Veränderung gegen den letzten Schluss **am oder vor** dem
+  Fensterbeginn. Darunter ein Vergleich beliebiger Märkte, auf 100 normiert. Tagesdaten:
+  `scripts/build_world.py` einmal, danach frischt `build_prices.py` sie täglich auf.
+* **Beliebige Yahoo-Ticker** (`BHP.AX`, `SAP.DE`, `7203.T`): RESEARCH zeigt Kurs, Volumen,
+  Bollinger, Rendite- und Risikokennzahlen und den Live-Kurs, in der Währung der Börse;
+  LAB → Single stock testet Kauf-/Verkaufsregeln darauf. Abgerufen bei Bedarf und nur im
+  Speicher gehalten, **nicht** in den Marktbestand geschrieben — der ist das Universum des
+  Screeners. Keine Bilanzzahlen (keine SEC-Meldungen), kein Screen, kein Backtest,
+  kein Papierdepot (Depots werden aus dem Bestand bewertet; die App sagt das).
+* In der laufenden App geprüft (Monitor mit Demo-Reihen; ausländischer Ticker ohne
+  Yahoo-Zugang ergibt eine klare Meldung, keinen Absturz). Der echte Yahoo-Abruf ist
+  in der Cloud-Sitzung gesperrt und daher nur mit nachgebautem Download getestet.
+
 ## Nachtrag 24.09.2026 (Cloud-Sitzung) — Papierdepots, Einzeltitel-Regeln, Chart
 
 Auf Zuruf des Nutzers, außerhalb der Phasenliste:
