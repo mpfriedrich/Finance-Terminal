@@ -186,6 +186,17 @@ MARKET_MIGRATIONS: list[str] = [
 ]
 
 USER_MIGRATIONS: list[str] = [
+    # 021 — alert rules (alerts.py); what fired is kept by the checker in a JSON file.
+    """
+    CREATE TABLE IF NOT EXISTS alerts (
+        id          VARCHAR PRIMARY KEY,
+        ticker      VARCHAR NOT NULL,
+        kind        VARCHAR NOT NULL,
+        threshold   DOUBLE,
+        note        VARCHAR,
+        created_at  TIMESTAMP NOT NULL
+    );
+    """,
     """
     CREATE TABLE IF NOT EXISTS portfolios (
         id          VARCHAR PRIMARY KEY,

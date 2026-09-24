@@ -38,7 +38,7 @@ if not st.runtime.exists():
     )
 
 from portfolio_lab import charts, ui
-from portfolio_lab.config import CACHE_DIR, USER_DB, CostModel, Settings, secret
+from portfolio_lab.config import ALERTS_STATE, CACHE_DIR, USER_DB, CostModel, Settings, secret
 from portfolio_lab.data import history as hist, industry
 from portfolio_lab.data.paid import MissingKey
 from portfolio_lab.data.schema import open_user
@@ -72,7 +72,7 @@ from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
-from portfolio_lab import comps, export, fred, fts, insiders, paper, risk, world
+from portfolio_lab import alerts, comps, export, fred, fts, insiders, paper, risk, world
 from portfolio_lab import wacc as W
 from portfolio_lab import summary as ai_summary
 
@@ -3317,6 +3317,50 @@ with tab_lab:
 
 
 with tab_news:
+    with st.expander("Alerts", expanded=False):
+        rules_now = alerts.rules(store.con)
+        with st.form("alert_form", clear_on_submit=True):
+            a1, a2, a3, a4 = st.columns([1, 2, 1, 1])
+            a_ticker = a1.text_input("Ticker", placeholder="AAPL")
+            a_kind = a2.selectbox("When", list(alerts.KINDS),
+                                  format_func=lambda k: alerts.KINDS[k])
+            a_x = a3.number_input("Level / %", min_value=0.0, value=0.0, step=1.0)
+            a4.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
+            if a4.form_submit_button("Add", use_container_width=True) and a_ticker.strip():
+                try:
+                    alerts.add(store.con, a_ticker, a_kind,
+                               None if a_kind == "new_filing" else a_x)
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+        if rules_now.empty:
+            st.caption("No alerts yet.")
+        else:
+            for rule in rules_now.itertuples():
+                r1, r2 = st.columns([5, 1])
+                level = "" if rule.kind == "new_filing" else f" {rule.threshold:g}"
+                r1.markdown(f"`{rule.ticker}` — {alerts.KINDS[rule.kind]}{level}")
+                if r2.button("×", key=f"rm_alert_{rule.id}"):
+                    alerts.remove(store.con, rule.id)
+                    st.rerun()
+            if st.button("Check now against the stored closes", key="alerts_now"):
+                fired, state_now = alerts.run(store.con, src.con,
+                                              alerts.load_state(ALERTS_STATE))
+                alerts.save_state(ALERTS_STATE, state_now)
+                st.success("; ".join(e["message"] for e in fired) if fired
+                           else "Nothing new fired.")
+        history_log = alerts.load_state(ALERTS_STATE).get("log", [])[-10:][::-1]
+        if history_log:
+            st.markdown(ui.grid(pd.DataFrame({
+                "bar": [e["on"] for e in history_log],
+                "alert": [e["message"] for e in history_log]}),
+                ticker_col="bar"), unsafe_allow_html=True)
+        st.caption(
+            "Checked on end-of-day closes: every morning run (after the price refresh, "
+            "with a Mac notification) and with the button above. A level alert fires "
+            "when the close crosses the level, once. New-filing alerts need the morning "
+            "run or scripts/check_alerts.py, which ask EDGAR.")
+
     with st.expander("Search every SEC filing (full text, 2001 onwards)", expanded=False):
         with st.form("fts_form"):
             f1, f2 = st.columns([3, 1])
