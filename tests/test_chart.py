@@ -71,3 +71,41 @@ def test_a_single_usable_bar_is_not_a_candle_chart():
     one = pd.DataFrame({"open": [1.0, 2.0], "close": [1.5, 2.5],
                         "high": [1.6, np.nan], "low": [0.9, np.nan]})
     assert rs.has_intraday_range(one) is False
+
+
+# --- the two-panel layout -------------------------------------------------------------
+
+def _bars(n=30):
+    dates = pd.bdate_range("2026-01-05", periods=n)
+    close = np.linspace(10, 12, n)
+    return pd.DataFrame({"date": dates, "open": close - 0.1, "high": close + 0.2,
+                         "low": close - 0.2, "close": close})
+
+
+def test_candles_sit_under_the_line_on_a_shared_time_axis():
+    from portfolio_lab import charts
+
+    fig = charts.price_figure(_bars(), "AAA", candles=True)
+    kinds = {t.type: (t.xaxis, t.yaxis) for t in fig.data}
+    assert kinds["scatter"] == ("x", "y"), "the line belongs in the top panel"
+    assert kinds["candlestick"] == ("x2", "y2"), "the candles belong underneath"
+    assert fig.layout.xaxis.matches == "x2" or fig.layout.xaxis2.matches == "x"
+
+
+def test_without_candles_there_is_one_panel():
+    from portfolio_lab import charts
+
+    fig = charts.price_figure(_bars(), "AAA", candles=False)
+    assert {t.type for t in fig.data} == {"scatter"}
+    assert "xaxis2" not in fig.layout.to_plotly_json()
+
+
+def test_trades_are_marked_on_the_line():
+    from portfolio_lab import charts
+
+    bars = _bars()
+    trades = pd.DataFrame({"date": [bars.date[3], bars.date[20]],
+                           "price": [10.3, 11.4], "side": ["buy", "sell"]})
+    fig = charts.price_figure(bars, "AAA", candles=True, trades=trades)
+    names = [t.name for t in fig.data]
+    assert "buy" in names and "sell" in names

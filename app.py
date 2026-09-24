@@ -37,7 +37,7 @@ if not st.runtime.exists():
         "In VS Code: Run and Debug -> 'Portfolio Lab (app)', or press Shift-Cmd-B.\n"
     )
 
-from portfolio_lab import ui
+from portfolio_lab import charts, ui
 from portfolio_lab.config import CACHE_DIR, USER_DB, CostModel, Settings, secret
 from portfolio_lab.data import history as hist, industry
 from portfolio_lab.data.paid import MissingKey
@@ -1096,9 +1096,10 @@ with tab_research:
                         # a short one draws candles.
                         can_candle = rs.has_intraday_range(view)
                         candles = c_b.toggle(
-                            "Candles", value=can_candle, disabled=not can_candle,
+                            "Candles below", value=can_candle, disabled=not can_candle,
                             key=f"candles_{ticker}_{span}",
-                            help=None if can_candle else
+                            help="The same days as candles in a panel under the line, "
+                                 "on a shared time axis." if can_candle else
                             "Stored bars carry no high/low for this range.",
                         )
                         bands = c_c.toggle(
@@ -1106,41 +1107,8 @@ with tab_research:
                             help="20-day average with a 2-standard-deviation envelope.",
                         )
 
-                        fig = go.Figure()
-                        if bands:
-                            fig.add_trace(go.Scatter(
-                                x=view["date"], y=view["upper"], name="upper",
-                                line=dict(color=ui.CYAN, width=1), hoverinfo="skip"))
-                            fig.add_trace(go.Scatter(
-                                x=view["date"], y=view["lower"], name="lower",
-                                line=dict(color=ui.CYAN, width=1), fill="tonexty",
-                                fillcolor="rgba(77, 184, 255, 0.10)", hoverinfo="skip"))
-                            fig.add_trace(go.Scatter(
-                                x=view["date"], y=view["middle"], name="20d avg",
-                                line=dict(color=ui.MUTED, width=1, dash="dot")))
-                        if candles:
-                            fig.add_trace(go.Candlestick(
-                                x=view["date"], open=view["open"], high=view["high"],
-                                low=view["low"], close=view["close"], name=ticker,
-                                increasing=dict(line=dict(color=ui.UP), fillcolor=ui.UP),
-                                decreasing=dict(line=dict(color=ui.DOWN), fillcolor=ui.DOWN),
-                            ))
-                        else:
-                            fig.add_trace(go.Scatter(
-                                x=view["date"], y=view["close"], name=ticker,
-                                line=dict(color=ui.AMBER, width=1.4)))
-                        fig.update_layout(
-                            height=300, margin=dict(l=0, r=0, t=6, b=0),
-                            paper_bgcolor=ui.BG, plot_bgcolor=ui.BG, showlegend=False,
-                            font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
-                            hovermode="x unified",
-                            xaxis=dict(gridcolor=ui.RULE, color=ui.MUTED,
-                                       rangeslider=dict(visible=False),
-                                       # Without this the chart draws empty weekends and
-                                       # every candle body shrinks to make room for them.
-                                       rangebreaks=[dict(bounds=["sat", "mon"])]),
-                            yaxis=dict(gridcolor=ui.RULE, color=ui.MUTED, side="right"),
-                        )
+                        fig = charts.price_figure(view, ticker, bands=bands,
+                                                  candles=candles)
                         st.plotly_chart(fig, use_container_width=True,
                                         key=f"pxchart_{ticker}")
                         if chart_unit == nm.GOLD:
