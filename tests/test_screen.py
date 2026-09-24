@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from portfolio_lab.screen.spec import Filter, PortfolioSpec
-from portfolio_lab.screen.engine import run_screen, derive_metrics
+from portfolio_lab.screen.engine import merge_selection, run_screen, derive_metrics
 
 
 def frame():
@@ -327,3 +327,48 @@ def test_a_sector_fragment_that_matches_nothing_is_refused_out_loud():
     assert any("matches no sector" in n for n in r.notes)
     # The filter was not applied, so nothing was silently excluded by it.
     assert r.n_passing == r.n_eligible
+
+
+# --- the holding survives a filtered view -------------------------------------------
+# The table on screen is not the portfolio. These pin down the one rule that keeps a
+# hand-curated holding alive: a row may only speak for itself.
+
+HELD_31 = ("VISN", "RILY", "KROS", "CRMD", "LYFT")  # stands in for the real 31
+
+
+def test_names_hidden_by_a_filter_are_not_treated_as_unticked():
+    """The industry filter shows 2 of 5 held names. The other 3 must survive."""
+    visible = ["KROS", "CRMD"]
+    merged = merge_selection(HELD_31, visible, ticked=["KROS", "CRMD"])
+    assert set(merged) == set(HELD_31)
+
+
+def test_unticking_a_visible_name_removes_exactly_that_one():
+    merged = merge_selection(HELD_31, ["KROS", "CRMD"], ticked=["KROS"])
+    assert set(merged) == set(HELD_31) - {"CRMD"}
+
+
+def test_ticking_a_new_name_appends_it_without_disturbing_the_rest():
+    merged = merge_selection(HELD_31, ["KROS", "CRMD", "AAPL"],
+                             ticked=["KROS", "CRMD", "AAPL"])
+    assert set(merged) == set(HELD_31) | {"AAPL"}
+    assert merged[:len(HELD_31)] == HELD_31  # stored order is not reshuffled
+
+
+def test_an_empty_filtered_table_cannot_empty_the_holding():
+    """A filter matching nothing shows no rows, so nothing was said about anything."""
+    assert merge_selection(HELD_31, [], ticked=[]) == HELD_31
+
+
+def test_clearing_every_tick_with_all_names_visible_does_empty_it():
+    """The unfiltered view IS the whole holding, so unticking all of it means all of it."""
+    assert merge_selection(HELD_31, HELD_31, ticked=[]) == ()
+
+
+def test_case_and_whitespace_do_not_duplicate_a_holding():
+    merged = merge_selection(("KROS",), [" kros "], ticked=[" kros "])
+    assert merged == ("KROS",)
+
+
+def test_a_first_selection_starts_from_the_ticks():
+    assert set(merge_selection((), ["AAA", "BBB"], ticked=["BBB"])) == {"BBB"}

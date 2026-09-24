@@ -43,7 +43,7 @@ from portfolio_lab.data import industry
 from portfolio_lab.data.free import FreeSource
 from portfolio_lab.data.schema import open_market, open_user
 from portfolio_lab.screen import translate as T
-from portfolio_lab.screen.engine import derive_metrics, run_screen
+from portfolio_lab.screen.engine import derive_metrics, merge_selection, run_screen
 from portfolio_lab.screen.valuation import add_valuation
 from dataclasses import replace
 
@@ -458,9 +458,12 @@ with tab_screen:
 
         # The ticks are the truth from here on: weights, the tracking button and the
         # stored spec all follow this one list rather than what the screen proposed.
-        live = tuple(edited.loc[edited["hold"], "ticker"].astype(str))
+        # They speak only for the rows on screen, though — see merge_selection: a sidebar
+        # filter hides names, and hidden is not the same as unticked.
+        ticked = tuple(edited.loc[edited["hold"], "ticker"].astype(str))
+        live = merge_selection(spec.selected, edited["ticker"].astype(str), ticked)
         picks = res.select(live, spec.weighting)
-        if set(live) != held and not spec.is_hand_picked:
+        if set(ticked) != held and not spec.is_hand_picked:
             store.save_spec(chosen, replace(spec, selected=live))
 
         if len(picks):

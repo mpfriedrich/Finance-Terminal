@@ -61,13 +61,42 @@ class ScreenResult:
         return weighted(subset, weighting)
 
 
+def _key(ticker) -> str:
+    return str(ticker).strip().upper()
+
+
 def _keys(tickers) -> set[str]:
     """Tickers as comparison keys: upper case, trimmed, empties gone.
 
     One function so the selection, the "no longer passing" check and `select()` can never
     disagree about whether " aapl " is AAPL. They did disagree once, and the symptom was a
     silently empty portfolio."""
-    return {str(t).strip().upper() for t in tickers if str(t).strip()}
+    return {_key(t) for t in tickers if str(t).strip()}
+
+
+def merge_selection(stored, visible, ticked) -> tuple[str, ...]:
+    """Fold the ticks of a possibly filtered table back into the stored holding.
+
+    The table on screen is not the portfolio. A sidebar filter — industry, size band —
+    narrows it, and the names it hides are **absent, not unticked**. Writing the visible
+    ticks straight into the spec therefore deletes a hand-curated holding down to whatever
+    the current filter happens to show, with one click and no warning.
+
+    So a row can only speak for itself:
+
+      * a stored name that is on screen is kept when its box is ticked, dropped when it
+        is not — that is the person unticking it, and it is the only way to remove one;
+      * a stored name that is NOT on screen is kept untouched, because nothing was said
+        about it;
+      * a ticked name that was not stored is appended.
+
+    Stored order is preserved so the holding does not reshuffle on every interaction.
+    """
+    vis, tick = _keys(visible), _keys(ticked)
+    kept = [t for t in stored if _key(t) not in vis or _key(t) in tick]
+    seen = _keys(kept)
+    added = [t for t in ticked if _key(t) not in seen and str(t).strip()]
+    return tuple(kept) + tuple(added)
 
 
 def weighted(frame: pd.DataFrame, weighting: str) -> pd.DataFrame:
