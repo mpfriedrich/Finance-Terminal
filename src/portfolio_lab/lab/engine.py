@@ -113,8 +113,14 @@ def run(
     benchmark_symbol: str | None = None,
     risk_free: float = 0.02,
     cost_tier_market_cap: float = 0.0,
+    trade_from=None,
 ) -> LabResult | None:
-    """`bars`: long frame with ticker, date, open_adj, close_adj (adjusted basis)."""
+    """`bars`: long frame with ticker, date, open_adj, close_adj (adjusted basis).
+
+    `trade_from`: no position before this date. The indicators still read the history
+    before it, so a rule followed live from today starts with a warmed-up signal and
+    its first fill is the open after today's close.
+    """
     if bars.empty:
         return None
     costs = costs or CostModel()
@@ -146,6 +152,9 @@ def run(
         index=closes.index,
     )
     wanted = target_weights(held, closes, spec)
+    if trade_from is not None:
+        cutoff = pd.Timestamp(trade_from)
+        wanted.loc[[pd.Timestamp(d) < cutoff for d in wanted.index]] = 0.0
 
     rate = costs.spread_for(cost_tier_market_cap) + costs.commission
     value = 1.0

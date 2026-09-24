@@ -72,6 +72,7 @@ from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
+from portfolio_lab import paper
 
 st.set_page_config(page_title="Portfolio Lab", page_icon="◫", layout="wide")
 st.markdown(ui.CSS, unsafe_allow_html=True)
@@ -329,9 +330,74 @@ def _lab_price_chart(con, ticker: str, result, rule) -> None:
     )
 
 
-(tab_screen, tab_research, tab_options, tab_strategy, tab_lab, tab_macro,
+# ---------------------------------------------------------------- paper books
+def _paper_rows(book_frame: pd.DataFrame) -> list[dict]:
+    """Value every book in the frame. A book that cannot be valued yet (no price since
+    it was opened) is listed with its money at cost rather than hidden."""
+    out = []
+    for _, row in book_frame.iterrows():
+        try:
+            v = paper.value_book(src.con, store.con, row.to_dict())
+        except Exception as exc:                                  # noqa: BLE001
+            v = {"empty": True, "book": row.to_dict(), "error": str(exc)}
+        out.append(v)
+    return out
+
+
+def _paper_table(valued: list[dict]) -> pd.DataFrame:
+    rows = []
+    for v in valued:
+        b = v["book"]
+        rows.append({
+            "book": b["name"], "from": b["origin"], "kind": b["kind"],
+            "since": str(pd.Timestamp(b["started_on"]).date()),
+            "money in": ui.money(v.get("invested_now", b["amount"])),
+            "value": ui.money(v["value_now"]) if not v.get("empty") else "—",
+            "gain": ui.money(v["gain"]) if not v.get("empty") else "—",
+            "return": v.get("return") if not v.get("empty") else None,
+            "S&P 500 TR": v.get("benchmark_return"),
+        })
+    frame = pd.DataFrame(rows)
+    for col in ("return", "S&P 500 TR"):
+        frame[col] = frame[col].map(lambda x: ui.pct(x) if x is not None and not pd.isna(x)
+                                    else "—")
+    return frame
+
+
+def _paper_section(origin: str, key: str, opener, default_name: str,
+                   what: str, amount_label: str | None = "Amount ($)") -> None:
+    """A closed-off paper-money area for one tab: buy, and see this tab's books.
+
+    `opener(name, amount)` opens the book and returns its id. The purchase is frozen at
+    the latest stored close; from then on the book is only valued, never re-decided.
+    """
+    with st.container(border=True):
+        st.markdown(f"#### Paper money · {origin}")
+        st.caption(what)
+        c1, c2, c3 = st.columns([1.1, 2, 1])
+        amount = (c1.number_input(amount_label, min_value=100.0, max_value=1e9,
+                                  value=10_000.0, step=500.0, key=f"paper_amt_{key}")
+                  if amount_label else None)
+        name = c2.text_input("Name", value=default_name, key=f"paper_name_{key}")
+        c3.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
+        if c3.button("Buy on paper", type="primary", use_container_width=True,
+                     key=f"paper_buy_{key}"):
+            try:
+                opener(name, amount)
+                st.success(f"Opened '{name}'. It is valued on every visit; compare all "
+                           "books in the BOOKS tab.")
+            except ValueError as exc:
+                st.error(str(exc))
+        mine = paper.books(store.con)
+        mine = mine[mine.origin == origin]
+        if not mine.empty:
+            st.markdown(ui.grid(_paper_table(_paper_rows(mine)), ticker_col="book"),
+                        unsafe_allow_html=True)
+
+
+(tab_screen, tab_research, tab_options, tab_strategy, tab_lab, tab_books, tab_macro,
  tab_commodities, tab_calendar, tab_news) = st.tabs(
-    ["SCREEN", "RESEARCH", "OPTIONS", "STRATEGY", "LAB", "MACRO", "COMMODITIES",
+    ["SCREEN", "RESEARCH", "OPTIONS", "STRATEGY", "LAB", "BOOKS", "MACRO", "COMMODITIES",
      "CALENDAR", "NEWS"]
 )
 
@@ -664,6 +730,21 @@ with tab_screen:
         if st.button("Stop tracking and discard", use_container_width=True):
             store.stop_tracking(chosen)
             st.rerun()
+
+    def _open_screen_book(name, amount):
+        if picks.empty:
+            raise ValueError("Nothing ticked to buy.")
+        caps = (picks["market_cap"] if "market_cap" in picks.columns
+                else pd.Series(0.0, index=picks.index)).fillna(0.0)
+        pos = picks[["ticker", "weight", "price"]].copy()
+        pos["cost"] = [settings.cost.round_trip_cost(c) for c in caps]
+        return paper.open_hold(store.con, name, "SCREEN", pos, asof, amount)
+
+    _paper_section(
+        "SCREEN", f"screen_{chosen}", _open_screen_book, f"Screen {asof}",
+        f"Buy the {len(picks)} ticked names with their weights at the {asof} closes, "
+        "entry cost charged once, then hold. Open as many books as you like — each is "
+        "its own frozen purchase.")
 
     # ------------------------------------------------------------- backtest (stage B)
     def _stage_b_section():
@@ -1062,6 +1143,28 @@ with tab_research:
                     "Live quote for this company only. The screener stays on one common "
                     f"date ({asof}); mixing a live price into a ranking would favour it."
                 )
+
+            def _open_research_book(name, amount):
+                last = src.con.execute(
+                    "SELECT COALESCE(close_raw, close) FROM prices WHERE ticker = ? "
+                    "AND date <= ? ORDER BY date DESC LIMIT 1", [ticker, asof],
+                ).fetchone()
+                if not last or not last[0]:
+                    raise ValueError(f"No stored price for {ticker}.")
+                cap = float(me["market_cap"]) if me is not None and "market_cap" in me \
+                    and not pd.isna(me["market_cap"]) else 0.0
+                return paper.open_hold(
+                    store.con, name, "RESEARCH",
+                    pd.DataFrame({"ticker": [ticker], "weight": [1.0],
+                                  "price": [float(last[0])],
+                                  "cost": [settings.cost.round_trip_cost(cap)]}),
+                    asof, amount)
+
+            _paper_section(
+                "RESEARCH", f"research_{ticker}", _open_research_book,
+                f"{ticker} {asof}",
+                f"Buy {ticker} at the {asof} close and hold it. Every paper book lands "
+                "in the BOOKS tab next to the others.")
 
             sections = st.tabs([
                 "OVERVIEW", "FINANCIALS", "RELATIONSHIPS", "VALUATION", "OPTIONS",
@@ -1974,6 +2077,30 @@ with tab_strategy:
             })
             st.line_chart(curves, height=300,
                           color=[ui.AMBER, ui.CYAN, ui.UP, ui.MUTED][:len(curves.columns)])
+
+            live_choice = st.selectbox(
+                "Follow one of these live from today",
+                options=list(range(len(plans))),
+                format_func=lambda i: plans[i].describe(), key="stg_live_choice")
+
+            def _open_plan_book(name, _amount):
+                chosen_plan = plans[live_choice]
+                if chosen_plan.rule == "lump_sum":
+                    last_px = float(prices.iloc[-1])
+                    return paper.open_hold(
+                        store.con, name, "STRATEGY",
+                        pd.DataFrame({"ticker": [what.strip().upper()], "weight": [1.0],
+                                      "price": [last_px], "cost": [chosen_plan.cost]}),
+                        asof, amount * 12)
+                return paper.open_plan(store.con, name, what.strip(), chosen_plan, asof)
+
+            _paper_section(
+                "STRATEGY", "strategy", _open_plan_book,
+                f"{what.strip().upper()} plan {asof}",
+                f"The chosen plan runs from {asof} on: {amount:,.0f} arrives "
+                f"{freq}, and its rule decides when it goes in. The lump sum is bought "
+                f"once as {amount * 12:,.0f} (a year of contributions) and held.",
+                amount_label=None)
             st.caption(
                 f"Portfolio value over {results[0]['years']:.1f} years, including cash "
                 "not yet invested. The average price of the asset over the window was "
@@ -2037,6 +2164,119 @@ def _watched() -> list[str]:
             if t not in seen:
                 seen.append(t)
     return seen
+
+
+with tab_books:
+    st.markdown("#### Paper books — every simulated purchase, side by side")
+    st.caption(
+        "Each book was frozen when it was opened: the positions, the rule or the savings "
+        "plan cannot change afterwards, so nothing here is fitted to the outcome. Open "
+        "new ones in the Paper money box of SCREEN, RESEARCH, STRATEGY or LAB."
+    )
+    all_books = paper.books(store.con)
+    valued = _paper_rows(all_books) if not all_books.empty else []
+    # The SCREEN tab's older live tracking (one per portfolio) belongs in the same
+    # comparison. It has no amount of its own, so it is shown on 10,000.
+    for prow in store.list_portfolios().itertuples():
+        tinfo = store.tracking_info(prow.id)
+        if tinfo is None:
+            continue
+        legacy = {"id": f"track-{prow.id}", "name": f"{prow.name} (tracking)",
+                  "origin": "SCREEN", "kind": "hold", "started_on": tinfo["started_on"],
+                  "amount": 10_000.0, "config_json": "{}", "thesis": tinfo["thesis"]}
+        try:
+            valued.append(paper.value_book(src.con, store.con, legacy,
+                                           held=store.holdings(prow.id)))
+        except Exception as exc:                                   # noqa: BLE001
+            valued.append({"empty": True, "book": legacy, "error": str(exc)})
+
+    if not valued:
+        st.info("No paper books yet.")
+    else:
+        live = [v for v in valued if not v.get("empty")]
+        money_in = sum(v["invested_now"] for v in live)
+        worth = sum(v["value_now"] for v in live)
+        st.markdown(ui.stats([
+            ("BOOKS", f"{len(valued)}", ""),
+            ("MONEY IN", ui.money(money_in), ""),
+            ("VALUE", ui.money(worth), ""),
+            ("GAIN", ui.money(worth - money_in), "up" if worth >= money_in else "down"),
+            ("RETURN", ui.pct(worth / money_in - 1.0) if money_in else "—",
+             "up" if worth >= money_in else "down"),
+        ]), unsafe_allow_html=True)
+
+        if live:
+            import plotly.graph_objects as go
+
+            fig = go.Figure()
+            palette = [ui.AMBER, ui.CYAN, ui.UP, "#C792EA", "#F78C6C", "#FFCB6B",
+                       "#89DDFF", ui.DOWN]
+            for i, v in enumerate(live):
+                ret = 100.0 * (v["value"] / v["invested"] - 1.0)
+                fig.add_trace(go.Scatter(
+                    x=ret.index, y=ret, name=v["book"]["name"],
+                    line=dict(color=palette[i % len(palette)], width=1.6)))
+            fig.add_hline(y=0, line=dict(color=ui.MUTED, width=1, dash="dot"))
+            fig.update_layout(
+                height=360, margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor=ui.BG,
+                plot_bgcolor=ui.BG, hovermode="x unified",
+                font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
+                legend=dict(orientation="h", y=-0.15),
+                yaxis=dict(title="% on money in", gridcolor=ui.RULE, side="right"),
+                xaxis=dict(gridcolor=ui.RULE),
+            )
+            st.plotly_chart(fig, use_container_width=True, key="books_compare")
+            st.caption(
+                "Each line is the gain on the money that book has put in so far. Books "
+                "opened on different days start at different points; a savings plan's "
+                "money in grows with each contribution."
+            )
+
+        st.markdown(ui.grid(_paper_table(valued), ticker_col="book"),
+                    unsafe_allow_html=True)
+
+        for v in valued:
+            b = v["book"]
+            with st.expander(f"{b['name']} · {b['origin']} · {b['kind']} · since "
+                             f"{pd.Timestamp(b['started_on']).date()}"):
+                if b.get("thesis"):
+                    st.markdown(f"_{b['thesis']}_")
+                if v.get("empty"):
+                    st.info(v.get("error") or "No prices since this book was opened yet.")
+                else:
+                    import plotly.graph_objects as go
+
+                    detail = go.Figure()
+                    detail.add_trace(go.Scatter(x=v["value"].index, y=v["value"],
+                                                name="value",
+                                                line=dict(color=ui.AMBER, width=1.6)))
+                    detail.add_trace(go.Scatter(x=v["invested"].index, y=v["invested"],
+                                                name="money in", line=dict(
+                                                    color=ui.MUTED, width=1, dash="dot")))
+                    if v.get("benchmark_value") is not None:
+                        detail.add_trace(go.Scatter(
+                            x=v["benchmark_value"].index, y=v["benchmark_value"],
+                            name="S&P 500 TR, same money",
+                            line=dict(color=ui.CYAN, width=1.2)))
+                    detail.update_layout(
+                        height=260, margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor=ui.BG,
+                        plot_bgcolor=ui.BG, hovermode="x unified", showlegend=True,
+                        legend=dict(orientation="h", y=-0.2),
+                        font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
+                        yaxis=dict(gridcolor=ui.RULE, side="right"),
+                        xaxis=dict(gridcolor=ui.RULE))
+                    st.plotly_chart(detail, use_container_width=True,
+                                    key=f"book_{b['id']}")
+                    fills = v.get("fills")
+                    if fills is not None and len(fills):
+                        st.caption(f"{len(fills)} trades since it was opened; last: "
+                                   f"{pd.Timestamp(fills.iloc[-1]['date']).date()}.")
+                    for note in v.get("notes", []):
+                        st.caption(note)
+                if not str(b["id"]).startswith("track-") and st.button(
+                        "Close this book", key=f"close_{b['id']}"):
+                    paper.close_book(store.con, b["id"])
+                    st.rerun()
 
 
 with tab_macro:
@@ -2485,6 +2725,23 @@ with tab_lab:
                 "has more knobs than a screen, so the count matters more here: turn "
                 "enough of them and something always looks good."
             )
+
+        def _open_rule_book(name, amount):
+            caps_now = _frame(asof).set_index("ticker").reindex(list(held_now))
+            cap_now = float(pd.to_numeric(
+                caps_now.get("shares_outstanding", pd.Series(dtype=float)),
+                errors="coerce").mul(pd.to_numeric(
+                    caps_now.get("price", pd.Series(dtype=float)),
+                    errors="coerce")).median() or 0.0)
+            return paper.open_rule(store.con, name, list(held_now), lab_spec, asof,
+                                   amount, cost_tier_market_cap=cap_now)
+
+        _paper_section(
+            "LAB", f"lab_{chosen}_{lab_ticker or 'basket'}", _open_rule_book,
+            f"{lab_ticker or 'Basket'} · {lab_spec.signal} {asof}",
+            "Follow this rule live from today with paper money: signals read at each "
+            "close, orders filled at the next open, costs charged on every trade. The "
+            "rule is frozen as it stands now.")
 
 
 with tab_news:

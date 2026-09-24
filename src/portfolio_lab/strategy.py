@@ -73,20 +73,28 @@ def _contribution_dates(index: pd.DatetimeIndex, frequency: Frequency) -> set:
     return out
 
 
-def simulate(prices: pd.Series, plan: Plan) -> dict:
+def simulate(prices: pd.Series, plan: Plan, start: dt.date | None = None) -> dict:
     """Run one plan over one price series.
 
     `prices` must be total-return adjusted, so reinvested dividends are already in it.
+
+    `start` begins the plan on that date while the running high and the moving average
+    still see the history before it — a live plan started today knows the all-time high
+    and the 200-day line, it just has not put any money in yet.
     """
     s = prices.dropna().astype(float)
     if len(s) < 30:
         return {}
     s.index = pd.to_datetime(s.index)
 
-    contributions = _contribution_dates(s.index, plan.frequency)
     running_high = s.cummax()
     drawdown = s / running_high - 1.0
     moving_avg = s.rolling(plan.average_days, min_periods=plan.average_days // 2).mean()
+    if start is not None:
+        s = s[s.index >= pd.Timestamp(start)]
+        if s.empty:
+            return {}
+    contributions = _contribution_dates(s.index, plan.frequency)
 
     daily_cash_rate = (1 + plan.cash_rate) ** (1 / 365) - 1
     total_periods = max(len(contributions), 1)

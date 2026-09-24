@@ -236,6 +236,31 @@ USER_MIGRATIONS: list[str] = [
         updated_at    TIMESTAMP NOT NULL
     );
     """,
+    # 015 — paper books: simulated purchases from any tab, frozen when opened and
+    # valued live (paper.py). Separate from `tracked`, which is one screen per portfolio.
+    """
+    CREATE TABLE IF NOT EXISTS paper_books (
+        id           VARCHAR PRIMARY KEY,
+        name         VARCHAR NOT NULL,
+        origin       VARCHAR NOT NULL,
+        kind         VARCHAR NOT NULL,
+        started_on   DATE    NOT NULL,
+        amount       DOUBLE  NOT NULL,
+        config_json  VARCHAR NOT NULL,
+        thesis       VARCHAR,
+        created_at   TIMESTAMP NOT NULL
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS paper_positions (
+        book_id      VARCHAR NOT NULL,
+        ticker       VARCHAR NOT NULL,
+        weight       DOUBLE  NOT NULL,
+        entry_price  DOUBLE,
+        entry_cost   DOUBLE  NOT NULL DEFAULT 0,
+        PRIMARY KEY (book_id, ticker)
+    );
+    """,
 ]
 
 

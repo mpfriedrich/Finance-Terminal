@@ -665,6 +665,34 @@ Total Return. Was dabei gemessen statt angenommen wurde:
 liegen 2010–2026 vor, für die Einzelaktien nicht. Ein tieferer Kursdownload ist eine
 Entscheidung über Zeit und Datenmenge, keine Programmieraufgabe.
 
+## Nachtrag 24.09.2026 (Cloud-Sitzung) — Papierdepots, Einzeltitel-Regeln, Chart
+
+Auf Zuruf des Nutzers, außerhalb der Phasenliste:
+
+* **Kerzen unter der Linie** (RESEARCH): Linie (mit optionalen Bollinger-Bändern) oben,
+  dieselben Tage als Kerzen darunter, gemeinsame Zeitachse (`charts.py`).
+* **Einzeltitel-Regeln** (LAB, Modus „Single stock“): neue Signale Bollinger-Rückkehr
+  und -Ausbruch, RSI (Wilder), Kanal-Ausbruch (Donchian), MACD, dazu ein Trendfilter über
+  einer N-Tage-Linie. Jedes Signal nachlaufend, mit Handrechen-Tests und einem
+  Rückschau-Test (Zukunft umschreiben ändert kein früheres Signal). Kauf-/Verkaufsmarken
+  im Chart, Vergleich gegen Buy-and-Hold desselben Titels. Kombination zweier
+  Einstiegssignale ist bewusst nicht ausdrückbar und landet in `unsupported`.
+* **Papierdepots** (`paper.py`, Tabellen `paper_books`/`paper_positions`): In SCREEN,
+  RESEARCH, STRATEGY und LAB ein abgeschlossener Kasten „Paper money“ — Betrag wählen,
+  simuliert kaufen; das Depot ist ab dann eingefroren und wird nur noch bewertet. Drei
+  Arten: Halten (Kauf zum letzten Schlusskurs, Einstiegskosten einmal), Regel (LAB-Regel
+  live, Füllung zur nächsten Eröffnung, Kosten je Handel, teuerste Stufe ohne
+  Marktkapitalisierung), Sparplan (STRATEGY-Plan ab heute; Einmalanlage wird als
+  Halte-Depot über ein Jahr Beiträge eröffnet, weil ihr Betrag sonst mit der Zeit
+  wüchse). Neuer Reiter **BOOKS** vergleicht alle Depots (Summen, Rendite-auf-Einsatz-
+  Kurven, Tabelle, Detail je Depot gegen den S&P 500 TR mit gleichem Geld); die alten
+  SCREEN-Trackings erscheinen dort auf 10.000 gerechnet. In der laufenden App geprüft.
+  Dabei gefunden und behoben: ein Klick konnte in Streamlit zwei identische Depots
+  anlegen — gleiche Depots innerhalb von 30 s gelten jetzt als derselbe Klick.
+* **Nicht umgesetzt: Papiergeld im OPTIONS-Reiter.** Ein Optionsdepot live zu bewerten
+  braucht tägliche Optionspreise, die der Bestand nicht hat; es mit Black-Scholes und
+  eingefrorener Volatilität zu bewerten, sähe wie ein Marktwert aus und wäre keiner.
+
 ## Nachtrag 24.09.2026 — Branchenfilter und Kerzenchart
 
 **1. Branchenfilter (user).** Die 389 SEC-Bezeichnungen sind präzise und untippbar. Neu
