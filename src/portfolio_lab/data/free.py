@@ -63,7 +63,8 @@ class FreeSource:
 
     def prices(self, tickers: list[str], start: dt.date, end: dt.date) -> pd.DataFrame:
         return self.con.execute(
-            "SELECT ticker, date, open, close, close_adj, volume FROM prices "
+            "SELECT ticker, date, open, COALESCE(close_raw, close) AS close, "
+            "close_adj, volume FROM prices "
             "WHERE ticker IN (SELECT UNNEST(?)) AND date BETWEEN ? AND ?",
             [tickers, start, end],
         ).fetch_df()
@@ -77,10 +78,14 @@ class FreeSource:
         """One row per security with everything a screen needs."""
         uni = self.universe(asof)
         fund = self.fundamentals(asof)
+        # close_raw, not close: this price gets multiplied by a share count to make a
+        # market cap, and `close` arrives split-adjusted from the source. Using it would
+        # understate the market cap of every company that has split since by exactly its
+        # split factor — invisible on today's date, systematic on any historical one.
         last_px = self.con.execute(
             """
-            SELECT ticker, close AS price FROM (
-                SELECT ticker, close, ROW_NUMBER() OVER (
+            SELECT ticker, COALESCE(close_raw, close) AS price FROM (
+                SELECT ticker, close, close_raw, ROW_NUMBER() OVER (
                     PARTITION BY ticker ORDER BY date DESC) rn
                 FROM prices WHERE date <= ?
             ) WHERE rn = 1
@@ -89,10 +94,12 @@ class FreeSource:
         ).fetch_df()
         liq = px.median_dollar_volume(self.con, asof)
         shvol = px.median_share_volume(self.con, asof)
+        sessions = px.session_coverage(self.con, asof)
         out = (uni.merge(fund, on="cik", how="left")
                   .merge(last_px, on="ticker", how="left")
                   .merge(liq, on="ticker", how="left")
-                  .merge(shvol, on="ticker", how="left"))
+                  .merge(shvol, on="ticker", how="left")
+                  .merge(sessions, on="ticker", how="left"))
         # The SEC wording stays in `sector`; `industry_group` is the coarse, typeable
         # version of the same fact. Both travel with the row so the screen can filter on
         # one and still show the other.

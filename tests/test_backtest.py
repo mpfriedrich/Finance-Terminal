@@ -313,3 +313,59 @@ def test_a_name_that_trades_to_the_end_is_not_treated_as_delisted():
     r = bt.buy_and_hold(con, h, dates[0], dates[-1], costs=free)
     assert r.portfolio[-1] == pytest.approx(200.0, rel=1e-9)
     assert not any("stopped trading" in n for n in r.notes)
+
+
+# --- the traded price, rebuilt from the splits ---------------------------------------
+
+@pytest.mark.slow
+def test_the_stored_price_is_the_one_the_stock_actually_traded_at():
+    """The defect this column exists for: the free source serves history already
+    adjusted for splits, so its `close` for Apple on 2020-08-28 is 124.81 where the
+    stock changed hands at 499.23. Multiplied by a point-in-time share count, that turns
+    every historical market cap into a quarter, a tenth or a hundredth of itself —
+    always downward, which is exactly the direction a cheapness screen rewards.
+    """
+    import duckdb
+
+    from portfolio_lab.data.schema import open_market
+
+    if not MARKET_DB.exists():
+        pytest.skip("no local market store")
+    try:
+        con = open_market(MARKET_DB, read_only=True)
+    except (duckdb.IOException, RuntimeError) as exc:
+        pytest.skip(f"market store is locked: {exc}")
+
+    for ticker, day, traded in (("AAPL", "2020-08-28", 499.23),
+                                ("NVDA", "2024-06-07", 1208.88)):
+        row = con.execute(
+            "SELECT close, close_raw FROM prices WHERE ticker = ? AND date = ?",
+            [ticker, dt.date.fromisoformat(day)],
+        ).fetchone()
+        if not row:
+            pytest.skip(f"{ticker} has no bar on {day}")
+        adjusted, raw = row
+        assert raw == pytest.approx(traded, rel=0.001), f"{ticker} on {day}"
+        assert adjusted < raw / 3, "the adjusted close should be far below the traded one"
+
+
+@pytest.mark.slow
+def test_no_share_costs_more_than_a_million_dollars():
+    """Reverse splits back-applied produced prices up to 25 trillion dollars a share.
+    Those are the same defect in the other direction, and they are gone once the traded
+    price is reconstructed. NVR, the most expensive real stock in the universe, peaked
+    around ten thousand."""
+    import duckdb
+
+    from portfolio_lab.data.schema import open_market
+
+    if not MARKET_DB.exists():
+        pytest.skip("no local market store")
+    try:
+        con = open_market(MARKET_DB, read_only=True)
+    except (duckdb.IOException, RuntimeError) as exc:
+        pytest.skip(f"market store is locked: {exc}")
+
+    absurd = con.execute(
+        "SELECT COUNT(*) FROM prices WHERE close_raw > 1e6").fetchone()[0]
+    assert absurd == 0

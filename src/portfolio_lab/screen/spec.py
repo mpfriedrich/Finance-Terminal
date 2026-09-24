@@ -96,6 +96,11 @@ class PortfolioSpec:
     # cheap companies — exactly where untradeable names produce fake backtest returns.
     min_price: float = 5.0
     min_dollar_volume: float = 1_000_000.0
+    # How OFTEN it trades, not how much. Turnover measures the size of a day's trading
+    # and says nothing about the days there are none: three names in the universe traded
+    # on four days in a year and cleared a million dollars on each, so a turnover floor
+    # alone waved them through (measured 2026-09-24).
+    min_trading_days_60: int = 40
     max_filing_age_months: int = 6
     # Anything the translator could not map. Never empty silently — the UI prints it.
     unsupported: tuple[str, ...] = ()
@@ -166,6 +171,7 @@ class PortfolioSpec:
         lines.append(
             f"eligibility: price ≥ {self.min_price:g}, "
             f"60-day median turnover ≥ {self.min_dollar_volume:,.0f}, "
+            f"traded on ≥ {self.min_trading_days_60} of the last 60 sessions, "
             f"filing not older than {self.max_filing_age_months} months"
         )
         return lines

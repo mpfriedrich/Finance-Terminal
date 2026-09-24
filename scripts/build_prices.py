@@ -58,6 +58,9 @@ rows = con.execute("SELECT COUNT(*) FROM prices").fetchone()[0]
 print(f"\nstats: {stats}", flush=True)
 print(f"latest bar: {last} -> {new_last}", flush=True)
 print(f"rows in store: {rows:,}", flush=True)
+filled = px.rebuild_raw_closes(con)
+print(f"traded prices rebuilt from splits: {filled:,} rows", flush=True)
+
 odd = px.suspicious_series(con)
 print(f"\nseries worth a look ({len(odd)} of them): a reassigned ticker splices two "
       f"companies into one, and the join usually shows up as a huge move or a long gap",

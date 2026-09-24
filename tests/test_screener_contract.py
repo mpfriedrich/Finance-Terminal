@@ -24,7 +24,7 @@ from portfolio_lab.screen.spec import Filter, PortfolioSpec
 
 REQUIRED_COLUMNS = {
     "ticker", "cik", "name", "sector", "industry_group", "exchange",
-    "price", "median_dollar_volume_60d", "data_age_days",
+    "price", "median_dollar_volume_60d", "trading_days_60", "data_age_days",
 }
 
 
@@ -107,6 +107,7 @@ def test_the_floors_are_counted_and_actually_hold(frame_and_spec):
         assert (r.picks.price >= spec.min_price).all()
         assert (r.picks.data_age_days <= spec.max_filing_age_months * 31).all()
         assert (r.picks.median_dollar_volume_60d >= spec.min_dollar_volume).all()
+        assert (r.picks.trading_days_60 >= spec.min_trading_days_60).all()
 
 
 def test_a_stale_filer_is_dropped_by_the_freshness_floor(frame_and_spec):
@@ -187,7 +188,8 @@ def test_the_fast_frame_equals_the_reference_frame():
     assert len(fast) == len(reference)
 
     merged = fast.merge(reference, on="ticker", suffixes=("_fast", "_ref"))
-    for column in ("price", "median_dollar_volume_60d", "data_age_days"):
+    for column in ("price", "median_dollar_volume_60d", "trading_days_60",
+                   "data_age_days"):
         a, b = merged[f"{column}_fast"], merged[f"{column}_ref"]
         assert (a.isna() == b.isna()).all(), f"{column}: the two disagree about missing"
         both = a.notna() & b.notna()

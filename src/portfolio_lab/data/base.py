@@ -100,8 +100,11 @@ class DataSource(Protocol):
         """Daily bars.
 
         Columns: ticker, date, open, close, close_adj, volume.
-        `close` is unadjusted (for valuation ratios), `close_adj` is total-return adjusted
-        (for performance). `open` is the next-day fill price used by the rebalance loop.
+        `close` is the price the stock ACTUALLY TRADED at — the only one that may meet a
+        share count. The free source delivers history already split-adjusted, so its own
+        close column is not that price; `FreeSource` hands over the reconstructed one
+        (see prices.py). `close_adj` is total-return adjusted, for performance. `open` is
+        the next-day fill price used by the rebalance loop.
         """
         ...
 
@@ -189,12 +192,22 @@ def build_screening_frame(
         recent["dollar_volume"] = recent["close"] * recent["volume"]
         liquidity = (recent.groupby("ticker")["dollar_volume"].median()
                            .rename("median_dollar_volume_60d").reset_index())
+        # Sessions are the last `volume_sessions` dates on which ANY name in this
+        # universe traded — the same definition the live source uses in SQL, so the two
+        # cannot drift apart on who counts as regularly traded.
+        sessions = sorted(bars.date.unique())[-volume_sessions:]
+        traded = (bars[bars.date.isin(sessions)]
+                  .groupby("ticker").size().rename("trading_days_60").reset_index())
 
     out = uni
     if not wide.empty:
         out = out.merge(wide, on="cik", how="left")
     out = out.merge(last_px, on="ticker", how="left")
     out = out.merge(liquidity, on="ticker", how="left")
+    if not bars.empty:
+        out = out.merge(traded, on="ticker", how="left")
+    if "trading_days_60" not in out.columns:
+        out["trading_days_60"] = float("nan")
     if "data_age_days" not in out.columns:
         out["data_age_days"] = float("nan")
     return industry.add_industry_group(out)

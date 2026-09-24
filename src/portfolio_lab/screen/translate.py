@@ -166,6 +166,7 @@ def payload_to_spec(payload: dict, previous: PortfolioSpec) -> PortfolioSpec:
         rebalance=payload.get("rebalance") or previous.rebalance,
         min_price=previous.min_price,
         min_dollar_volume=previous.min_dollar_volume,
+        min_trading_days_60=previous.min_trading_days_60,
         max_filing_age_months=previous.max_filing_age_months,
         unsupported=tuple(payload.get("unsupported") or ()),
         # Carried over from the previous spec, never read from the model's answer. The

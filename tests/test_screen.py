@@ -372,3 +372,48 @@ def test_case_and_whitespace_do_not_duplicate_a_holding():
 
 def test_a_first_selection_starts_from_the_ticks():
     assert set(merge_selection((), ["AAA", "BBB"], ticked=["BBB"])) == {"BBB"}
+
+
+# --- how often it trades, not how much ------------------------------------------------
+
+def thin_frame():
+    """Two names with identical, healthy turnover. One of them trades four days a year."""
+    return pd.DataFrame([
+        ("LIQUID", 100, 20.0, 1000.0, 500.0, 30, 5e6, 58),
+        ("SPORADIC", 100, 20.0, 1000.0, 500.0, 30, 5e6, 4),
+    ], columns=["ticker", "shares_outstanding", "price", "book_value",
+                "net_income_ttm", "data_age_days", "median_dollar_volume_60d",
+                "trading_days_60"])
+
+
+def test_a_name_that_barely_trades_is_excluded_although_its_turnover_passes():
+    """The exact case that started this: four trading days in a year, a million dollars
+    on each of them, and a turnover floor waves it through."""
+    r = run_screen(thin_frame(), PortfolioSpec(size=10))
+    assert set(r.picks.ticker) == {"LIQUID"}
+
+
+def test_the_frequency_exclusion_is_counted_separately_from_turnover():
+    """'Too small to trade' and 'barely trades at all' are different defects, and the
+    breakdown has to say which one bit."""
+    r = run_screen(thin_frame(), PortfolioSpec(size=10))
+    assert any("fewer than 40 of the last 60 sessions" in k for k in r.exclusions)
+    assert "below minimum turnover" not in r.exclusions
+
+
+def test_the_floor_can_be_lowered_deliberately():
+    r = run_screen(thin_frame(), PortfolioSpec(size=10, min_trading_days_60=0))
+    assert set(r.picks.ticker) == {"LIQUID", "SPORADIC"}
+
+
+def test_a_frame_without_the_column_still_screens():
+    """An older source that cannot answer must not crash the screen; it simply cannot
+    apply this floor, and the other floors still hold."""
+    frame = thin_frame().drop(columns=["trading_days_60"])
+    r = run_screen(frame, PortfolioSpec(size=10))
+    assert set(r.picks.ticker) == {"LIQUID", "SPORADIC"}
+
+
+def test_the_floor_appears_in_the_plain_language_description():
+    lines = " ".join(PortfolioSpec(size=10).describe())
+    assert "traded on ≥ 40 of the last 60 sessions" in lines

@@ -254,6 +254,12 @@ def run_screen(
     drop(data["price"] >= spec.min_price, f"price below {spec.min_price:g}")
     drop(data["median_dollar_volume_60d"].fillna(0) >= spec.min_dollar_volume,
          "below minimum turnover")
+    # Counted separately from turnover on purpose: "too small to trade" and "barely
+    # trades at all" are different defects, and a screen that merges them cannot tell you
+    # which one it just protected you from (R15).
+    if "trading_days_60" in data.columns and spec.min_trading_days_60:
+        drop(data["trading_days_60"].fillna(0) >= spec.min_trading_days_60,
+             f"traded on fewer than {spec.min_trading_days_60} of the last 60 sessions")
 
     n_eligible = len(data)
 

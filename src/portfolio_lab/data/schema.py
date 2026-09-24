@@ -121,6 +121,11 @@ MARKET_MIGRATIONS: list[str] = [
     # the open and the close.
     "ALTER TABLE prices ADD COLUMN IF NOT EXISTS high DOUBLE;",
     "ALTER TABLE prices ADD COLUMN IF NOT EXISTS low DOUBLE;",
+    # 013 — the split event, and the traded price rebuilt from it. `close` arrives
+    # already split-adjusted from the free source, which is fine for returns and wrong
+    # for anything multiplied by a share count; see prices.py.
+    "ALTER TABLE prices ADD COLUMN IF NOT EXISTS split DOUBLE;",
+    "ALTER TABLE prices ADD COLUMN IF NOT EXISTS close_raw DOUBLE;",
     # 012 — how much of the vanished world could be reconstructed (Phase 7). Stored
     # rather than recomputed, because the answer belongs on screen next to every
     # backward-looking number and recomputing it means reading a million JSON files.
