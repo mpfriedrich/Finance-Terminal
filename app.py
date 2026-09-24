@@ -2650,6 +2650,66 @@ with tab_monitor:
                            "only, in each market's own currency.")
 
 
+    st.markdown("#### Compare anything")
+    k1, k2 = st.columns([3, 1])
+    cmp_syms = k1.text_input(
+        "Symbols", value="AAPL, MSFT, ^GSPC, GC=F", key="cmp_syms",
+        help="Any stored series: US shares, the monitor's indices, currencies, "
+             "commodities, crypto. Comma-separated.")
+    cmp_span = k2.selectbox("Since", ["1Y", "3Y", "5Y", "10Y"], index=1, key="cmp_span",
+                            label_visibility="visible")
+    cmp = world.compare(src.con, cmp_syms.split(","),
+                        dt.date.today() - dt.timedelta(days=365 * int(cmp_span[:-1])))
+    if not cmp:
+        st.info("None of these has stored prices in that window.")
+    else:
+        import plotly.graph_objects as go
+
+        if cmp["missing"]:
+            st.caption("No stored prices for: " + ", ".join(cmp["missing"]))
+        cfig = go.Figure()
+        cpal = [ui.AMBER, ui.CYAN, ui.UP, "#C792EA", "#F78C6C", "#FFCB6B", "#89DDFF",
+                ui.DOWN]
+        for i_c, sym in enumerate(cmp["curves"].columns):
+            cfig.add_trace(go.Scatter(x=cmp["curves"].index, y=cmp["curves"][sym],
+                                      name=sym, line=dict(color=cpal[i_c % len(cpal)],
+                                                          width=1.5)))
+        cfig.add_hline(y=100, line=dict(color=ui.MUTED, width=1, dash="dot"))
+        cfig.update_layout(height=320, margin=dict(l=0, r=0, t=6, b=0),
+                           paper_bgcolor=ui.BG, plot_bgcolor=ui.BG, hovermode="x unified",
+                           font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
+                           legend=dict(orientation="h", y=-0.15),
+                           xaxis=dict(gridcolor=ui.RULE),
+                           yaxis=dict(gridcolor=ui.RULE, side="right"))
+        st.plotly_chart(cfig, use_container_width=True, key="cmp_chart")
+        cs = cmp["stats"]
+        st.markdown(ui.grid(pd.DataFrame({
+            "symbol": cs["symbol"],
+            "return": cs["return"].map(lambda v: ui.pct(v, 1)),
+            "p.a.": cs["annualised"].map(lambda v: ui.pct(v, 1)),
+            "volatility": cs["volatility"].map(
+                lambda v: f"{v:.1%}" if v is not None and pd.notna(v) else "—"),
+            "max drawdown": cs["max_drawdown"].map(lambda v: ui.pct(v, 1)),
+            "beta": cs.get("beta", pd.Series([None] * len(cs))).map(ui.num),
+        }), numeric={"volatility", "beta"}, signed={"return", "p.a.", "max drawdown"},
+            ticker_col="symbol"), unsafe_allow_html=True)
+        corr_c = cmp["correlation"]
+        if not corr_c.empty and corr_c.shape[0] > 1:
+            hm = go.Figure(go.Heatmap(
+                z=corr_c.values, x=list(corr_c.columns), y=list(corr_c.index),
+                zmin=-1, zmax=1, text=corr_c.round(2).values, texttemplate="%{text}",
+                colorscale=[[0, ui.CYAN], [0.5, ui.BG], [1, ui.AMBER]]))
+            hm.update_layout(height=min(140 + 34 * len(corr_c), 520),
+                             margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor=ui.BG,
+                             plot_bgcolor=ui.BG,
+                             font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10))
+            st.plotly_chart(hm, use_container_width=True, key="cmp_corr")
+        st.caption(
+            f"Correlation of daily returns over the {cmp['shared_days']} days all of them "
+            "traded. Beta against the S&P 500 total return. Each series in its own "
+            "currency; indices and commodities without dividends.")
+
+
 with tab_books:
     st.markdown("#### Paper books — every simulated purchase, side by side")
     st.caption(

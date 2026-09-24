@@ -88,3 +88,23 @@ def test_stats_from_bars_alone():
     st = world.stats(bars)
     assert st["max_drawdown"] == 0.0
     assert st["1M"] > 0
+
+
+def test_compare_puts_any_stored_series_side_by_side():
+    con = duckdb.connect(":memory:")
+    _apply(con, MARKET_MIGRATIONS)
+    days = pd.bdate_range("2025-01-02", periods=120).date
+    rows = []
+    for i, d in enumerate(days):
+        a = 100.0 * (1.01 if i % 2 else 1.0)
+        rows += [("AAA", d, a, a, a), ("BBB", d, 2 * a, 2 * a, 2 * a),
+                 ("CCC", d, 300.0 - a, 300.0 - a, 300.0 - a), ("^SP500TR", d, a, a, a)]
+    con.executemany("INSERT INTO prices (ticker, date, open, close, close_adj, volume) "
+                    "VALUES (?,?,?,?,?,0)", rows)
+    out = world.compare(con, ["aaa", "BBB", "CCC", "NOPE"], days[0])
+    assert out["missing"] == ["NOPE"]
+    assert out["correlation"].at["AAA", "BBB"] == pytest.approx(1.0)
+    assert out["correlation"].at["AAA", "CCC"] < -0.9
+    stats = out["stats"].set_index("symbol")
+    assert stats.at["AAA", "beta"] == pytest.approx(1.0)
+    assert (out["curves"].iloc[0] == 100.0).all()

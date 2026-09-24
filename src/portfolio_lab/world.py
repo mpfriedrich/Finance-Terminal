@@ -169,3 +169,45 @@ def stats(bars: pd.DataFrame) -> dict:
     running = s.tail(252)
     out["max_drawdown"] = float((running / running.cummax() - 1.0).min())
     return out
+
+
+def compare(con: duckdb.DuckDBPyConnection, symbols: list[str],
+            start: dt.date, benchmark: str = "^SP500TR") -> dict:
+    """Any stored series side by side: rebased curves, the correlation of their daily
+    returns, and per-series return, volatility, drawdown and beta.
+
+    Correlation is over the days all compared series traded — a Monday holiday in one
+    market and not the other would otherwise pair a return with a gap. Returns are in
+    each series' own currency and without dividends unless the series carries them.
+    """
+    symbols = [s.strip().upper() for s in symbols if s.strip()]
+    curves = rebased(con, symbols, start)
+    if curves.empty:
+        return {}
+    closes = con.execute(
+        "SELECT ticker, date, close FROM prices WHERE ticker IN (SELECT UNNEST(?)) "
+        "AND date >= ? AND close > 0 ORDER BY date",
+        [symbols + [benchmark], start],
+    ).fetch_df().pivot_table(index="date", columns="ticker", values="close")
+    closes.index = pd.to_datetime(closes.index)
+    returns = closes.pct_change(fill_method=None)
+    shared = returns[[s for s in symbols if s in returns]].dropna()
+    rows = []
+    for s in curves.columns:
+        series = closes[s].dropna()
+        r = returns[s].dropna()
+        years = max((series.index[-1] - series.index[0]).days / 365.25, 1e-9)
+        row = {"symbol": s, "return": float(series.iloc[-1] / series.iloc[0] - 1.0),
+               "annualised": float((series.iloc[-1] / series.iloc[0]) ** (1 / years) - 1.0),
+               "volatility": float(r.std() * (252 ** 0.5)) if len(r) > 20 else None,
+               "max_drawdown": float((series / series.cummax() - 1.0).min())}
+        if benchmark in returns and s != benchmark:
+            both = pd.concat([r, returns[benchmark]], axis=1, sort=True).dropna()
+            if len(both) > 20 and both.iloc[:, 1].var() > 0:
+                row["beta"] = float(both.iloc[:, 0].cov(both.iloc[:, 1])
+                                    / both.iloc[:, 1].var())
+        rows.append(row)
+    return {"curves": curves, "stats": pd.DataFrame(rows),
+            "correlation": shared.corr() if len(shared) > 20 else pd.DataFrame(),
+            "shared_days": int(len(shared)),
+            "missing": [s for s in symbols if s not in curves.columns]}
