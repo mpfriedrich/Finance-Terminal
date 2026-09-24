@@ -115,6 +115,12 @@ MARKET_MIGRATIONS: list[str] = [
     # a point-in-time share count over a period-average fallback that measures
     # something subtly different (PLAN.md A19/A20).
     "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS tag_rank INTEGER;",
+    # 010 — intraday range. A candlestick is open/high/low/close; without the two
+    # extremes the only honest drawing is a line. Existing rows stay NULL until the
+    # price store is rebuilt, and the chart says so rather than faking a wick from
+    # the open and the close.
+    "ALTER TABLE prices ADD COLUMN IF NOT EXISTS high DOUBLE;",
+    "ALTER TABLE prices ADD COLUMN IF NOT EXISTS low DOUBLE;",
 ]
 
 USER_MIGRATIONS: list[str] = [
@@ -351,9 +357,12 @@ def open_market_for_rebuild(path: Path) -> tuple[duckdb.DuckDBPyConnection, Path
     import shutil
 
     try:
-        return duckdb.connect(str(path)), None
+        con = duckdb.connect(str(path))
     except duckdb.Error:
-        pass  # Held by the app. Work on a copy instead of refusing to run.
+        con = None  # Held by the app. Work on a copy instead of refusing to run.
+    if con is not None:
+        _apply(con, MARKET_MIGRATIONS)
+        return con, None
 
     work = path.with_suffix(path.suffix + ".building")
     work_wal = work.with_suffix(work.suffix + ".wal")
@@ -363,7 +372,12 @@ def open_market_for_rebuild(path: Path) -> tuple[duckdb.DuckDBPyConnection, Path
     wal = path.with_suffix(path.suffix + ".wal")
     if wal.exists():
         shutil.copy2(wal, work_wal)
-    return duckdb.connect(str(work)), work
+    con = duckdb.connect(str(work))
+    # The copy carries the schema the live file had. A build that adds a column has to
+    # migrate the copy too, or it writes against yesterday's table and fails — which is
+    # exactly how the high/low columns would have been lost on first use.
+    _apply(con, MARKET_MIGRATIONS)
+    return con, work
 
 
 def finish_rebuild(con: duckdb.DuckDBPyConnection, work: Path | None, live: Path) -> bool:

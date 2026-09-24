@@ -17,6 +17,7 @@ import json
 from dataclasses import dataclass
 
 from ..config import require_secret
+from ..data import industry
 from .spec import FILTERABLE, Filter, PortfolioSpec
 
 MODEL = "claude-opus-5"
@@ -80,14 +81,17 @@ TOOL = {
                         "metric": {"type": "string", "enum": list(FILTERABLE)},
                         "op": {
                             "type": "string",
-                            "enum": ["<=", ">=", "<", ">", "==", "!=",
+                            "enum": ["<=", ">=", "<", ">", "==", "!=", "in",
                                      "contains", "not_contains"],
                         },
                         "value": {
-                            "type": ["number", "string"],
+                            "type": ["number", "string", "array"],
+                            "items": {"type": "string"},
                             "description": (
                                 "Plain number for numeric metrics (2000000000, not '2bn'). "
-                                "String only for sector or exchange."
+                                "String for industry_group, sector or exchange. A list of "
+                                "strings only with op \"in\" — that is how several "
+                                "industries are allowed at once."
                             ),
                         },
                     },
@@ -201,13 +205,26 @@ def translate(
         client = anthropic.Anthropic(api_key=require_secret("ANTHROPIC_API_KEY"))
 
     system = SYSTEM
+    # Two industry vocabularies, and the model has to be told which is which.
+    # `industry_group` is the short one people speak in; `sector` is the SEC's own
+    # wording and the only way to say something as narrow as "silver mining".
+    system += (
+        "\n\nFor industry, prefer the metric `industry_group`, whose complete set of "
+        "values is:\n"
+        + "\n".join(f"- {g}" for g in industry.GROUPS)
+        + "\nUse op \"in\" with a list, or \"==\" / \"!=\" for a single one. These are "
+        "exact values, not fragments."
+    )
     if sectors:
-        # Hand over the real vocabulary. Without it the model reaches for the sector
-        # names it knows from elsewhere ("Healthcare", "Financials") — labels that appear
-        # nowhere in SEC industry descriptions.
+        # The full list, not a sample. A truncated vocabulary is worse than none: the
+        # model cannot tell the difference between "this industry is absent from the
+        # data" and "it was cut off", so it invents a plausible-looking phrase that
+        # matches nothing.
         system += (
-            "\n\nThe sector values present in this dataset, exactly as written:\n"
-            + "\n".join(f"- {name}" for name in sectors[:120])
+            "\n\nFor a narrower industry than any group above, filter `sector` with op "
+            "\"contains\". These are the SEC's own descriptions, all of them, exactly as "
+            "written:\n"
+            + "\n".join(f"- {name}" for name in sectors)
             + "\nUse a fragment of one of these. Anything else matches nothing."
         )
 

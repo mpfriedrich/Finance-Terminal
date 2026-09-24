@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from ..data import industry
 from .spec import FILTERABLE, Filter, PortfolioSpec
 from .valuation import Assumptions, add_valuation
 
@@ -249,6 +250,18 @@ def run_screen(
                     f"not applied. Real values look like: {', '.join(sample)}"
                 )
                 continue
+        # A name whose industry is unknown fails every industry filter — correctly, but
+        # invisibly. Say how many, because "no tech companies passed" and "412 companies
+        # have no industry on file" are different discoveries (PLAN.md R5).
+        if f.metric in ("industry_group", "sector"):
+            blank = eligible[f.metric].isna() | eligible[f.metric].astype(str).isin(
+                ["", "nan", "None", industry.UNCLASSIFIED]
+            )
+            if int(blank.sum()):
+                notes.append(
+                    f"{int(blank.sum())} eligible companies carry no industry on file "
+                    f"and therefore fail every {f.metric.replace('_', ' ')} filter."
+                )
         per_filter[f.describe()] = int(_apply_filter(eligible, f).fillna(False).sum())
         passing = passing[_apply_filter(passing, f).fillna(False)]
 

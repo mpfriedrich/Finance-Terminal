@@ -284,3 +284,46 @@ def test_the_model_cannot_write_a_selection():
     previous = PortfolioSpec(selected=("AAA",))
     out = payload_to_spec({"size": 5, "filters": [], "selected": ["EVIL"]}, previous)
     assert out.selected == ()
+
+
+def industry_frame():
+    """Same shape as `frame()`, plus the two industry columns the screen can filter on."""
+    df = frame().head(4).copy()
+    df["price"] = [20.0, 10.0, 8.0, 20.0]  # keep all four above the price floor
+    df["industry_group"] = ["Technology", "Health Care", "Unclassified", "Technology"]
+    df["sector"] = ["Services-Prepackaged Software", "Pharmaceutical Preparations",
+                    None, "Semiconductors & Related Devices"]
+    return df
+
+
+def test_industry_filter_keeps_only_the_named_groups():
+    spec = PortfolioSpec(size=10, filters=(
+        Filter("industry_group", "in", ["Technology"]),))
+    r = run_screen(industry_frame(), spec)
+    assert set(r.picks.ticker) == {"AAA", "DDD"}
+
+
+def test_several_industries_can_be_allowed_at_once():
+    spec = PortfolioSpec(size=10, filters=(
+        Filter("industry_group", "in", ["Technology", "Health Care"]),))
+    r = run_screen(industry_frame(), spec)
+    assert set(r.picks.ticker) == {"AAA", "BBB", "DDD"}
+
+
+def test_companies_without_an_industry_are_counted_not_silently_dropped():
+    """A name with no industry fails every industry filter. That is correct and it is
+    also invisible, so the screen has to say how many it happened to."""
+    spec = PortfolioSpec(size=10, filters=(
+        Filter("industry_group", "in", ["Technology"]),))
+    r = run_screen(industry_frame(), spec)
+    assert any("no industry on file" in n for n in r.notes)
+    assert any("1 eligible" in n for n in r.notes)
+
+
+def test_a_sector_fragment_that_matches_nothing_is_refused_out_loud():
+    spec = PortfolioSpec(size=10, filters=(
+        Filter("sector", "contains", "Shipbuilding"),))
+    r = run_screen(industry_frame(), spec)
+    assert any("matches no sector" in n for n in r.notes)
+    # The filter was not applied, so nothing was silently excluded by it.
+    assert r.n_passing == r.n_eligible

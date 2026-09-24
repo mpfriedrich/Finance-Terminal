@@ -13,7 +13,7 @@ import json
 import duckdb
 import pandas as pd
 
-from . import pit, prices as px
+from . import industry, pit, prices as px
 from .base import Snapshot
 
 TABLES = ("securities", "fundamentals", "prices", "ticker_history", "shares_outstanding")
@@ -52,7 +52,7 @@ class FreeSource:
 
     def universe(self, asof: dt.date) -> pd.DataFrame:
         return self.con.execute(
-            "SELECT ticker, cik, name, sector, exchange FROM securities "
+            "SELECT ticker, cik, name, sector, sic, exchange FROM securities "
             "WHERE (first_seen IS NULL OR first_seen <= ?) "
             "AND (last_seen IS NULL OR last_seen >= ?)",
             [asof, asof - dt.timedelta(days=10)],
@@ -93,4 +93,7 @@ class FreeSource:
                   .merge(last_px, on="ticker", how="left")
                   .merge(liq, on="ticker", how="left")
                   .merge(shvol, on="ticker", how="left"))
-        return out
+        # The SEC wording stays in `sector`; `industry_group` is the coarse, typeable
+        # version of the same fact. Both travel with the row so the screen can filter on
+        # one and still show the other.
+        return industry.add_industry_group(out)

@@ -39,6 +39,7 @@ if not st.runtime.exists():
 
 from portfolio_lab import ui
 from portfolio_lab.config import CACHE_DIR, MARKET_DB, USER_DB, Settings, secret
+from portfolio_lab.data import industry
 from portfolio_lab.data.free import FreeSource
 from portfolio_lab.data.schema import open_market, open_user
 from portfolio_lab.screen import translate as T
@@ -212,6 +213,17 @@ with st.sidebar:
                          help="0 means no upper limit")
     st.caption("Applies on top of anything you said in chat.")
 
+    st.markdown("#### Industry")
+    groups = st.multiselect(
+        "Industry groups", options=list(industry.GROUPS),
+        label_visibility="collapsed", key="groups",
+        placeholder="Any industry",
+    )
+    st.caption(
+        "Grouped from the filer's own SEC code — the SEC's own wording stays visible "
+        "in the table. Also applies on top of the chat."
+    )
+
     st.markdown("#### Intrinsic value")
     st.caption("A model, not a measurement. These assumptions decide the answer.")
     # Sliders work in whole percent. Streamlit formats the raw value, so a 0.10 shown
@@ -311,6 +323,8 @@ with tab_screen:
             if hi > 0:
                 bounds.append(f"≤ ${hi:g}bn")
             st.markdown(f"- market cap {' and '.join(bounds)} *(from the sidebar)*")
+        if groups:
+            st.markdown(f"- industry one of {', '.join(groups)} *(from the sidebar)*")
         if spec.unsupported:
             st.warning("Not applied: " + "; ".join(spec.unsupported))
 
@@ -320,6 +334,9 @@ with tab_screen:
         effective = spec
         if spec.is_hand_picked:
             lo = hi = 0.0
+        elif groups:
+            effective = effective.with_filter(
+                Filter("industry_group", "in", list(groups)))
         if lo > 0:
             effective = effective.with_filter(Filter("market_cap", ">=", lo * 1e9))
         if hi > 0:
@@ -397,6 +414,9 @@ with tab_screen:
             "#": r["rank"],
             "ticker": r.ticker.astype(str),
             "name": r.name.astype(str).str.slice(0, 28),
+            # Both classifications, on purpose: the group is what you filtered on, the
+            # SEC wording is what can be checked against the filing.
+            "industry": r.get("industry_group", pd.Series(dtype=object)).astype(str),
             "sector": r.get("sector", pd.Series(dtype=object)).astype(str).str.slice(0, 22),
             "px": _col("price"),
             "mkt cap": _col("market_cap"),
@@ -704,9 +724,84 @@ with tab_research:
                     if px_hist.empty:
                         st.info("No stored price history.")
                     else:
-                        st.line_chart(
-                            px_hist.set_index("date")[["close"]].rename(columns={"close": ticker}),
-                            height=230, color=[ui.AMBER])
+                        import plotly.graph_objects as go
+
+                        c_a, c_b, c_c = st.columns([1, 1, 1.4])
+                        span = c_a.selectbox(
+                            "Range", ["6M", "1Y", "5Y"], index=1,
+                            label_visibility="collapsed", key=f"span_{ticker}",
+                        )
+                        # Bands are computed on the FULL history and only then cropped to
+                        # the visible span. Computing them on the crop would leave the
+                        # first 20 sessions of every view without an envelope.
+                        view = px_hist.join(rs.bollinger(px_hist))
+                        view = view.tail({"6M": 126, "1Y": 252, "5Y": 1260}[span])
+                        # Judged on what is actually on screen: older bars predate the
+                        # high/low columns, so a long view can fall back to a line while
+                        # a short one draws candles.
+                        can_candle = rs.has_intraday_range(view)
+                        candles = c_b.toggle(
+                            "Candles", value=can_candle, disabled=not can_candle,
+                            key=f"candles_{ticker}_{span}",
+                            help=None if can_candle else
+                            "Stored bars carry no high/low for this range.",
+                        )
+                        bands = c_c.toggle(
+                            "Bollinger 20d", value=False, key=f"bands_{ticker}",
+                            help="20-day average with a 2-standard-deviation envelope.",
+                        )
+
+                        fig = go.Figure()
+                        if bands:
+                            fig.add_trace(go.Scatter(
+                                x=view["date"], y=view["upper"], name="upper",
+                                line=dict(color=ui.CYAN, width=1), hoverinfo="skip"))
+                            fig.add_trace(go.Scatter(
+                                x=view["date"], y=view["lower"], name="lower",
+                                line=dict(color=ui.CYAN, width=1), fill="tonexty",
+                                fillcolor="rgba(77, 184, 255, 0.10)", hoverinfo="skip"))
+                            fig.add_trace(go.Scatter(
+                                x=view["date"], y=view["middle"], name="20d avg",
+                                line=dict(color=ui.MUTED, width=1, dash="dot")))
+                        if candles:
+                            fig.add_trace(go.Candlestick(
+                                x=view["date"], open=view["open"], high=view["high"],
+                                low=view["low"], close=view["close"], name=ticker,
+                                increasing=dict(line=dict(color=ui.UP), fillcolor=ui.UP),
+                                decreasing=dict(line=dict(color=ui.DOWN), fillcolor=ui.DOWN),
+                            ))
+                        else:
+                            fig.add_trace(go.Scatter(
+                                x=view["date"], y=view["close"], name=ticker,
+                                line=dict(color=ui.AMBER, width=1.4)))
+                        fig.update_layout(
+                            height=300, margin=dict(l=0, r=0, t=6, b=0),
+                            paper_bgcolor=ui.BG, plot_bgcolor=ui.BG, showlegend=False,
+                            font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
+                            hovermode="x unified",
+                            xaxis=dict(gridcolor=ui.RULE, color=ui.MUTED,
+                                       rangeslider=dict(visible=False),
+                                       # Without this the chart draws empty weekends and
+                                       # every candle body shrinks to make room for them.
+                                       rangebreaks=[dict(bounds=["sat", "mon"])]),
+                            yaxis=dict(gridcolor=ui.RULE, color=ui.MUTED, side="right"),
+                        )
+                        st.plotly_chart(fig, use_container_width=True,
+                                        key=f"pxchart_{ticker}")
+                        if not can_candle:
+                            st.caption(
+                                "Line, not candles: the bars in this range carry no high "
+                                "or low. `uv run python scripts/build_prices.py --full` "
+                                "backfills the intraday range for the stored window."
+                            )
+                        elif bands:
+                            st.caption(
+                                "Bands are 20-day average ± 2 population standard "
+                                "deviations of the unadjusted close — the same series the "
+                                "candles are drawn from. About one session in twenty closes "
+                                "outside them even when nothing is happening; that is what "
+                                "two standard deviations means, not a signal."
+                            )
                     stats_now = rs.price_stats(src.con, ticker)
                     if stats_now:
                         cells = []

@@ -24,14 +24,16 @@ _D = dt.date
 
 _SECURITIES = pd.DataFrame(
     [
-        # cik, ticker, name, sector, exchange, first_seen, last_seen
-        (1001, "AAA", "Alpha Industries", "Industrials", "NYSE", _D(2018, 1, 2), None),
-        (1002, "BBB", "Beta Materials", "Materials", "NASDAQ", _D(2018, 1, 2), None),
-        (1003, "CCC", "Gamma Holdings", "Financials", "NASDAQ", _D(2018, 1, 2), None),
-        (1004, "DDD", "Delta Mining", "Materials", "NYSE", _D(2018, 1, 2), _D(2023, 6, 30)),
-        (1005, "EEE", "Epsilon Foods", "Staples", "NYSE", _D(2018, 1, 2), None),
+        # cik, ticker, name, sector, sic, exchange, first_seen, last_seen
+        # The SIC codes are real ones, so the fixture exercises the same industry
+        # grouping the live source uses instead of a parallel made-up path.
+        (1001, "AAA", "Alpha Industries", "Industrials", "3550", "NYSE", _D(2018, 1, 2), None),
+        (1002, "BBB", "Beta Materials", "Materials", "2810", "NASDAQ", _D(2018, 1, 2), None),
+        (1003, "CCC", "Gamma Holdings", "Financials", "6022", "NASDAQ", _D(2018, 1, 2), None),
+        (1004, "DDD", "Delta Mining", "Materials", "1040", "NYSE", _D(2018, 1, 2), _D(2023, 6, 30)),
+        (1005, "EEE", "Epsilon Foods", "Staples", "2000", "NYSE", _D(2018, 1, 2), None),
     ],
-    columns=["cik", "ticker", "name", "sector", "exchange", "first_seen", "last_seen"],
+    columns=["cik", "ticker", "name", "sector", "sic", "exchange", "first_seen", "last_seen"],
 )
 
 # (cik, metric, value, period_end, filed, accession)
@@ -106,7 +108,7 @@ class FixtureSource:
     def universe(self, asof: dt.date) -> pd.DataFrame:
         df = _SECURITIES.copy()
         alive = (df.first_seen <= asof) & (df.last_seen.isna() | (df.last_seen >= asof))
-        return df.loc[alive, ["ticker", "cik", "name", "sector", "exchange"]].reset_index(
+        return df.loc[alive, ["ticker", "cik", "name", "sector", "sic", "exchange"]].reset_index(
             drop=True
         )
 

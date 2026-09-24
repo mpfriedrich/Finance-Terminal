@@ -69,10 +69,62 @@ def price_history(
 ) -> pd.DataFrame:
     since = dt.date.today() - dt.timedelta(days=int(years * 365.25))
     return con.execute(
-        "SELECT date, close, close_adj, volume FROM prices "
+        "SELECT date, open, high, low, close, close_adj, volume FROM prices "
         "WHERE upper(ticker) = upper(?) AND date >= ? ORDER BY date",
         [ticker, since],
     ).fetch_df()
+
+
+def bollinger(
+    px: pd.DataFrame,
+    window: int = 20,
+    num_std: float = 2.0,
+    column: str = "close",
+) -> pd.DataFrame:
+    """Bollinger bands: a moving average with a volatility envelope around it.
+
+    middle = the `window`-day simple moving average
+    upper  = middle + num_std × the standard deviation of the same window
+    lower  = middle − num_std × the same
+
+    Two choices that change the numbers, so they are stated rather than buried:
+
+      * The deviation is the POPULATION one (ddof=0). That is Bollinger's own
+        definition; pandas defaults to the sample deviation (ddof=1), which on a
+        20-day window runs about 2.6% wider — small, but it is the difference between
+        a price touching the band and not.
+      * The bands are computed on the SAME series the candles are drawn from, the
+        unadjusted close. Mixing an adjusted average with unadjusted candles puts the
+        envelope in the wrong place around every split and dividend.
+
+    The first `window - 1` rows are NaN on purpose: a 20-day band computed from 3 days
+    is not an early reading, it is a different and much narrower statistic.
+    """
+    out = pd.DataFrame(index=px.index)
+    series = pd.to_numeric(px[column], errors="coerce")
+    rolling = series.rolling(window=window, min_periods=window)
+    middle = rolling.mean()
+    spread = rolling.std(ddof=0) * float(num_std)
+    out["middle"] = middle
+    out["upper"] = middle + spread
+    out["lower"] = middle - spread
+    # Where in the envelope the price sits: 1 at the upper band, 0 at the lower. The
+    # conventional %B, useful because "near the top of its range" is the actual question.
+    width = out["upper"] - out["lower"]
+    out["percent_b"] = (series - out["lower"]).where(width > 0) / width.where(width > 0)
+    return out
+
+
+def has_intraday_range(px: pd.DataFrame) -> bool:
+    """True when high and low are present for enough rows to draw candles.
+
+    Bars stored before the range columns existed carry NULLs. Drawing a candle from
+    open and close alone would invent a wickless chart that looks like data.
+    """
+    if not {"high", "low"}.issubset(px.columns) or px.empty:
+        return False
+    both = px["high"].notna() & px["low"].notna()
+    return bool(both.sum() >= 2)
 
 
 def annual_history(con: duckdb.DuckDBPyConnection, cik: int) -> pd.DataFrame:

@@ -41,7 +41,7 @@ def _download(tickers: list[str], start: dt.date, end: dt.date) -> pd.DataFrame:
             group_by="column",
         )
     if raw is None or raw.empty:
-        return pd.DataFrame(columns=["ticker", "date", "open", "close", "close_adj", "volume"])
+        return pd.DataFrame(columns=["ticker", "date", "open", "high", "low", "close", "close_adj", "volume"])
 
     frames: list[pd.DataFrame] = []
     single = not isinstance(raw.columns, pd.MultiIndex)
@@ -53,7 +53,8 @@ def _download(tickers: list[str], start: dt.date, end: dt.date) -> pd.DataFrame:
                 sub = pd.DataFrame(
                     {
                         field: raw[field][ticker]
-                        for field in ("Open", "Close", "Adj Close", "Volume")
+                        for field in ("Open", "High", "Low", "Close", "Adj Close",
+                                      "Volume")
                         if (field, ticker) in raw.columns
                     }
                 )
@@ -66,6 +67,8 @@ def _download(tickers: list[str], start: dt.date, end: dt.date) -> pd.DataFrame:
                 "ticker": ticker,
                 "date": pd.to_datetime(sub.index).date,
                 "open": sub.get("Open"),
+                "high": sub.get("High"),
+                "low": sub.get("Low"),
                 "close": sub.get("Close"),
                 "close_adj": sub.get("Adj Close", sub.get("Close")),
                 "volume": sub.get("Volume"),
@@ -74,7 +77,7 @@ def _download(tickers: list[str], start: dt.date, end: dt.date) -> pd.DataFrame:
         frames.append(out)
 
     if not frames:
-        return pd.DataFrame(columns=["ticker", "date", "open", "close", "close_adj", "volume"])
+        return pd.DataFrame(columns=["ticker", "date", "open", "high", "low", "close", "close_adj", "volume"])
     result = pd.concat(frames, ignore_index=True)
     result["volume"] = result["volume"].fillna(0).astype("int64")
     return result
@@ -101,8 +104,9 @@ def fetch_into_store(
             [start, end],
         )
         con.execute(
-            "INSERT INTO prices (ticker, date, open, close, close_adj, volume) "
-            "SELECT ticker, date, open, close, close_adj, volume FROM _px"
+            "INSERT INTO prices (ticker, date, open, high, low, close, close_adj, "
+            "volume) SELECT ticker, date, open, high, low, close, close_adj, volume "
+            "FROM _px"
         )
         con.unregister("_px")
         stats["rows"] += len(frame)

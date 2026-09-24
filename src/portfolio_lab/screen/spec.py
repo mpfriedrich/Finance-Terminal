@@ -51,7 +51,8 @@ FILTERABLE: tuple[str, ...] = (
     "total_assets",
     "total_liabilities",
     # categorical
-    "sector",
+    "industry_group",  # the coarse, typeable one: "Technology", "Health Care", ...
+    "sector",          # the SEC's own wording: "Services-Prepackaged Software", ...
     "exchange",
 )
 
