@@ -263,7 +263,7 @@ Grundhaltung: **laut scheitern**. Eine klare Fehlermeldung ist besser als eine G
 
 ## Open Items (nichts blockiert den Baubeginn)
 
-* **Handelsfrequenz als eigene Grenze (24.09.2026).** Die Liquiditätsgrenze prüft die Höhe
+* ~~**Handelsfrequenz als eigene Grenze (24.09.2026).**~~ — **ist umgesetzt** (`PortfolioSpec.min_trading_days_60 = 40`, gezählt in `prices.session_coverage`, als eigener Ausschlussgrund gezählt und angezeigt); der Eintrag hier war nur nicht nachgezogen (festgestellt 24.09.2026, Cloud-Sitzung). Die Liquiditätsgrenze prüft die Höhe
   des Umsatzes, nicht seine Regelmäßigkeit. Vorschlag: eine Mindestzahl an Handelstagen im
   Fenster verlangen (etwa 40 der letzten 60 Sitzungen) und die Ausgeschlossenen, wie alle
   anderen Grenzen, getrennt zählen und anzeigen. Ändert die Ergebnisse bestehender
@@ -440,15 +440,35 @@ prüfen sollte, ohne je zu unterbrechen.
   — nur nach `period_end` partitionieren — würde Quartal und Geschäftsjahr mit gleichem
   Periodenende vermischen; es braucht eine Bucket-Bildung nach Periodenlänge. Das ist
   eine überlegte Änderung, keine Abendreparatur.
-* **`ticker_history` wird von Stufe B nicht benutzt.** Das Kriterium sagt „das Universum
-  aus Phase 7"; tatsächlich kommt es weiter aus `securities`. Zahlenmäßig identisch (die
-  kursbasierten Zeilen sind dieselben Überlebenden), aber das Kriterium ist damit **nicht
-  erfüllt** und wird hier so festgehalten statt abgehakt.
+* ~~**`period_start`-Verschiebung bei Korrekturen**~~ — **behoben am 24.09.2026 (Cloud-
+  Sitzung):** `pit._visible` partitioniert jetzt nach `period_end` **und Längenklasse**
+  (Jahr 330–400 Tage, Quartal 80–100, sonst gerundete Monate), die früheste Meldung
+  gewinnt. Quartal und Neun-Monats-Spanne mit gleichem Ende bleiben getrennt. Dieselbe
+  Lücke steckte in `research.py` (Jahres- und Quartalshistorie) und ist dort mit behoben.
+  Drei neue Tests in `tests/test_pit.py`; der Quartalsfall schlug vorher fehl (150 statt
+  100). `CACHE_VERSION` → `v3`. **Noch nicht gemessen:** die Wirkung auf die drei
+  Varianten der Tabelle unten. Das braucht `data/market.duckdb`, die nur lokal liegt:
+  `scripts/warm_pit_cache.py` neu laufen lassen, dann die drei Läufe wiederholen.
+* ~~**`ticker_history` wird von Stufe B nicht benutzt.**~~ — **behoben am 24.09.2026
+  (Cloud-Sitzung):** `FreeSource.universe()` liest jetzt `history.universe_at()`: ein
+  Titel gehört zum Stichtag, wenn sein Preisfenster in `ticker_history` ihn abdeckt
+  (10 Tage Kulanz); Stammdaten kommen aus `securities`, ein nur dort bekannter
+  verschwundener Titel bleibt mit leeren Feldern drin. Titel ganz ohne Kurse bleiben wie
+  bisher an jedem Stichtag drin, damit die Ausschluss-Rechnung aufgeht. Die Preisfenster
+  werden jetzt bei jedem `scripts/build_prices.py` mit aufgefrischt
+  (`history.refresh_price_windows`). Sind sie leer oder älter als der neueste Kurs, fällt
+  die Quelle auf `securities` zurück **und der Lauf sagt das im Hinweis**. Vier neue
+  Tests in `tests/test_stage_b.py`, alle vier schlugen vorher fehl. Dabei gefunden und
+  behoben: ein Stichtag, an dem alle Meldungen älter als 400 Tage sind, ließ den Lauf mit
+  `KeyError: 'data_age_days'` abstürzen (schnelle SQL-Fassung in `free.py`; die
+  Referenzfassung in `base.py` hatte die Absicherung schon). `CACHE_VERSION` → `v4`.
+  **Lokal einmal nötig:** `scripts/build_ticker_history.py` oder `scripts/build_prices.py`
+  laufen lassen, damit die Fenster aktuell sind — sonst greift die Rückfallebene.
 * **Der Cache-Schlüssel erkennt Korrekturen an Ort und Stelle nicht** (Quelle, jüngster
   Balken, Zeilenzahlen ändern sich dabei nicht). Dokumentiert statt behauptet;
   `CACHE_VERSION` ist jetzt `v2` und die Regel zum Hochzählen steht im Modul.
-* **R19 für Stufe B** ist als Hinweis umgesetzt (Delistings, nicht bepreisbare
-  Positionen), aber ohne die Zählung „wie viele Titel verließen das Universum".
+* ~~**R19 für Stufe B**~~ — **behoben am 24.09.2026:** der Lauf zählt, wie viele Titel
+  zwischen zwei Stichtagen das Universum verlassen haben, und nennt die ersten acht.
 
 **Wirkung auf die Zahlen, gleiche Bedingungen vorher/nachher:**
 
@@ -457,6 +477,76 @@ prüfen sollte, ohne je zu unterbrechen.
 | KGV ≤ 5 & KBV ≤ 2, quartalsweise | 4,17 % | **3,53 %** | −10,05 → **−10,68** |
 | dasselbe, jährlich | 11,95 % | **11,69 %** | −2,27 → **−2,53** |
 | KBV ≤ 1, 20 Titel, jährlich | 15,77 % | **15,22 %** | +1,55 → **+1,01** |
+
+## Dritte Gegenprüfung Phase 7 + 8 — 24.09.2026 (Cloud-Sitzung)
+
+Derselbe Prüfer hat die Fixes der zweiten Runde zu brechen versucht. Alle acht halten.
+**Verdikt: Phase 7 bestanden; Phase 8 durchgefallen an genau einem Befund**, der inzwischen
+behoben ist:
+
+1. **Blockierend (R13): Die Altersgrenze wurde VOR der Wahl der ersten Einreichung
+   angewandt.** War das Original älter als 400 Tage, wurde eine spätere Korrektur
+   derselben Periode zur „ersten“ — mit frischem Datum, das einen säumigen Melder obendrein
+   als aktuell durchgehen ließ. Genau die notleidenden, billigen Titel eines Value-Screens.
+   Jetzt: erste Einreichung über alles Sichtbare, erst danach die Altersgrenze. Test mit
+   dem Szenario des Prüfers. `CACHE_VERSION` → `v6`. Häufigkeit ungemessen, Obergrenze:
+   `SELECT COUNT(*) FROM (SELECT cik, metric, period_end, MIN(filed) f0, MAX(filed) f1, COUNT(DISTINCT value) nv FROM fundamentals WHERE period_start IS NULL GROUP BY ALL) WHERE date_diff('day', f0, f1) > 400 AND nv > 1`
+2. **R19-Zahl „ohne Kurs“ war konstruktionsbedingt immer null.** Ersetzt durch die Zahl, die
+   Risiko trägt: Positionen, deren Kurse endeten, während sie gehalten wurden, und die zum
+   angenommenen Delisting-Abschlag geschlossen wurden.
+
+**Beim Test zu 2 selbst gefunden, nicht vom Prüfer:** Der Handelskalender von Stufe B wurde
+nur aus den Kursen der gehaltenen Titel gebaut. Verschwanden alle gehaltenen Titel, endete
+der Kalender mit ihnen — nichts sah delistet aus, der −30-%-Abschlag (R18) griff nie, und
+der Lauf hörte still früher auf. Jetzt liefert die Quelle den Marktkalender
+(`FreeSource.sessions`). Aufwärtsverzerrung, betraf konzentrierte Depots mit Pleiten.
+
+Vom Prüfer als Verdacht notiert, nicht behoben: auf der bezahlten Quelle bekommt jeder
+Abgang pauschal −30 % (Übernahmen mit Aufschlag ebenso wie Pleiten; Sharadar ACTIONS wird
+nicht genutzt), und das Etikett sagt dort weiterhin „Überlebende“ — vorsichtig falsch.
+
+**Stand Phase 8:** Nach Einschätzung des Prüfers mit Fix 1 bestanden, vorbehaltlich der nur
+lokal möglichen Messungen: 5-Minuten-Grenze (Cache `v6` neu wärmen), Wirkung auf die drei
+Vergleichsvarianten, Häufigkeit der R13-Lecks.
+
+## Zweite Gegenprüfung Phase 7 + 8 — 24.09.2026 (Cloud-Sitzung)
+
+Ein unabhängiger Prüfer (eigener Agent, hat den Code nicht geschrieben) hat Phase 7 und 8
+nach den Fixes erneut gegen die Abnahmekriterien gelesen und Befunde mit Skripten
+nachgestellt. **Verdikt: Phase 7 bestanden, Phase 8 durchgefallen.** Alle Befunde sind
+abgearbeitet, jeder mit einem Test, der am alten Code scheitert (sieben) bzw. eine
+Mutation erkennt (einer):
+
+1. **Blockierend (R13): Korrektur unter besserem XBRL-Tag verdrängte das Original.**
+   `instant_values` und `share_counts` wählten die früheste Meldung *je Tag* und
+   bevorzugten danach den besseren Tag — ein 10-K/A mit `StockholdersEquity` schlug das
+   10-K mit dem Ersatz-Tag, samt neuer Aktienzahl. Jetzt spricht nur die erste Einreichung
+   einer Periode, der Tag-Vorrang wählt nur unter deren Tags. Ausnahme, bewusst: eine
+   unplausible Aktienzahl (0, 1) in der ersten Einreichung überlässt die Periode der
+   nächsten. **Häufigkeit in den echten Daten ungemessen**, Abfrage dafür:
+   `SELECT COUNT(*) FROM (SELECT cik, metric, period_end, MIN(filed) f0, arg_min(filed, tag_rank) fbest FROM fundamentals WHERE period_start IS NULL GROUP BY ALL) WHERE fbest > f0`
+2. **Kriterium 3 auf dem `ticker_history`-Pfad war ungetestet** — das Entfernen von
+   `valid_from <= asof` blieb grün. Neuer Test mit spät beginnendem Preisfenster.
+3. **R19 nur halb:** jetzt beide Zahlen (verlassen / davon ohne Kurs), auch bei null.
+4. **Kosten wurden zu 0 % geliehen statt vom Anlagebetrag bezahlt** (Aufwärtsverzerrung,
+   bei Buy-and-hold über die ganze Haltedauer). Behoben: 10 → 40 bei 1 % ergibt 396, nicht 399.
+5. **`exclude` (R20, „ohne stärksten Titel“) verkleinerte das Depot** statt den Platz an
+   den nächsten Titel zu geben. Behoben.
+6. **Cache-Schlüssel ignorierte die Universumsbasis** — jetzt Teil des Schlüssels; der
+   Rückfall-Hinweis war zudem falsch formuliert, korrigiert.
+7. **R16 wörtlich** („nur Schlusskurs am Screening-Tag ändern → Füllung unverändert“) hat
+   jetzt einen eigenen Test.
+8. Klein: Benchmark wurde rückwärts aus der Zukunft aufgefüllt, wenn der Index später
+   beginnt (jetzt: kein Vergleich statt eines erfundenen); Umschichtungstermine rutschten
+   nach einem 31. dauerhaft auf den 28. (jetzt vom Start aus gezählt).
+
+Nicht geändert: eine Position, deren Kurse weniger als 10 Tage vor Fensterende enden,
+wird zum letzten Kurs bewertet statt mit Delisting-Abschlag (Datenverzug und Delisting
+sind dort nicht unterscheidbar). `CACHE_VERSION` → `v5`.
+
+**Was für die Abnahme von Phase 8 noch fehlt:** (a) eine dritte Prüfrunde über diese
+Fixes, (b) die Messungen, die nur lokal gehen — 5-Minuten-Grenze mit neu gewärmtem Cache,
+Wirkung auf die drei Vergleichsvarianten, Häufigkeit von Befund 1.
 
 ## Phase 7 — Ergebnis vom 24.09.2026: die Messung fällt aus, und das ist das Ergebnis
 
@@ -575,6 +665,47 @@ Total Return. Was dabei gemessen statt angenommen wurde:
 liegen 2010–2026 vor, für die Einzelaktien nicht. Ein tieferer Kursdownload ist eine
 Entscheidung über Zeit und Datenmenge, keine Programmieraufgabe.
 
+## Nachtrag 24.09.2026 (Cloud-Sitzung) — Papierdepots, Einzeltitel-Regeln, Chart
+
+Auf Zuruf des Nutzers, außerhalb der Phasenliste:
+
+* **Kerzen unter der Linie** (RESEARCH): Linie (mit optionalen Bollinger-Bändern) oben,
+  dieselben Tage als Kerzen darunter, gemeinsame Zeitachse (`charts.py`).
+* **Einzeltitel-Regeln** (LAB, Modus „Single stock“): neue Signale Bollinger-Rückkehr
+  und -Ausbruch, RSI (Wilder), Kanal-Ausbruch (Donchian), MACD, dazu ein Trendfilter über
+  einer N-Tage-Linie. Jedes Signal nachlaufend, mit Handrechen-Tests und einem
+  Rückschau-Test (Zukunft umschreiben ändert kein früheres Signal). Kauf-/Verkaufsmarken
+  im Chart, Vergleich gegen Buy-and-Hold desselben Titels. Kombination zweier
+  Einstiegssignale ist bewusst nicht ausdrückbar und landet in `unsupported`.
+* **Papierdepots** (`paper.py`, Tabellen `paper_books`/`paper_positions`): In SCREEN,
+  RESEARCH, STRATEGY und LAB ein abgeschlossener Kasten „Paper money“ — Betrag wählen,
+  simuliert kaufen; das Depot ist ab dann eingefroren und wird nur noch bewertet. Drei
+  Arten: Halten (Kauf zum letzten Schlusskurs, Einstiegskosten einmal), Regel (LAB-Regel
+  live, Füllung zur nächsten Eröffnung, Kosten je Handel, teuerste Stufe ohne
+  Marktkapitalisierung), Sparplan (STRATEGY-Plan ab heute; Einmalanlage wird als
+  Halte-Depot über ein Jahr Beiträge eröffnet, weil ihr Betrag sonst mit der Zeit
+  wüchse). Neuer Reiter **BOOKS** vergleicht alle Depots (Summen, Rendite-auf-Einsatz-
+  Kurven, Tabelle, Detail je Depot gegen den S&P 500 TR mit gleichem Geld); die alten
+  SCREEN-Trackings erscheinen dort auf 10.000 gerechnet. In der laufenden App geprüft.
+  Dabei gefunden und behoben: ein Klick konnte in Streamlit zwei identische Depots
+  anlegen — gleiche Depots innerhalb von 30 s gelten jetzt als derselbe Klick.
+* **KI-Zusammenfassung** (RESEARCH, Knopf „Write AI summary“, `summary.py`): Claude
+  (`claude-opus-5`, mit serverseitigem Fallback bei einer Ablehnung) schreibt aus einem
+  Datenblatt der App — Kennzahlen, Jahres- und Quartalszahlen wie zuerst gemeldet,
+  Restatements, Kursverhalten, Vergleichsfirmen — eine kurze Einschätzung mit festen
+  Abschnitten (Wachstum, Bilanz, Bewertung, Für, Gegen, Vor dem Handeln prüfen). Nur
+  diese Zahlen, keine Empfehlung, kein Kursziel. Je Datenstand gespeichert
+  (`ai_summaries`), ein zweiter Klick kostet nichts. Claude-Skills zur Aktienbewertung
+  gab es nicht; sie wären auch überflüssig, weil die Zahlen aus der App selbst kommen.
+  **Ungetestet gegen die echte API** (kein Schlüssel und kein Zugang in der
+  Cloud-Sitzung); der Aufruf ist gegen die SDK-Signatur (anthropic 1.7.0) geprüft und
+  mit einem nachgebauten Client getestet. Beim ersten echten Klick die Antwort ansehen.
+  Nebenbei behoben: ohne gespeicherte Index-/Rohstoffreihen stürzte der RESEARCH-Reiter
+  bei jeder Tickereingabe ab (`price_only_symbols` ohne Spalten).
+* **Nicht umgesetzt: Papiergeld im OPTIONS-Reiter.** Ein Optionsdepot live zu bewerten
+  braucht tägliche Optionspreise, die der Bestand nicht hat; es mit Black-Scholes und
+  eingefrorener Volatilität zu bewerten, sähe wie ein Marktwert aus und wäre keiner.
+
 ## Nachtrag 24.09.2026 — Branchenfilter und Kerzenchart
 
 **1. Branchenfilter (user).** Die 389 SEC-Bezeichnungen sind präzise und untippbar. Neu
@@ -683,7 +814,7 @@ Aufbau auf einer Kopie hätte gegen die alte Tabelle geschrieben und wäre gesch
       - Zählung und Anzeige nach R19
       **Covers:** R18, R19
 
-- [ ] **Phase 8: Point-in-Time-Backtest (Fundamentaldaten)** — *Gegenprüfung 25.09.2026: durchgefallen, drei schwere Befunde behoben, drei offen; siehe oben*
+- [ ] **Phase 8: Point-in-Time-Backtest (Fundamentaldaten)** — *drei Gegenprüfungen; alle Befunde behoben (siehe „Dritte Gegenprüfung“). Offen nur, was die lokale Datenbank braucht: 5-Minuten-Grenze, Wirkung auf die Zahlen, Häufigkeit der R13-Lecks*
       **Done when:** quartalsweise Umschichtung, die je Stichtag **das Universum aus Phase 7** und ausschließlich die bis dahin gemeldeten Bilanzdaten benutzt; **drei Tests sind grün:** ein Datensatz mit späterem Meldedatum gelangt nicht in die Auswahl; eine nachträgliche Korrektur verdrängt die ursprüngliche Fassung nicht; ein Titel, der zum Stichtag noch nicht notiert war oder schon verschwunden ist, erscheint nicht in der Auswahl. Der Test nach R16 belegt die Ausführung zur Folgetags-Eröffnung. Das Etikett nennt, welche Verzerrungen korrigiert sind und welche nicht — mit der in Phase 7 gemessenen Quote. Ein voller Durchlauf über den gesamten belastbaren Zeitraum braucht **höchstens 5 Minuten**; wird das überschritten, werden Zwischenergebnisse je Stichtag zwischengespeichert, bis es eingehalten ist.
       **Steps:**
       - Stichtagsabfrage über Meldedatum, Auswahlregel „früheste Fassung" (R13)
@@ -702,7 +833,8 @@ Aufbau auf einer Kopie hätte gegen die alte Tabelle geschrieben und wäre gesch
       - Ein Satz zur Überanpassung im Bericht
       **Covers:** R20, R21
 
-- [ ] **Phase 10: Umschalter auf die bezahlte Datenquelle**
+- [x] **Phase 10: Umschalter auf die bezahlte Datenquelle** — *gebaut am 24.09.2026 (Cloud-Sitzung), gegen den echten Dienst ungeprüft*
+      **Ergebnis:** `PORTFOLIO_LAB_SOURCE=free|paid` in `.env.local` wählt die Quelle (`Settings.data_source`, `data/sources.py`). `data/paid.py` übersetzt Sharadar TICKERS/SF1/SEP in **dasselbe Schema** in eine eigene Datei `data/paid.duckdb` (`scripts/build_paid.py`); `PaidSource` ist `FreeSource` auf dieser Datei, es gibt also keine zweite Abfragelogik, die abdriften könnte. Nur die Dimensionen ARQ/ARY (as reported) werden geladen; MR* wäre Rückschau (R13). Nur „Domestic Common Stock“. Ohne Schlüssel, ohne gebauten Bestand oder bei unbekannter Wahl erscheint in der App eine Meldung mit dem fehlenden Schritt; in der laufenden App geprüft. Die Screener-Testreihe (`tests/test_screener_contract.py`) läuft unverändert über einen im Sharadar-Layout von Hand gebauten Bestand (`tests/paid_fixture.py`), dazu 12 Tests in `tests/test_paid.py`. Anleitung im README („Switching to the paid data source“). **Offen:** Der Download (`paid.download_table`) ist ungetestet, weil es kein Abo gibt und der Container Nasdaq nicht erreicht; das Tabellenlayout stammt aus der veröffentlichten Beschreibung. Beim ersten echten Lauf die Ausgabe prüfen: die Zahl der Delistings mit Kursen muss in die Tausende gehen.
       **Done when:** eine Einstellung wählt die Datenquelle; ohne Schlüssel erscheint eine klare Meldung statt eines Absturzes; die Screener-Testreihe aus Phase 2 läuft unverändert gegen die gewählte Quelle; eine kurze Anleitung beschreibt, was der Nutzer beim Wechsel tun muss und welche Verzerrung damit wegfällt.
       **Steps:**
       - `PaidSource` gegen dieselbe Schnittstelle

@@ -13,6 +13,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 MARKET_DB = DATA_DIR / "market.duckdb"
+# The paid source's store, built by scripts/build_paid.py. Separate from the free one so
+# switching back is a setting, not a rebuild (Phase 10).
+PAID_DB = DATA_DIR / "paid.duckdb"
 USER_DB = DATA_DIR / "user.duckdb"
 CACHE_DIR = DATA_DIR / "cache"
 
@@ -34,6 +37,12 @@ def secret(name: str) -> str | None:
     """Fetch a secret. Callers must never include the return value in output."""
     load_env()
     return os.environ.get(name)
+
+
+def _setting(name: str, default: str) -> str:
+    """A plain (non-secret) setting from the environment or .env.local."""
+    load_env()
+    return (os.environ.get(name) or default).strip().lower()
 
 
 def require_secret(name: str) -> str:
@@ -98,3 +107,6 @@ class Settings:
     holdout_years: int = 2
     rebalance: str = "quarterly"
     risk_free_fallback: float = 0.02
+    # "free" (SEC + yfinance) or "paid" (Sharadar). Set PORTFOLIO_LAB_SOURCE in
+    # .env.local; see data/sources.py for what happens when the paid one is not ready.
+    data_source: str = field(default_factory=lambda: _setting("PORTFOLIO_LAB_SOURCE", "free"))

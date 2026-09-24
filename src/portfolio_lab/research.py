@@ -139,7 +139,9 @@ def annual_history(con: duckdb.DuckDBPyConnection, cik: int) -> pd.DataFrame:
         WITH first_filed AS (
             SELECT cik, metric, value, period_start, period_end, filed,
                    ROW_NUMBER() OVER (
-                       PARTITION BY cik, metric, period_start, period_end
+                       -- period_end only: the WHERE already fixes the length class,
+                       -- and a restatement may shift the start by days (see pit.py).
+                       PARTITION BY cik, metric, period_end
                        ORDER BY filed ASC, tag_rank ASC
                    ) AS rn
             FROM fundamentals
@@ -467,7 +469,7 @@ def quarterly_trend(con: duckdb.DuckDBPyConnection, cik: int, quarters: int = 12
         WITH first_filed AS (
             SELECT metric, value, period_start, period_end, filed,
                    ROW_NUMBER() OVER (
-                       PARTITION BY metric, period_start, period_end
+                       PARTITION BY metric, period_end
                        ORDER BY filed ASC, tag_rank ASC
                    ) AS rn
             FROM fundamentals
@@ -632,7 +634,10 @@ def price_only_symbols(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
                     else "commodity / macro")
             rows.append({"symbol": symbol, "name": label, "kind": kind,
                          "bars": r[0], "from": r[1], "to": r[2]})
-    return pd.DataFrame(rows)
+    # The columns even when there are no rows: a store without any index or commodity
+    # series returned a frame with no `symbol` column, and the research tab's lookup on
+    # it raised for every ticker typed.
+    return pd.DataFrame(rows, columns=["symbol", "name", "kind", "bars", "from", "to"])
 
 
 COMMODITIES = {

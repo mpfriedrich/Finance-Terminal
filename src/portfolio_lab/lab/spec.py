@@ -23,7 +23,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Literal
 
 # What decides whether a name is held on a given day.
-SIGNALS = ("always_in", "ma_cross", "momentum", "mean_reversion")
+SIGNALS = ("always_in", "ma_cross", "momentum", "mean_reversion",
+           "bollinger_reversion", "bollinger_breakout", "rsi", "channel_breakout", "macd")
 
 # What forces an exit regardless of the signal.
 STOPS = ("none", "stop_loss", "trailing_stop")
@@ -34,7 +35,9 @@ class StrategySpec:
     """One rule set, complete enough to be run and to be argued with."""
 
     # --- the signal ------------------------------------------------------------------
-    signal: Literal["always_in", "ma_cross", "momentum", "mean_reversion"] = "always_in"
+    signal: Literal["always_in", "ma_cross", "momentum", "mean_reversion",
+                    "bollinger_reversion", "bollinger_breakout", "rsi",
+                    "channel_breakout", "macd"] = "always_in"
     # ma_cross: hold while the fast average is above the slow one. The classic trend
     # rule, and the classic overfitting trap — the pair of lengths is exactly the kind of
     # knob that finds a pretty curve on any data if you turn it often enough.
@@ -47,6 +50,27 @@ class StrategySpec:
     # own `lookback_days` average, and let go once it is back above `z_exit`.
     z_entry: float = -1.0
     z_exit: float = 0.0
+    # bollinger_*: the band is the `band_days` average ± `band_k` standard deviations.
+    # reversion buys a close under the lower band and sells back at the average;
+    # breakout buys a close over the upper band and sells under the average.
+    band_days: int = 20
+    band_k: float = 2.0
+    # rsi: Wilder's index over `rsi_days`; buy at or below `rsi_entry`, sell at or above
+    # `rsi_exit`.
+    rsi_days: int = 14
+    rsi_entry: float = 30.0
+    rsi_exit: float = 70.0
+    # channel_breakout: buy above the highest close of `breakout_days`, sell below the
+    # lowest close of `exit_days`.
+    breakout_days: int = 55
+    exit_days: int = 20
+    # macd: hold while the MACD line (fast EMA − slow EMA) is above its signal line.
+    macd_fast: int = 12
+    macd_slow: int = 26
+    macd_signal: int = 9
+    # Any signal above, allowed only while the price is above its `trend_filter_days`
+    # average. 0 = off.
+    trend_filter_days: int = 0
 
     # --- risk ------------------------------------------------------------------------
     stop: Literal["none", "stop_loss", "trailing_stop"] = "none"
@@ -81,6 +105,29 @@ class StrategySpec:
             lines.append(
                 f"buy when the price is {abs(self.z_entry):.1f} standard deviations below "
                 f"its {self.lookback_days}-day average, sell again at {self.z_exit:+.1f}")
+        elif self.signal == "bollinger_reversion":
+            lines.append(
+                f"buy a close below the lower Bollinger band ({self.band_days}d, "
+                f"{self.band_k:g} sd), sell once it is back at the {self.band_days}-day average")
+        elif self.signal == "bollinger_breakout":
+            lines.append(
+                f"buy a close above the upper Bollinger band ({self.band_days}d, "
+                f"{self.band_k:g} sd), sell once it falls under the {self.band_days}-day average")
+        elif self.signal == "rsi":
+            lines.append(
+                f"buy when the {self.rsi_days}-day RSI is at or below {self.rsi_entry:g}, "
+                f"sell when it reaches {self.rsi_exit:g}")
+        elif self.signal == "channel_breakout":
+            lines.append(
+                f"buy a close above the highest close of the previous {self.breakout_days} "
+                f"days, sell a close below the lowest of the previous {self.exit_days}")
+        elif self.signal == "macd":
+            lines.append(
+                f"hold while the MACD ({self.macd_fast}/{self.macd_slow}) is above its "
+                f"{self.macd_signal}-day signal line")
+        if self.trend_filter_days:
+            lines.append(
+                f"only while the price is above its {self.trend_filter_days}-day average")
         if self.stop == "stop_loss":
             lines.append(f"sell if it falls {self.stop_pct:.0%} below the entry price")
         elif self.stop == "trailing_stop":
@@ -113,4 +160,7 @@ def spec_to_json(spec: StrategySpec) -> str:
 def spec_from_json(blob: str) -> StrategySpec:
     raw = json.loads(blob)
     unsupported = tuple(raw.pop("unsupported", ()))
-    return StrategySpec(unsupported=unsupported, **raw)
+    # A rule saved before a field existed takes that field's default.
+    known = set(StrategySpec.__dataclass_fields__)
+    return StrategySpec(unsupported=unsupported,
+                        **{k: v for k, v in raw.items() if k in known})

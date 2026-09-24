@@ -14,7 +14,7 @@ import time
 
 from portfolio_lab.config import MARKET_DB
 from portfolio_lab.data.schema import finish_rebuild, open_market_for_rebuild
-from portfolio_lab.data import prices as px, universe
+from portfolio_lab.data import history, prices as px, universe
 
 FULL_WINDOW_DAYS = 460
 OVERLAP_DAYS = 5
@@ -52,6 +52,8 @@ else:
 
 stats = px.fetch_into_store(con, tickers, start, end)
 universe.observed_ranges(con)
+# ticker_history's price windows are what the universe is read from; keep them current.
+history.refresh_price_windows(con)
 new_last = con.execute("SELECT MAX(date) FROM prices").fetchone()[0]
 rows = con.execute("SELECT COUNT(*) FROM prices").fetchone()[0]
 

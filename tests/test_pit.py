@@ -129,3 +129,114 @@ def test_wide_view_carries_age_and_method(con):
     assert "data_age_days" in wide.columns
     assert "net_income_method" in wide.columns
     assert set(wide.cik) >= {1, 2, 3}
+
+
+@pytest.fixture()
+def shifted():
+    """Restatements that move period_start by a few days — the shape the independent
+    review found in 32,463 groups of the real data (PLAN.md, Gegenprüfung 25.09.2026).
+    Partitioning on the exact period_start put each version in its own partition, so the
+    restatement survived as "the earliest filing of its own period"."""
+    c = duckdb.connect(":memory:")
+    _apply(c, MARKET_MIGRATIONS)
+    rows = [
+        # --- CIK 8: FY2023 revenue 500, restated to 800 with a start two days earlier ---
+        (8, "revenue", 500.0, D(2023, 1, 1), D(2023, 12, 31), D(2024, 2, 15), "h1", "Revenues", 0),
+        (8, "revenue", 800.0, D(2022, 12, 30), D(2023, 12, 31), D(2024, 8, 20), "h2", "Revenues", 0),
+        # --- CIK 9: four quarters; Q4 restated from 40 to 90 with a shifted start ---
+        (9, "net_income", 10.0, D(2023, 1, 1), D(2023, 3, 31), D(2023, 5, 1), "i1", "NetIncomeLoss", 0),
+        (9, "net_income", 20.0, D(2023, 4, 1), D(2023, 6, 30), D(2023, 8, 1), "i2", "NetIncomeLoss", 0),
+        (9, "net_income", 30.0, D(2023, 7, 1), D(2023, 9, 30), D(2023, 11, 1), "i3", "NetIncomeLoss", 0),
+        (9, "net_income", 40.0, D(2023, 10, 1), D(2023, 12, 31), D(2024, 2, 1), "i4", "NetIncomeLoss", 0),
+        (9, "net_income", 90.0, D(2023, 9, 29), D(2023, 12, 31), D(2024, 9, 1), "i5", "NetIncomeLoss", 0),
+        # --- CIK 10: a quarter and a nine-month YTD span ending on the same day are
+        #     different periods, and must not be merged by the fix ---
+        (10, "revenue", 30.0, D(2023, 7, 1), D(2023, 9, 30), D(2023, 11, 1), "j1", "Revenues", 0),
+        (10, "revenue", 75.0, D(2023, 1, 1), D(2023, 9, 30), D(2023, 11, 1), "j1", "Revenues", 0),
+    ]
+    c.executemany(
+        "INSERT INTO fundamentals (cik, metric, value, period_start, period_end, filed, "
+        "accession, xbrl_tag, tag_rank) VALUES (?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    return c
+
+
+def test_restatement_with_shifted_start_does_not_displace_the_original(shifted):
+    """R13: a restatement stays invisible as a replacement even when it moves the
+    period's start date by a couple of days."""
+    ttm = pit.ttm_values(shifted, D(2025, 1, 1))
+    row = ttm[(ttm.cik == 8) & (ttm.metric == "revenue")]
+    assert row.value.iloc[0] == pytest.approx(500.0), "shifted restatement leaked"
+
+
+def test_restated_quarter_with_shifted_start_does_not_displace_the_original(shifted):
+    ttm = pit.ttm_values(shifted, D(2025, 1, 1))
+    row = ttm[(ttm.cik == 9) & (ttm.metric == "net_income")]
+    assert row.value.iloc[0] == pytest.approx(100.0), "restated quarter leaked into TTM"
+
+
+def test_spans_of_different_length_ending_together_stay_separate(shifted):
+    vis = pit._visible(shifted, D(2025, 1, 1))
+    assert sorted(vis[vis.cik == 10].value) == [30.0, 75.0]
+
+
+def test_a_restatement_under_a_better_tag_does_not_displace_the_original():
+    """R13 across tags. The original 10-K tags equity under the rank-1 fallback tag; the
+    10-K/A half a year later restates it under the preferred rank-0 tag, with a new share
+    count. Earliest-filing-per-TAG let the amendment win, because each tag had its own
+    'first filing' and the better tag was preferred afterwards (independent review,
+    24.09.2026)."""
+    c = duckdb.connect(":memory:")
+    _apply(c, MARKET_MIGRATIONS)
+    rows = [
+        (11, "book_value", 900.0, None, D(2023, 12, 31), D(2024, 2, 15), "k1",
+         "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest", 1),
+        (11, "book_value", 1400.0, None, D(2023, 12, 31), D(2024, 8, 20), "k2",
+         "StockholdersEquity", 0),
+        (11, "shares_outstanding", 100_000_000.0, None, D(2023, 12, 31), D(2024, 2, 15), "k1",
+         "WeightedAverageNumberOfDilutedSharesOutstanding", 2),
+        (11, "shares_outstanding", 50_000_000.0, None, D(2023, 12, 31), D(2024, 8, 20), "k2",
+         "EntityCommonStockSharesOutstanding", 0),
+    ]
+    c.executemany(
+        "INSERT INTO fundamentals (cik, metric, value, period_start, period_end, filed, "
+        "accession, xbrl_tag, tag_rank) VALUES (?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    later = D(2024, 9, 1)
+    inst = pit.instant_values(c, later)
+    assert inst[inst.metric == "book_value"].value.iloc[0] == 900.0, "amendment leaked"
+    shares = pit.share_counts(c, later)
+    assert shares.value.iloc[0] == 100_000_000.0, "amended share count leaked"
+
+
+def test_an_amendment_does_not_become_the_first_filing_once_the_original_ages_out():
+    """R13 against the age limit. A delinquent filer's FY2023 original (filed Feb 2024)
+    passes the 400-day limit; a 10-K/A for the same period arrives in May 2025. Picking
+    the earliest filing AFTER the age filter made the amendment the 'first' one — with
+    a fresh filing date that also made a stale filer look current (third independent
+    review, 24.09.2026)."""
+    c = duckdb.connect(":memory:")
+    _apply(c, MARKET_MIGRATIONS)
+    rows = [
+        (12, "book_value", 900.0, None, D(2023, 12, 31), D(2024, 2, 15), "m1",
+         "StockholdersEquity", 0),
+        (12, "shares_outstanding", 100_000_000.0, None, D(2023, 12, 31), D(2024, 2, 15),
+         "m1", "EntityCommonStockSharesOutstanding", 0),
+        (12, "book_value", 1400.0, None, D(2023, 12, 31), D(2025, 5, 20), "m2",
+         "StockholdersEquity", 0),
+        (12, "shares_outstanding", 50_000_000.0, None, D(2023, 12, 31), D(2025, 5, 20),
+         "m2", "EntityCommonStockSharesOutstanding", 0),
+    ]
+    c.executemany(
+        "INSERT INTO fundamentals (cik, metric, value, period_start, period_end, filed, "
+        "accession, xbrl_tag, tag_rank) VALUES (?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    before = D(2025, 3, 1)
+    assert pit.instant_values(c, before).value.iloc[0] == 900.0
+    assert pit.share_counts(c, before).value.iloc[0] == 100_000_000.0
+    after = D(2025, 6, 1)
+    assert pit.instant_values(c, after).empty, "the amendment stood in for an aged-out original"
+    assert pit.share_counts(c, after).empty, "the amended share count stood in"

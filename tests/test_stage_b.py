@@ -308,3 +308,188 @@ def test_the_delisting_assumption_moves_the_stage_b_result_too():
                         frequency="buy_and_hold", delisting_return=-1.00)
     assert mild.portfolio[-1] == pytest.approx(95.0, rel=1e-6)
     assert total.portfolio[-1] == pytest.approx(50.0, rel=1e-6)
+
+
+# --- the universe from Phase 7 --------------------------------------------------------
+# The criterion says "das Universum aus Phase 7". Until 24.09.2026 it came from the
+# securities master instead — numerically the same on free data, but the criterion was
+# not met, and a source that did know vanished companies would have been ignored.
+
+from portfolio_lab.data import history  # noqa: E402
+
+
+def phase7_source(windows_to_newest_bar: bool = True) -> FreeSource:
+    """Securities master WITHOUT dates, so only ticker_history can know who was listed.
+
+    BBB trades until 30 June 2023. ZZZ is a vanished company the securities master has
+    never heard of — the shape a survivorship-free source would add.
+    """
+    bbb_days = [d for d in DAYS if d <= dt.date(2023, 6, 30)]
+    rows = (
+        [("AAA", d, 10.0, 10.0, 10.0, 10.0, 1_000_000) for d in DAYS]
+        + [("BBB", d, 10.0, 10.0, 10.0, 10.0, 1_000_000) for d in bbb_days]
+        + [("ZZZ", d, 10.0, 10.0, 10.0, 10.0, 1_000_000) for d in bbb_days]
+    )
+    src = build_source(
+        facts(1001, book=1_000_000_000.0, shares=100_000_000, filed=dt.date(2023, 1, 5))
+        + facts(1002, book=2_000_000_000.0, shares=100_000_000, filed=dt.date(2023, 1, 5))
+        + facts(1009, book=3_000_000_000.0, shares=100_000_000, filed=dt.date(2023, 1, 5)),
+        listings={"AAA": (1001, None, None), "BBB": (1002, None, None)},
+        prices=rows,
+    )
+    history.refresh_price_windows(src.con)
+    src.con.execute(
+        "INSERT INTO ticker_history (cik, ticker, valid_from, valid_to, source) "
+        "VALUES (1009, 'ZZZ', DATE '2023-01-02', DATE '2023-06-30', ?)",
+        [history.SOURCE_PRICES],
+    )
+    if not windows_to_newest_bar:
+        src.con.execute("UPDATE ticker_history SET valid_to = DATE '2023-06-30'")
+    return src
+
+
+def test_the_universe_is_read_from_ticker_history():
+    src = phase7_source()
+    assert src.universe_basis == "ticker_history"
+    during = set(src.universe(dt.date(2023, 5, 1)).ticker)
+    after = set(src.universe(dt.date(2024, 1, 3)).ticker)
+    assert {"AAA", "BBB"} <= during
+    assert "BBB" not in after, "a name past its price window stayed in the universe"
+    assert "AAA" in after
+
+
+def test_a_company_only_ticker_history_knows_is_screened_while_it_was_listed():
+    src = phase7_source()
+    frame = src.screening_frame(dt.date(2023, 5, 1)).set_index("ticker")
+    assert "ZZZ" in frame.index
+    assert frame.at["ZZZ", "book_value"] == 3_000_000_000.0
+    assert "ZZZ" not in set(src.universe(dt.date(2024, 1, 3)).ticker)
+
+
+def test_stale_windows_fall_back_to_the_master_and_the_run_says_so():
+    """Windows that end before the newest bar would make every living company look
+    delisted. The source falls back, and the result must not stay quiet about it."""
+    src = phase7_source(windows_to_newest_bar=False)
+    assert src.universe_basis == "securities"
+    spec = PortfolioSpec(size=1, min_dollar_volume=0, min_trading_days_60=0)
+    r = stage_b.run(src, spec, dt.date(2023, 2, 1), dt.date(2024, 6, 28), costs=FREE)
+    assert any("securities master" in n for n in r.notes)
+
+
+def test_names_that_leave_the_universe_are_counted():
+    """R19: the result says how many names left the universe during the run."""
+    src = phase7_source()
+    spec = PortfolioSpec(size=1, min_dollar_volume=0, min_trading_days_60=0)
+    r = stage_b.run(src, spec, dt.date(2023, 2, 1), dt.date(2024, 6, 28), costs=FREE)
+    assert any("2 name(s) left the universe" in n for n in r.notes), r.notes
+    assert not any("securities master" in n for n in r.notes)
+
+
+# --- second independent review, 24.09.2026 --------------------------------------------
+
+def test_a_name_listed_later_is_kept_out_on_the_ticker_history_path_too():
+    """The criterion-3 tests above run on the securities fallback. This one runs on the
+    Phase 7 universe: CCC's price window starts in June 2024. Removing the
+    `valid_from <= asof` condition used to leave every test green."""
+    late = [d for d in DAYS if d >= dt.date(2024, 6, 3)]
+    rows = ([("AAA", d, 10.0, 10.0, 10.0, 10.0, 1_000_000) for d in DAYS]
+            + [("CCC", d, 10.0, 10.0, 10.0, 10.0, 1_000_000) for d in late])
+    src = build_source(
+        facts(1001, book=1_000_000_000.0, shares=100_000_000, filed=dt.date(2023, 1, 5))
+        + facts(1003, book=500_000_000.0, shares=100_000_000, filed=dt.date(2023, 1, 5)),
+        listings={"AAA": (1001, None, None), "CCC": (1003, None, None)}, prices=rows,
+    )
+    history.refresh_price_windows(src.con)
+    assert src.universe_basis == "ticker_history"
+    assert "CCC" not in set(src.universe(dt.date(2023, 6, 1)).ticker)
+    assert "CCC" in set(src.universe(dt.date(2024, 9, 2)).ticker)
+
+
+def test_trading_costs_are_paid_from_the_money_invested_not_borrowed():
+    """One name going from 10 to 40 at a 1% cost: 99% of the money buys shares, which
+    quadruple — 396. Buying with 100% and letting cash go to −1% gave 399."""
+    rows = [("AAA", d, 10.0, 10.0, 10.0, 10.0, 1_000_000) for d in DAYS[:-1]]
+    rows.append(("AAA", DAYS[-1], 40.0, 40.0, 40.0, 40.0, 1_000_000))
+    src = build_source(
+        facts(1001, book=1_000_000_000.0, shares=100_000_000, filed=dt.date(2023, 1, 5)),
+        listings={"AAA": (1001, None, None)}, prices=rows,
+    )
+    one_percent = CostModel(commission=0.0, spread_tiers=((float("inf"), 0.01),))
+    spec = PortfolioSpec(size=1, min_dollar_volume=0, min_trading_days_60=0)
+    r = stage_b.run(src, spec, dt.date(2023, 2, 1), DAYS[-1], costs=one_percent,
+                    frequency="buy_and_hold")
+    assert r.portfolio[-1] == pytest.approx(396.0, rel=1e-9)
+
+
+def test_excluding_a_name_hands_its_slot_to_the_next_one_down():
+    """R20's 'without the strongest name' run must still hold `size` names."""
+    src = build_source(
+        facts(1001, book=3_000_000_000.0, shares=100_000_000, filed=dt.date(2023, 1, 5))
+        + facts(1002, book=2_000_000_000.0, shares=100_000_000, filed=dt.date(2023, 1, 5))
+        + facts(1003, book=1_000_000_000.0, shares=100_000_000, filed=dt.date(2023, 1, 5))
+    )
+    spec = PortfolioSpec(size=2, min_dollar_volume=0, min_trading_days_60=0)
+    r = stage_b.run(src, spec, dt.date(2023, 2, 1), dt.date(2023, 6, 30), costs=FREE,
+                    frequency="buy_and_hold", exclude={"AAA"})
+    assert r.ever_held == ["BBB", "CCC"]
+
+
+def test_the_departure_count_is_stated_even_when_it_is_zero():
+    src = build_source(
+        facts(1001, book=1_000_000_000.0, shares=100_000_000, filed=dt.date(2023, 1, 5)))
+    spec = PortfolioSpec(size=1, min_dollar_volume=0, min_trading_days_60=0)
+    r = stage_b.run(src, spec, dt.date(2023, 2, 1), dt.date(2023, 12, 29), costs=FREE)
+    assert any(n.startswith("0 name(s) left the universe") and "0 position(s) had no price"
+               in n for n in r.notes), r.notes
+
+
+def test_a_held_name_whose_prices_stop_is_counted_as_an_assumed_exit():
+    """ZZZ is the only name at price-to-book 0.33, is held, and its prices stop at the end of June: one
+    departure, and one exit at the assumed delisting return rather than a real price."""
+    src = phase7_source()
+    spec = PortfolioSpec(size=1, filters=(Filter("price_to_book", "<=", 0.4),),
+                         min_dollar_volume=0, min_trading_days_60=0)
+    r = stage_b.run(src, spec, dt.date(2023, 2, 1), dt.date(2024, 6, 28), costs=FREE)
+    assert r.ever_held == ["ZZZ"]
+    assert any("1 position(s) had no price left to sell at" in n for n in r.notes), r.notes
+
+
+def test_moving_the_screen_day_close_does_not_move_the_fill():
+    """R16 in its literal form: change only the close on the screening day, and nothing
+    from the fill onwards may change."""
+    def run_with(close_on_screen_day):
+        rows = [("AAA", d, 10.0, close_on_screen_day if d == dt.date(2023, 2, 1) else 10.0,
+                 10.0, close_on_screen_day if d == dt.date(2023, 2, 1) else 10.0,
+                 1_000_000) for d in DAYS[:200]]
+        src = build_source(
+            facts(1001, book=1_000_000_000.0, shares=100_000_000, filed=dt.date(2023, 1, 5)),
+            listings={"AAA": (1001, None, None)}, prices=rows,
+        )
+        spec = PortfolioSpec(size=1, min_dollar_volume=0, min_trading_days_60=0)
+        return stage_b.run(src, spec, dt.date(2023, 2, 1), DAYS[199], costs=FREE,
+                           frequency="buy_and_hold")
+
+    a, b = run_with(10.0), run_with(25.0)
+    fill = a.rebalances.filled_on.iloc[0]
+    after = [i for i, d in enumerate(a.dates) if d >= fill]
+    assert [a.portfolio[i] for i in after] == pytest.approx([b.portfolio[i] for i in after])
+
+
+def test_a_month_end_start_stays_on_month_ends():
+    """Counted from the start, not from the previous date: 31 Jan, 30 Apr, 31 Jul, 31 Oct —
+    not 31 Jan, 28 Apr, 28 Jul, 28 Oct."""
+    dates = stage_b.rebalance_dates(dt.date(2021, 1, 31), dt.date(2021, 12, 31), "quarterly")
+    assert dates == [dt.date(2021, 1, 31), dt.date(2021, 4, 30), dt.date(2021, 7, 31),
+                     dt.date(2021, 10, 31)]
+
+
+def test_an_index_that_starts_after_the_run_is_not_back_filled_from_the_future():
+    con = duckdb.connect(":memory:")
+    _apply(con, MARKET_MIGRATIONS)
+    con.executemany(
+        "INSERT INTO prices (ticker, date, open, close, close_adj, volume) "
+        "VALUES ('^SP500TR', ?, 1, 1, ?, 0)",
+        [(dt.date(2023, 3, 1), 200.0), (dt.date(2023, 3, 2), 210.0)],
+    )
+    index = [dt.date(2023, 2, 1), dt.date(2023, 3, 1), dt.date(2023, 3, 2)]
+    assert stage_b._benchmark_curve(con, "^SP500TR", index) is None

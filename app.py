@@ -37,11 +37,12 @@ if not st.runtime.exists():
         "In VS Code: Run and Debug -> 'Portfolio Lab (app)', or press Shift-Cmd-B.\n"
     )
 
-from portfolio_lab import ui
-from portfolio_lab.config import CACHE_DIR, MARKET_DB, USER_DB, CostModel, Settings, secret
+from portfolio_lab import charts, ui
+from portfolio_lab.config import CACHE_DIR, USER_DB, CostModel, Settings, secret
 from portfolio_lab.data import history as hist, industry
-from portfolio_lab.data.free import FreeSource
-from portfolio_lab.data.schema import open_market, open_user
+from portfolio_lab.data.paid import MissingKey
+from portfolio_lab.data.schema import open_user
+from portfolio_lab.data.sources import SourceNotReady, open_selected
 from portfolio_lab.screen import translate as T
 from portfolio_lab.screen.engine import derive_metrics, merge_selection, run_screen
 from portfolio_lab.screen.valuation import add_valuation
@@ -63,12 +64,16 @@ from portfolio_lab import macro as mc
 from portfolio_lab import metrics as mx
 from portfolio_lab import numeraire as nm
 from portfolio_lab.lab import engine as lab_engine
+from portfolio_lab.lab import signals as lab_signals
 from portfolio_lab.lab import translate as LT
+from portfolio_lab.lab.spec import StrategySpec
 from portfolio_lab import options as op
 from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
+from portfolio_lab import paper
+from portfolio_lab import summary as ai_summary
 
 st.set_page_config(page_title="Portfolio Lab", page_icon="◫", layout="wide")
 st.markdown(ui.CSS, unsafe_allow_html=True)
@@ -80,7 +85,10 @@ st.markdown(ui.CSS, unsafe_allow_html=True)
 def _market():
     # Read-only: the app never writes market data, and holding the write lock would stop
     # every build script from running while the app is open.
-    return FreeSource(open_market(MARKET_DB, read_only=True)), MARKET_DB.stat().st_ino
+    # Which store is opened is a setting (Phase 10): the free one by default, the paid
+    # Sharadar store with PORTFOLIO_LAB_SOURCE=paid.
+    source, path = open_selected(Settings(), read_only=True)
+    return source, path, path.stat().st_ino
 
 
 def _market_source():
@@ -92,9 +100,9 @@ def _market_source():
     prices indefinitely and give no sign that anything had changed. Comparing the inode
     is how you notice a file was replaced rather than edited.
     """
-    source, opened_inode = _market()
+    source, path, opened_inode = _market()
     try:
-        if MARKET_DB.stat().st_ino != opened_inode:
+        if path.stat().st_ino != opened_inode:
             _market.clear()
             _frame.clear()
             st.rerun()
@@ -140,7 +148,13 @@ CAP_BANDS = {
     "Mega (> $200bn)": (200.0, 0.0),
 }
 
-src, store, settings = _market_source(), _store(), Settings()
+try:
+    src = _market_source()
+except (MissingKey, SourceNotReady) as exc:
+    # A chosen source that cannot open yet is a setup step, not a crash: say which one.
+    st.error(str(exc))
+    st.stop()
+store, settings = _store(), Settings()
 asof = src.latest_equity_date()
 age = (dt.date.today() - asof).days if asof else None
 counts = src.snapshot().row_counts
@@ -281,9 +295,110 @@ if not chosen:
 
 spec = store.get_spec(chosen)
 
-(tab_screen, tab_research, tab_options, tab_strategy, tab_lab, tab_macro,
+
+def _lab_price_chart(con, ticker: str, result, rule) -> None:
+    """One stock under a rule: price on top with every buy and sell marked where it
+    filled, candles underneath. Drawn on the adjusted basis the rule traded on, so the
+    markers sit on the line rather than a split away from it."""
+    px_rule = con.execute(
+        """
+        SELECT date,
+               open * (close_adj / NULLIF(close, 0)) AS open,
+               high * (close_adj / NULLIF(close, 0)) AS high,
+               low  * (close_adj / NULLIF(close, 0)) AS low,
+               close_adj AS close
+        FROM prices WHERE ticker = ? AND date BETWEEN ? AND ? ORDER BY date
+        """,
+        [ticker, result.dates[0], result.dates[-1]],
+    ).fetch_df()
+    if px_rule.empty:
+        return
+    bands = rule.signal.startswith("bollinger")
+    if bands:
+        px_rule = px_rule.join(lab_signals.bollinger_bands(
+            px_rule["close"], rule.band_days, rule.band_k))
+    trades = result.fills[result.fills.ticker == ticker] if not result.fills.empty \
+        else result.fills
+    candles = bool(px_rule[["high", "low"]].notna().all(axis=1).mean() > 0.9)
+    st.plotly_chart(
+        charts.price_figure(px_rule, ticker, bands=bands, candles=candles,
+                            trades=trades),
+        use_container_width=True, key=f"lab_px_{ticker}")
+    n_buy = int((trades.side == "buy").sum()) if not trades.empty else 0
+    st.caption(
+        f"▲ {n_buy} buys, ▼ {len(trades) - n_buy} sells, each at the open after the "
+        "close that triggered it. Prices adjusted for splits and dividends."
+    )
+
+
+# ---------------------------------------------------------------- paper books
+def _paper_rows(book_frame: pd.DataFrame) -> list[dict]:
+    """Value every book in the frame. A book that cannot be valued yet (no price since
+    it was opened) is listed with its money at cost rather than hidden."""
+    out = []
+    for _, row in book_frame.iterrows():
+        try:
+            v = paper.value_book(src.con, store.con, row.to_dict())
+        except Exception as exc:                                  # noqa: BLE001
+            v = {"empty": True, "book": row.to_dict(), "error": str(exc)}
+        out.append(v)
+    return out
+
+
+def _paper_table(valued: list[dict]) -> pd.DataFrame:
+    rows = []
+    for v in valued:
+        b = v["book"]
+        rows.append({
+            "book": b["name"], "from": b["origin"], "kind": b["kind"],
+            "since": str(pd.Timestamp(b["started_on"]).date()),
+            "money in": ui.money(v.get("invested_now", b["amount"])),
+            "value": ui.money(v["value_now"]) if not v.get("empty") else "—",
+            "gain": ui.money(v["gain"]) if not v.get("empty") else "—",
+            "return": v.get("return") if not v.get("empty") else None,
+            "S&P 500 TR": v.get("benchmark_return"),
+        })
+    frame = pd.DataFrame(rows)
+    for col in ("return", "S&P 500 TR"):
+        frame[col] = frame[col].map(lambda x: ui.pct(x) if x is not None and not pd.isna(x)
+                                    else "—")
+    return frame
+
+
+def _paper_section(origin: str, key: str, opener, default_name: str,
+                   what: str, amount_label: str | None = "Amount ($)") -> None:
+    """A closed-off paper-money area for one tab: buy, and see this tab's books.
+
+    `opener(name, amount)` opens the book and returns its id. The purchase is frozen at
+    the latest stored close; from then on the book is only valued, never re-decided.
+    """
+    with st.container(border=True):
+        st.markdown(f"#### Paper money · {origin}")
+        st.caption(what)
+        c1, c2, c3 = st.columns([1.1, 2, 1])
+        amount = (c1.number_input(amount_label, min_value=100.0, max_value=1e9,
+                                  value=10_000.0, step=500.0, key=f"paper_amt_{key}")
+                  if amount_label else None)
+        name = c2.text_input("Name", value=default_name, key=f"paper_name_{key}")
+        c3.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
+        if c3.button("Buy on paper", type="primary", use_container_width=True,
+                     key=f"paper_buy_{key}"):
+            try:
+                opener(name, amount)
+                st.success(f"Opened '{name}'. It is valued on every visit; compare all "
+                           "books in the BOOKS tab.")
+            except ValueError as exc:
+                st.error(str(exc))
+        mine = paper.books(store.con)
+        mine = mine[mine.origin == origin]
+        if not mine.empty:
+            st.markdown(ui.grid(_paper_table(_paper_rows(mine)), ticker_col="book"),
+                        unsafe_allow_html=True)
+
+
+(tab_screen, tab_research, tab_options, tab_strategy, tab_lab, tab_books, tab_macro,
  tab_commodities, tab_calendar, tab_news) = st.tabs(
-    ["SCREEN", "RESEARCH", "OPTIONS", "STRATEGY", "LAB", "MACRO", "COMMODITIES",
+    ["SCREEN", "RESEARCH", "OPTIONS", "STRATEGY", "LAB", "BOOKS", "MACRO", "COMMODITIES",
      "CALENDAR", "NEWS"]
 )
 
@@ -616,6 +731,21 @@ with tab_screen:
         if st.button("Stop tracking and discard", use_container_width=True):
             store.stop_tracking(chosen)
             st.rerun()
+
+    def _open_screen_book(name, amount):
+        if picks.empty:
+            raise ValueError("Nothing ticked to buy.")
+        caps = (picks["market_cap"] if "market_cap" in picks.columns
+                else pd.Series(0.0, index=picks.index)).fillna(0.0)
+        pos = picks[["ticker", "weight", "price"]].copy()
+        pos["cost"] = [settings.cost.round_trip_cost(c) for c in caps]
+        return paper.open_hold(store.con, name, "SCREEN", pos, asof, amount)
+
+    _paper_section(
+        "SCREEN", f"screen_{chosen}", _open_screen_book, f"Screen {asof}",
+        f"Buy the {len(picks)} ticked names with their weights at the {asof} closes, "
+        "entry cost charged once, then hold. Open as many books as you like — each is "
+        "its own frozen purchase.")
 
     # ------------------------------------------------------------- backtest (stage B)
     def _stage_b_section():
@@ -1015,6 +1145,69 @@ with tab_research:
                     f"date ({asof}); mixing a live price into a ranking would favour it."
                 )
 
+            # ------------------------------------------------------------ AI summary
+            data_fp = src.snapshot().fingerprint()
+            have = ai_summary.stored(store.con, ticker, data_fp)
+            with st.container(border=True):
+                a1, a2 = st.columns([3, 1])
+                a1.markdown("#### AI summary")
+                label = "Write again" if have else "Write AI summary"
+                if a2.button(label, key=f"ai_sum_{ticker}", use_container_width=True):
+                    if not secret("ANTHROPIC_API_KEY"):
+                        st.error("ANTHROPIC_API_KEY missing from .env.local.")
+                    else:
+                        with st.spinner("Reading the filings and prices…"):
+                            try:
+                                sheet = ai_summary.data_sheet(
+                                    src.con, ticker, cik, me, asof, frame=enriched)
+                                result = ai_summary.summarize(sheet)
+                            except Exception as exc:                 # noqa: BLE001
+                                result = {"text": None, "error": str(exc)}
+                        if result.get("text"):
+                            ai_summary.save(store.con, ticker, data_fp, result)
+                            have = ai_summary.stored(store.con, ticker, data_fp)
+                        else:
+                            st.error(result.get("error") or "No summary came back.")
+                shown = have or ai_summary.latest(store.con, ticker)
+                if shown:
+                    st.markdown(shown["text"])
+                    stamp = pd.Timestamp(shown["created_at"]).strftime("%Y-%m-%d %H:%M")
+                    st.caption(
+                        f"Written {stamp} by {shown['model']} from this app's own figures "
+                        "only — no outside news, no recommendation."
+                        + ("" if have else " Written on an older data build; the numbers "
+                           "may have moved since. Press the button for a fresh one.")
+                    )
+                else:
+                    st.caption(
+                        "A short write-up from the figures on this page — valuation, the "
+                        "history as first filed, restatements, price behaviour and peers. "
+                        "The model may only argue from those numbers and does not "
+                        "recommend buying or selling. Uses your Anthropic API key."
+                    )
+
+            def _open_research_book(name, amount):
+                last = src.con.execute(
+                    "SELECT COALESCE(close_raw, close) FROM prices WHERE ticker = ? "
+                    "AND date <= ? ORDER BY date DESC LIMIT 1", [ticker, asof],
+                ).fetchone()
+                if not last or not last[0]:
+                    raise ValueError(f"No stored price for {ticker}.")
+                cap = float(me["market_cap"]) if me is not None and "market_cap" in me \
+                    and not pd.isna(me["market_cap"]) else 0.0
+                return paper.open_hold(
+                    store.con, name, "RESEARCH",
+                    pd.DataFrame({"ticker": [ticker], "weight": [1.0],
+                                  "price": [float(last[0])],
+                                  "cost": [settings.cost.round_trip_cost(cap)]}),
+                    asof, amount)
+
+            _paper_section(
+                "RESEARCH", f"research_{ticker}", _open_research_book,
+                f"{ticker} {asof}",
+                f"Buy {ticker} at the {asof} close and hold it. Every paper book lands "
+                "in the BOOKS tab next to the others.")
+
             sections = st.tabs([
                 "OVERVIEW", "FINANCIALS", "RELATIONSHIPS", "VALUATION", "OPTIONS",
                 "EXPOSURE", "ANALYSTS", "OWNERSHIP", "NEWS", "FILINGS",
@@ -1086,9 +1279,10 @@ with tab_research:
                         # a short one draws candles.
                         can_candle = rs.has_intraday_range(view)
                         candles = c_b.toggle(
-                            "Candles", value=can_candle, disabled=not can_candle,
+                            "Candles below", value=can_candle, disabled=not can_candle,
                             key=f"candles_{ticker}_{span}",
-                            help=None if can_candle else
+                            help="The same days as candles in a panel under the line, "
+                                 "on a shared time axis." if can_candle else
                             "Stored bars carry no high/low for this range.",
                         )
                         bands = c_c.toggle(
@@ -1096,41 +1290,8 @@ with tab_research:
                             help="20-day average with a 2-standard-deviation envelope.",
                         )
 
-                        fig = go.Figure()
-                        if bands:
-                            fig.add_trace(go.Scatter(
-                                x=view["date"], y=view["upper"], name="upper",
-                                line=dict(color=ui.CYAN, width=1), hoverinfo="skip"))
-                            fig.add_trace(go.Scatter(
-                                x=view["date"], y=view["lower"], name="lower",
-                                line=dict(color=ui.CYAN, width=1), fill="tonexty",
-                                fillcolor="rgba(77, 184, 255, 0.10)", hoverinfo="skip"))
-                            fig.add_trace(go.Scatter(
-                                x=view["date"], y=view["middle"], name="20d avg",
-                                line=dict(color=ui.MUTED, width=1, dash="dot")))
-                        if candles:
-                            fig.add_trace(go.Candlestick(
-                                x=view["date"], open=view["open"], high=view["high"],
-                                low=view["low"], close=view["close"], name=ticker,
-                                increasing=dict(line=dict(color=ui.UP), fillcolor=ui.UP),
-                                decreasing=dict(line=dict(color=ui.DOWN), fillcolor=ui.DOWN),
-                            ))
-                        else:
-                            fig.add_trace(go.Scatter(
-                                x=view["date"], y=view["close"], name=ticker,
-                                line=dict(color=ui.AMBER, width=1.4)))
-                        fig.update_layout(
-                            height=300, margin=dict(l=0, r=0, t=6, b=0),
-                            paper_bgcolor=ui.BG, plot_bgcolor=ui.BG, showlegend=False,
-                            font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
-                            hovermode="x unified",
-                            xaxis=dict(gridcolor=ui.RULE, color=ui.MUTED,
-                                       rangeslider=dict(visible=False),
-                                       # Without this the chart draws empty weekends and
-                                       # every candle body shrinks to make room for them.
-                                       rangebreaks=[dict(bounds=["sat", "mon"])]),
-                            yaxis=dict(gridcolor=ui.RULE, color=ui.MUTED, side="right"),
-                        )
+                        fig = charts.price_figure(view, ticker, bands=bands,
+                                                  candles=candles)
                         st.plotly_chart(fig, use_container_width=True,
                                         key=f"pxchart_{ticker}")
                         if chart_unit == nm.GOLD:
@@ -1958,6 +2119,30 @@ with tab_strategy:
             })
             st.line_chart(curves, height=300,
                           color=[ui.AMBER, ui.CYAN, ui.UP, ui.MUTED][:len(curves.columns)])
+
+            live_choice = st.selectbox(
+                "Follow one of these live from today",
+                options=list(range(len(plans))),
+                format_func=lambda i: plans[i].describe(), key="stg_live_choice")
+
+            def _open_plan_book(name, _amount):
+                chosen_plan = plans[live_choice]
+                if chosen_plan.rule == "lump_sum":
+                    last_px = float(prices.iloc[-1])
+                    return paper.open_hold(
+                        store.con, name, "STRATEGY",
+                        pd.DataFrame({"ticker": [what.strip().upper()], "weight": [1.0],
+                                      "price": [last_px], "cost": [chosen_plan.cost]}),
+                        asof, amount * 12)
+                return paper.open_plan(store.con, name, what.strip(), chosen_plan, asof)
+
+            _paper_section(
+                "STRATEGY", "strategy", _open_plan_book,
+                f"{what.strip().upper()} plan {asof}",
+                f"The chosen plan runs from {asof} on: {amount:,.0f} arrives "
+                f"{freq}, and its rule decides when it goes in. The lump sum is bought "
+                f"once as {amount * 12:,.0f} (a year of contributions) and held.",
+                amount_label=None)
             st.caption(
                 f"Portfolio value over {results[0]['years']:.1f} years, including cash "
                 "not yet invested. The average price of the asset over the window was "
@@ -2021,6 +2206,119 @@ def _watched() -> list[str]:
             if t not in seen:
                 seen.append(t)
     return seen
+
+
+with tab_books:
+    st.markdown("#### Paper books — every simulated purchase, side by side")
+    st.caption(
+        "Each book was frozen when it was opened: the positions, the rule or the savings "
+        "plan cannot change afterwards, so nothing here is fitted to the outcome. Open "
+        "new ones in the Paper money box of SCREEN, RESEARCH, STRATEGY or LAB."
+    )
+    all_books = paper.books(store.con)
+    valued = _paper_rows(all_books) if not all_books.empty else []
+    # The SCREEN tab's older live tracking (one per portfolio) belongs in the same
+    # comparison. It has no amount of its own, so it is shown on 10,000.
+    for prow in store.list_portfolios().itertuples():
+        tinfo = store.tracking_info(prow.id)
+        if tinfo is None:
+            continue
+        legacy = {"id": f"track-{prow.id}", "name": f"{prow.name} (tracking)",
+                  "origin": "SCREEN", "kind": "hold", "started_on": tinfo["started_on"],
+                  "amount": 10_000.0, "config_json": "{}", "thesis": tinfo["thesis"]}
+        try:
+            valued.append(paper.value_book(src.con, store.con, legacy,
+                                           held=store.holdings(prow.id)))
+        except Exception as exc:                                   # noqa: BLE001
+            valued.append({"empty": True, "book": legacy, "error": str(exc)})
+
+    if not valued:
+        st.info("No paper books yet.")
+    else:
+        live = [v for v in valued if not v.get("empty")]
+        money_in = sum(v["invested_now"] for v in live)
+        worth = sum(v["value_now"] for v in live)
+        st.markdown(ui.stats([
+            ("BOOKS", f"{len(valued)}", ""),
+            ("MONEY IN", ui.money(money_in), ""),
+            ("VALUE", ui.money(worth), ""),
+            ("GAIN", ui.money(worth - money_in), "up" if worth >= money_in else "down"),
+            ("RETURN", ui.pct(worth / money_in - 1.0) if money_in else "—",
+             "up" if worth >= money_in else "down"),
+        ]), unsafe_allow_html=True)
+
+        if live:
+            import plotly.graph_objects as go
+
+            fig = go.Figure()
+            palette = [ui.AMBER, ui.CYAN, ui.UP, "#C792EA", "#F78C6C", "#FFCB6B",
+                       "#89DDFF", ui.DOWN]
+            for i, v in enumerate(live):
+                ret = 100.0 * (v["value"] / v["invested"] - 1.0)
+                fig.add_trace(go.Scatter(
+                    x=ret.index, y=ret, name=v["book"]["name"],
+                    line=dict(color=palette[i % len(palette)], width=1.6)))
+            fig.add_hline(y=0, line=dict(color=ui.MUTED, width=1, dash="dot"))
+            fig.update_layout(
+                height=360, margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor=ui.BG,
+                plot_bgcolor=ui.BG, hovermode="x unified",
+                font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
+                legend=dict(orientation="h", y=-0.15),
+                yaxis=dict(title="% on money in", gridcolor=ui.RULE, side="right"),
+                xaxis=dict(gridcolor=ui.RULE),
+            )
+            st.plotly_chart(fig, use_container_width=True, key="books_compare")
+            st.caption(
+                "Each line is the gain on the money that book has put in so far. Books "
+                "opened on different days start at different points; a savings plan's "
+                "money in grows with each contribution."
+            )
+
+        st.markdown(ui.grid(_paper_table(valued), ticker_col="book"),
+                    unsafe_allow_html=True)
+
+        for v in valued:
+            b = v["book"]
+            with st.expander(f"{b['name']} · {b['origin']} · {b['kind']} · since "
+                             f"{pd.Timestamp(b['started_on']).date()}"):
+                if b.get("thesis"):
+                    st.markdown(f"_{b['thesis']}_")
+                if v.get("empty"):
+                    st.info(v.get("error") or "No prices since this book was opened yet.")
+                else:
+                    import plotly.graph_objects as go
+
+                    detail = go.Figure()
+                    detail.add_trace(go.Scatter(x=v["value"].index, y=v["value"],
+                                                name="value",
+                                                line=dict(color=ui.AMBER, width=1.6)))
+                    detail.add_trace(go.Scatter(x=v["invested"].index, y=v["invested"],
+                                                name="money in", line=dict(
+                                                    color=ui.MUTED, width=1, dash="dot")))
+                    if v.get("benchmark_value") is not None:
+                        detail.add_trace(go.Scatter(
+                            x=v["benchmark_value"].index, y=v["benchmark_value"],
+                            name="S&P 500 TR, same money",
+                            line=dict(color=ui.CYAN, width=1.2)))
+                    detail.update_layout(
+                        height=260, margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor=ui.BG,
+                        plot_bgcolor=ui.BG, hovermode="x unified", showlegend=True,
+                        legend=dict(orientation="h", y=-0.2),
+                        font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
+                        yaxis=dict(gridcolor=ui.RULE, side="right"),
+                        xaxis=dict(gridcolor=ui.RULE))
+                    st.plotly_chart(detail, use_container_width=True,
+                                    key=f"book_{b['id']}")
+                    fills = v.get("fills")
+                    if fills is not None and len(fills):
+                        st.caption(f"{len(fills)} trades since it was opened; last: "
+                                   f"{pd.Timestamp(fills.iloc[-1]['date']).date()}.")
+                    for note in v.get("notes", []):
+                        st.caption(note)
+                if not str(b["id"]).startswith("track-") and st.button(
+                        "Close this book", key=f"close_{b['id']}"):
+                    paper.close_book(store.con, b["id"])
+                    st.rerun()
 
 
 with tab_macro:
@@ -2281,9 +2579,25 @@ with tab_calendar:
 with tab_lab:
     st.markdown('<div class="tl-cmd"><span class="p">&gt;</span></div>',
                 unsafe_allow_html=True)
-    held_now = store.get_spec(chosen).selected
+    lab_mode = st.radio(
+        "Test the rule on", ["Basket you hold", "Single stock"], horizontal=True,
+        key=f"lab_mode_{chosen}",
+    )
+    lab_single = lab_mode == "Single stock"
+    if lab_single:
+        held_default = (store.get_spec(chosen).selected or [""])[0]
+        lab_ticker = st.text_input(
+            "Ticker", value=held_default, key=f"lab_ticker_{chosen}",
+            placeholder="e.g. AAPL",
+        ).strip().upper()
+        held_now = [lab_ticker] if lab_ticker else []
+    else:
+        lab_ticker = ""
+        held_now = store.get_spec(chosen).selected
+    lab_key = f"lab_result_{chosen}_{lab_ticker or 'basket'}"
     if not held_now:
         st.caption(
+            "Type a ticker to test a buy/sell rule on one stock." if lab_single else
             "The lab tests a RULE on the names you hold. Tick some in SCREEN first — "
             "the rule decides when to be in them, not which ones to own."
         )
@@ -2305,7 +2619,7 @@ with tab_lab:
         # calendar tab above was still computing, and Streamlit renders the tabs after
         # it only once the script gets that far.)
         prompt = st.text_input(
-            "Rule", placeholder="50/200 crossover, 15% trailing stop",
+            "Rule", placeholder="buy below the lower Bollinger band, sell at the average, 10% stop",
             label_visibility="collapsed", key=f"lab_prompt_{chosen}",
         )
         if prompt and prompt == st.session_state.get(f"lab_last_{chosen}"):
@@ -2371,20 +2685,28 @@ with tab_lab:
                 benchmark_symbol=bktest.BENCHMARK, risk_free=rate_l,
                 cost_tier_market_cap=median_cap,
             )
-            st.session_state[f"lab_result_{chosen}"] = out
+            # One stock: the question is always "better than just holding it?", so the
+            # same stock, same window, same costs, held throughout, runs alongside.
+            base = (lab_engine.run(bars, StrategySpec(signal="always_in"),
+                                   costs=settings.cost, cost_tier_market_cap=median_cap)
+                    if lab_single and out is not None else None)
+            st.session_state[lab_key] = out
+            st.session_state[lab_key + "_base"] = base
             if out is not None:
                 store.record_run(
                     chosen, "lab", lab_spec.fingerprint(), src.snapshot().fingerprint(),
                     out.dates[0], out.dates[-1],
-                    {"signal": lab_spec.signal, "names": len(held_now)}, out.metrics)
+                    {"signal": lab_spec.signal, "names": len(held_now),
+                     "ticker": lab_ticker or None}, out.metrics)
 
-        out = st.session_state.get(f"lab_result_{chosen}")
+        out = st.session_state.get(lab_key)
+        base = st.session_state.get(lab_key + "_base")
         if out is None and go_lab:
             st.info("No overlapping price history for these names in that window.")
         elif out is not None:
             m = out.metrics
             st.markdown(ui.stats([
-                ("FROM", str(out.dates[0]), ""),
+                ("FROM", str(pd.Timestamp(out.dates[0]).date()), ""),
                 ("YEARS", f"{out.years:.1f}", ""),
                 ("RULE P.A.", ui.pct(m["annual_return"]),
                  "up" if m["annual_return"] >= 0 else "down"),
@@ -2395,10 +2717,25 @@ with tab_lab:
                 ("TRADES", f"{out.trades:,}", ""),
             ]), unsafe_allow_html=True)
 
+            if lab_single:
+                _lab_price_chart(src.con, lab_ticker, out, lab_spec)
             curve = pd.DataFrame({"Rule": out.portfolio}, index=out.dates)
+            colors = [ui.AMBER]
+            if base is not None:
+                curve[f"Buy & hold {lab_ticker}"] = base.portfolio
+                colors.append(ui.MUTED)
             if out.benchmark:
                 curve[out.benchmark_symbol] = out.benchmark
-            st.line_chart(curve, height=300, color=[ui.AMBER, ui.CYAN])
+                colors.append(ui.CYAN)
+            st.line_chart(curve, height=300, color=colors)
+            if base is not None:
+                bm = base.metrics
+                st.caption(
+                    f"Buy & hold {lab_ticker}: {ui.pct(bm['annual_return'])} a year, max "
+                    f"drawdown {ui.pct(bm['max_drawdown'])}. The rule is only worth its "
+                    "trades if it beats this line after costs, or gets close with a "
+                    "smaller drawdown."
+                )
 
             rows = [
                 ("Return p.a.", m["annual_return"], m.get("benchmark_annual_return")),
@@ -2430,6 +2767,23 @@ with tab_lab:
                 "has more knobs than a screen, so the count matters more here: turn "
                 "enough of them and something always looks good."
             )
+
+        def _open_rule_book(name, amount):
+            caps_now = _frame(asof).set_index("ticker").reindex(list(held_now))
+            cap_now = float(pd.to_numeric(
+                caps_now.get("shares_outstanding", pd.Series(dtype=float)),
+                errors="coerce").mul(pd.to_numeric(
+                    caps_now.get("price", pd.Series(dtype=float)),
+                    errors="coerce")).median() or 0.0)
+            return paper.open_rule(store.con, name, list(held_now), lab_spec, asof,
+                                   amount, cost_tier_market_cap=cap_now)
+
+        _paper_section(
+            "LAB", f"lab_{chosen}_{lab_ticker or 'basket'}", _open_rule_book,
+            f"{lab_ticker or 'Basket'} · {lab_spec.signal} {asof}",
+            "Follow this rule live from today with paper money: signals read at each "
+            "close, orders filled at the next open, costs charged on every trade. The "
+            "rule is frozen as it stands now.")
 
 
 with tab_news:

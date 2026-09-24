@@ -118,8 +118,25 @@ def build_ticker_history(
         )
         con.unregister("_th")
 
-    # Second source: the bars we actually hold. Same symbol, different evidence — and
-    # where the two disagree, that disagreement is itself worth seeing.
+    refresh_price_windows(con)
+
+    total = con.execute("SELECT COUNT(*) FROM ticker_history").fetchone()[0]
+    return {
+        "filers_read": seen_filers,
+        "filers_with_a_current_symbol": with_symbol,
+        "rows": int(total),
+    }
+
+
+def refresh_price_windows(con: duckdb.DuckDBPyConnection) -> int:
+    """Rewrite the `observed_prices` rows from the bars currently stored.
+
+    The second source: the bars we actually hold. Same symbol as the filing rows,
+    different evidence — and where the two disagree, that disagreement is itself worth
+    seeing. Called after every price update as well as by the Phase 7 build, because
+    `universe_at` reads these windows: left at the date of the last Phase 7 build, every
+    name would drop out of today's universe ten days later.
+    """
     con.execute("DELETE FROM ticker_history WHERE source = ?", [SOURCE_PRICES])
     con.execute(
         """
@@ -130,13 +147,66 @@ def build_ticker_history(
         """,
         [SOURCE_PRICES],
     )
+    return con.execute(
+        "SELECT COUNT(*) FROM ticker_history WHERE source = ?", [SOURCE_PRICES]
+    ).fetchone()[0]
 
-    total = con.execute("SELECT COUNT(*) FROM ticker_history").fetchone()[0]
-    return {
-        "filers_read": seen_filers,
-        "filers_with_a_current_symbol": with_symbol,
-        "rows": int(total),
-    }
+
+# A last bar within this many days of the screen date still counts as listed: weekends,
+# holidays and a lagging price source must not empty the universe for a day.
+LISTING_GRACE_DAYS = 10
+
+
+def windows_current(con: duckdb.DuckDBPyConnection) -> bool:
+    """True when the stored price windows reach the newest bar we hold.
+
+    False means `ticker_history` is empty or was built before the latest price update
+    and never refreshed; reading it then would make living companies look delisted.
+    """
+    row = con.execute(
+        "SELECT (SELECT MAX(valid_to) FROM ticker_history WHERE source = ?), "
+        "(SELECT MAX(date) FROM prices p "
+        " WHERE EXISTS (SELECT 1 FROM securities s WHERE s.ticker = p.ticker))",
+        [SOURCE_PRICES],
+    ).fetchone()
+    windows_end, newest_bar = row
+    if windows_end is None:
+        return False
+    return newest_bar is None or (newest_bar - windows_end).days <= LISTING_GRACE_DAYS
+
+
+def universe_at(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFrame:
+    """The securities tradable on `asof`, read from `ticker_history` (Phase 7).
+
+    A symbol belongs to the universe when its observed price window covers the date.
+    Name, sector and exchange come from `securities` where it still knows the filer;
+    a vanished company that only `ticker_history` knows keeps its row with those fields
+    empty rather than being dropped — dropping it is the survivorship this table exists
+    to undo.
+
+    A symbol with no price window at all is kept on every date, as the securities master
+    always did: it cannot be priced, so the screener excludes and COUNTS it, instead of
+    it disappearing from the arithmetic of the exclusions.
+    """
+    return con.execute(
+        """
+        WITH windows AS (
+            SELECT cik, ticker, valid_from, valid_to FROM ticker_history WHERE source = ?
+        ),
+        listed AS (
+            SELECT DISTINCT cik, ticker FROM windows
+            WHERE valid_from <= ? AND (valid_to IS NULL OR valid_to >= ?)
+        ),
+        unpriced AS (
+            SELECT cik, ticker FROM securities s
+            WHERE NOT EXISTS (SELECT 1 FROM windows w WHERE w.ticker = s.ticker)
+        ),
+        members AS (SELECT * FROM listed UNION SELECT * FROM unpriced)
+        SELECT m.ticker, m.cik, s.name, s.sector, s.sic, s.exchange
+        FROM members m LEFT JOIN securities s ON s.cik = m.cik AND s.ticker = m.ticker
+        """,
+        [SOURCE_PRICES, asof, asof - dt.timedelta(days=LISTING_GRACE_DAYS)],
+    ).fetch_df()
 
 
 def symbol_at(con: duckdb.DuckDBPyConnection, cik: int, on: dt.date) -> str | None:

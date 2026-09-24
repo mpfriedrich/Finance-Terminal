@@ -6,9 +6,9 @@ compute, numbers with stated units, and a required `unsupported` array. A rule t
 vocabulary cannot express is reported as unsupported, in the person's own words, rather
 than approximated by the nearest thing that happens to exist.
 
-That last rule is the one that matters here. "Buy when the RSI drops below 30" has no
-home in this schema, and quietly turning it into a mean-reversion rule with a
-z-score would produce a result the person would read as their idea when it is not.
+That last rule is the one that matters here. "Buy when the stochastic oscillator crosses
+20" has no home in this schema, and quietly turning it into an RSI rule would produce a
+result the person would read as their idea when it is not.
 """
 
 from __future__ import annotations
@@ -25,8 +25,8 @@ SYSTEM = """You translate a person's plain-language trading rule into a structur
 strategy specification. You are a translator, not a strategist.
 
 Rules:
-- Never name a company or a ticker. The schema has no field for one; the basket comes \
-from the screen the person already built.
+- Never name a company or a ticker. The schema has no field for one; the stock or \
+basket is chosen elsewhere in the app.
 - Carry the current specification forward. A new message usually REFINES it.
 - Map only what genuinely fits a field below. Everything else goes into `unsupported`, \
 in the person's own words. Never approximate: an indicator the person did not ask for, \
@@ -34,7 +34,14 @@ chosen because it was the closest one available, is worse than an honest gap.
 - Common shorthand: "golden cross" = ma_cross with fast 50 and slow 200; "moving \
 average" / "MA" / "SMA" = ma_cross; "trend following" = ma_cross; "momentum" / \
 "relative strength" = momentum; "buy the dip" / "oversold" / "reversion" = \
-mean_reversion; "buy and hold" = always_in.
+mean_reversion; "buy and hold" = always_in; "Bollinger" / "bands": buying the lower \
+band = bollinger_reversion, buying a break above the upper band = bollinger_breakout; \
+"RSI" / "relative strength index" = rsi (NOT momentum); "breakout" / "new high" / \
+"Donchian" / "turtle" = channel_breakout; "MACD" = macd.
+- "Only in an uptrend" / "only above the 200-day line" on top of another rule = \
+trend_filter_days (200 unless a length is given). Two entry signals combined in any other \
+way (e.g. "RSI below 30 AND a MACD cross") cannot be expressed: keep the first and put \
+the rest in `unsupported`.
 - Percentages are FRACTIONS: 20% is 0.20, not 20.
 - Lengths are TRADING days unless the person clearly means calendar time; "6 months" is \
 about 126 trading days, "a year" about 252.
@@ -78,6 +85,30 @@ TOOL = {
             },
             "z_exit": {"type": "number",
                        "description": "mean_reversion: sell once the z-score is back here."},
+            "band_days": {"type": "integer",
+                          "description": "bollinger_*: the average's length, trading days."},
+            "band_k": {"type": "number",
+                       "description": "bollinger_*: band width in standard deviations."},
+            "rsi_days": {"type": "integer", "description": "rsi: window, trading days."},
+            "rsi_entry": {"type": "number",
+                          "description": "rsi: buy at or below this level (0-100)."},
+            "rsi_exit": {"type": "number",
+                         "description": "rsi: sell at or above this level (0-100)."},
+            "breakout_days": {
+                "type": "integer",
+                "description": "channel_breakout: buy above the highest close of this "
+                               "many previous days."},
+            "exit_days": {
+                "type": "integer",
+                "description": "channel_breakout: sell below the lowest close of this "
+                               "many previous days."},
+            "macd_fast": {"type": "integer", "description": "macd: fast EMA, days."},
+            "macd_slow": {"type": "integer", "description": "macd: slow EMA, days."},
+            "macd_signal": {"type": "integer", "description": "macd: signal EMA, days."},
+            "trend_filter_days": {
+                "type": "integer",
+                "description": "Only hold while the price is above its average of this "
+                               "many days. 0 = no filter."},
             "stop": {"type": "string", "enum": list(STOPS)},
             "stop_pct": {
                 "type": "number",
@@ -133,6 +164,12 @@ def payload_to_spec(payload: dict, previous: StrategySpec) -> StrategySpec:
             f"({fields['slow_days']}d) — the previous lengths were kept",
         )
         fields["fast_days"], fields["slow_days"] = previous.fast_days, previous.slow_days
+    if fields.get("signal") == "macd" and fields["macd_fast"] >= fields["macd_slow"]:
+        fields["unsupported"] = fields["unsupported"] + (
+            f"MACD fast EMA ({fields['macd_fast']}d) must be shorter than the slow one "
+            f"({fields['macd_slow']}d) — the previous lengths were kept",
+        )
+        fields["macd_fast"], fields["macd_slow"] = previous.macd_fast, previous.macd_slow
     return StrategySpec(**fields)
 
 

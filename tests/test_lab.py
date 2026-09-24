@@ -210,7 +210,8 @@ def test_the_schema_cannot_hold_a_company():
 
 def test_the_signals_are_a_closed_enum():
     assert set(LT.TOOL["input_schema"]["properties"]["signal"]["enum"]) == set(
-        ("always_in", "ma_cross", "momentum", "mean_reversion"))
+        ("always_in", "ma_cross", "momentum", "mean_reversion", "bollinger_reversion",
+         "bollinger_breakout", "rsi", "channel_breakout", "macd"))
     assert LT.TOOL["strict"] is True
 
 
@@ -283,3 +284,104 @@ def test_a_negative_price_is_refused_too():
     frame = bars([100, -5, 100, 110])
     r = lab.run(frame, StrategySpec(signal="always_in"), costs=FREE)
     assert np.isfinite(r.metrics["total_return"])
+
+
+# --- the single-stock rules: Bollinger, RSI, breakout, MACD, trend filter -------------
+
+def test_bollinger_reversion_buys_under_the_band_and_sells_at_the_average():
+    """Flat at 100 for 25 days, then 90 (far under a band of zero width), then 100 again
+    (above the average, which the 90 has pulled to 99.5)."""
+    held = sg.bollinger_reversion(series([100.0] * 25 + [90.0, 100.0, 100.0]))
+    assert not held.iloc[24]
+    assert held.iloc[25], "a close under the lower band is a buy"
+    assert not held.iloc[26], "back at the average is a sell"
+
+
+def test_bollinger_breakout_buys_over_the_band_and_sells_under_the_average():
+    held = sg.bollinger_breakout(series([100.0] * 25 + [110.0, 109.0, 95.0]))
+    assert held.iloc[25] and held.iloc[26]
+    assert not held.iloc[27]
+
+
+def test_rsi_is_100_when_it_only_rises_and_0_when_it_only_falls():
+    assert sg.rsi(series(range(1, 40))).iloc[-1] == pytest.approx(100.0)
+    assert sg.rsi(series(range(40, 1, -1))).iloc[-1] == pytest.approx(0.0)
+
+
+def test_rsi_is_50_when_gains_and_losses_match():
+    r = sg.rsi(series([100.0, 101.0] * 40))
+    assert 45.0 < r.iloc[-1] < 55.0
+
+
+def test_rsi_is_empty_during_its_warm_up():
+    assert sg.rsi(series(range(1, 40)), days=14).iloc[:13].isna().all()
+
+
+def test_the_rsi_rule_buys_oversold_and_sells_overbought():
+    falling, rising = list(range(100, 70, -1)), list(range(71, 130))
+    held = sg.rsi_signal(series(falling + rising))
+    assert held.iloc[len(falling) - 1], "RSI near 0 after a straight fall is a buy"
+    assert not held.iloc[-1], "RSI near 100 after a straight rise is a sell"
+
+
+def test_a_breakout_needs_a_close_above_the_previous_days_not_including_today():
+    """Rising every day: from day 55 on, each close beats the 55 closes before it."""
+    held = sg.channel_breakout(series(range(1, 80)), entry_days=55, exit_days=20)
+    assert not held.iloc[54]
+    assert held.iloc[55]
+
+
+def test_the_breakout_exit_is_a_close_under_the_recent_low():
+    values = list(range(1, 70)) + [30.0]
+    held = sg.channel_breakout(series(values), entry_days=55, exit_days=20)
+    assert held.iloc[-2] and not held.iloc[-1]
+
+
+def test_macd_holds_an_accelerating_rise_and_drops_an_accelerating_fall():
+    up = series([100 * 1.01 ** i for i in range(80)])
+    # Not 0.99**i: a constant percentage fall slows down in dollars, which lifts the
+    # MACD. A fall that speeds up in dollars is what the indicator calls a downtrend.
+    down = series([200 - 0.02 * i ** 2 for i in range(80)])
+    assert sg.macd_signal(up).iloc[-1]
+    assert not sg.macd_signal(down).iloc[-1]
+
+
+def test_the_trend_filter_blocks_a_signal_below_the_average():
+    prices = series([100.0] * 10 + [90.0] * 5)
+    held = sg.trend_filter(pd.Series(True, index=prices.index), prices, days=5)
+    assert not held.iloc[12], "below its own average: filtered out"
+
+
+@pytest.mark.parametrize("spec", [
+    StrategySpec(signal="bollinger_reversion"), StrategySpec(signal="bollinger_breakout"),
+    StrategySpec(signal="rsi"), StrategySpec(signal="channel_breakout"),
+    StrategySpec(signal="macd"), StrategySpec(signal="ma_cross", trend_filter_days=50),
+])
+def test_no_signal_reads_the_future(spec):
+    """Rewrite everything after day 150: nothing on or before day 150 may change."""
+    rng = np.random.default_rng(7)
+    path = 100 * np.exp(np.cumsum(rng.normal(0, 0.02, 300)))
+    other = path.copy()
+    other[151:] = other[151:] * np.exp(np.cumsum(rng.normal(0.01, 0.05, 149)))
+    a = lab.held_series(series(path), spec)
+    b = lab.held_series(series(other), spec)
+    assert a.iloc[:151].equals(b.iloc[:151])
+
+
+def test_fills_are_listed_at_the_next_open():
+    """Bollinger reversion on one stock: the dip on day 25 is read at that close and
+    bought at day 26's open; the recovery signal of day 26 is sold at day 27's open."""
+    closes = [100.0] * 25 + [90.0, 100.0, 100.0, 100.0]
+    opens = [100.0] * 25 + [95.0, 92.0, 99.0, 100.0]
+    r = lab.run(bars(closes, opens), StrategySpec(signal="bollinger_reversion"), costs=FREE)
+    days = pd.bdate_range("2024-01-01", periods=len(closes)).date
+    assert list(r.fills.side) == ["buy", "sell"]
+    assert list(r.fills.date) == [days[26], days[27]]
+    assert list(r.fills.price) == [92.0, 99.0]
+
+
+def test_a_rule_saved_before_the_new_fields_still_loads():
+    old = json.dumps({"signal": "ma_cross", "fast_days": 20, "slow_days": 100,
+                      "unsupported": []})
+    spec = spec_from_json(old)
+    assert spec.fast_days == 20 and spec.band_days == 20 and spec.trend_filter_days == 0

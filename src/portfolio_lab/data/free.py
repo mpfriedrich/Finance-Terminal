@@ -1,8 +1,9 @@
 """FreeSource: the SEC + yfinance implementation of DataSource.
 
-`survivorship_free` is False and says so loudly. The universe here is today's listed
-companies; what happened to everyone else is Phase 7's problem and, on free data, may
-stay partly unanswerable (PLAN.md A21).
+`survivorship_free` is False and says so loudly. The universe is read from
+`ticker_history` (Phase 7), so a name is only screened on dates its price window covers;
+but on free data that table holds hardly any vanished companies, so it is still today's
+survivors in practice (PLAN.md A21, Phase 7 measured 0/20).
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import json
 import duckdb
 import pandas as pd
 
-from . import industry, pit, prices as px
+from . import history, industry, pit, prices as px
 from .base import Snapshot
 
 TABLES = ("securities", "fundamentals", "prices", "ticker_history", "shares_outstanding")
@@ -50,7 +51,18 @@ class FreeSource:
             row_counts=counts,
         )
 
+    @property
+    def universe_basis(self) -> str:
+        """Where `universe()` reads listings from, for the run's notes.
+
+        `ticker_history` when its price windows are current; otherwise the securities
+        master, which holds today's survivors only — the result has to say so.
+        """
+        return "ticker_history" if history.windows_current(self.con) else "securities"
+
     def universe(self, asof: dt.date) -> pd.DataFrame:
+        if self.universe_basis == "ticker_history":
+            return history.universe_at(self.con, asof)
         return self.con.execute(
             "SELECT ticker, cik, name, sector, sic, exchange FROM securities "
             "WHERE (first_seen IS NULL OR first_seen <= ?) "
@@ -75,6 +87,20 @@ class FreeSource:
             "WHERE ticker IN (SELECT UNNEST(?)) AND date BETWEEN ? AND ?",
             [tickers, start, end],
         ).fetch_df()
+
+    def sessions(self, start: dt.date, end: dt.date) -> list[dt.date]:
+        """Market sessions in the window: the days on which any share traded.
+
+        Equities only, like `session_coverage`: futures and indices keep their own
+        calendar. Used by stage B so its clock does not stop when its holdings do.
+        """
+        rows = self.con.execute(
+            "SELECT DISTINCT p.date FROM prices p WHERE p.date BETWEEN ? AND ? "
+            "AND EXISTS (SELECT 1 FROM securities s WHERE s.ticker = p.ticker) "
+            "ORDER BY 1",
+            [start, end],
+        ).fetchall()
+        return [pd.Timestamp(r[0]).date() for r in rows]
 
     @property
     def survivorship_free(self) -> bool:
@@ -112,6 +138,12 @@ class FreeSource:
                   .merge(liq, on="ticker", how="left")
                   .merge(shvol, on="ticker", how="left")
                   .merge(sessions, on="ticker", how="left"))
+        # Same guard as build_screening_frame: on a date where every fact is too old to
+        # be visible, the column is missing, and the screen must count everyone as stale
+        # rather than raise. Found by a stage B run whose last screen date lay more than
+        # 400 days after the only filing.
+        if "data_age_days" not in out.columns:
+            out["data_age_days"] = float("nan")
         # The SEC wording stays in `sector`; `industry_group` is the coarse, typeable
         # version of the same fact. Both travel with the row so the screen can filter on
         # one and still show the other.

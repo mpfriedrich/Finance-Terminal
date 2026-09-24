@@ -95,6 +95,39 @@ assembles the point-in-time universe for each rebalance date once, which turns a
 multi-minute backtest into a fast one. It changes speed and nothing else — there is a
 test for exactly that.
 
+## Switching to the paid data source
+
+The free data has one flaw nothing free can fix: companies that went bankrupt or were
+taken over are missing, so every backtest runs on survivors and looks better than it
+was (Phase 7 measured it: 0 of 20 vanished companies could be recovered). Sharadar, via
+Nasdaq Data Link, carries those companies with their prices and with each fundamental
+stamped by its filing date. Switching removes **survivorship bias**; the point-in-time
+rules stay exactly as they are.
+
+1. Subscribe to Sharadar Core US Fundamentals and Equity Prices (tables TICKERS, SF1,
+   SEP) and put the key in `.env.local`:
+   ```
+   NASDAQ_DATA_LINK_API_KEY=...
+   ```
+2. Build the paid store (downloads the three tables, writes `data/paid.duckdb`; the free
+   store is left alone, and the index series are copied over from it):
+   ```bash
+   uv run python scripts/build_paid.py
+   ```
+3. Choose it in `.env.local` and restart the app:
+   ```
+   PORTFOLIO_LAB_SOURCE=paid
+   ```
+4. Warm the cache again (`scripts/warm_pit_cache.py`); frames are cached per source.
+
+Back to the free data: `PORTFOLIO_LAB_SOURCE=free`, or delete the line. A missing key or
+an unbuilt store shows a message saying which step is missing, not a crash.
+
+**Untested against the real service.** The translation is tested on hand-made files in
+the published Sharadar layout (and the screener's test series runs unchanged against
+it), but no subscription existed when it was written. Check the first build's output —
+the number of delisted companies with prices should be in the thousands, not zero.
+
 ## Tests
 
 ```bash
@@ -106,8 +139,8 @@ Roughly 375 of them. The ones worth knowing about:
 * every metric formula is pinned to a series whose answer can be worked out with a
   pencil, to one basis point — constant growth, a single fall of known depth, returns
   alternating by a fixed amount;
-* the screener's assertions are written once and run against **both** data sources, the
-  live one and the fixture, which is what makes "the data layer is exchangeable" a fact
+* the screener's assertions are written once and run against **every** data source — the
+  live one, the fixture and the paid (Sharadar) translation — which is what makes "the data layer is exchangeable" a fact
   rather than a claim. That test has caught two real defects so far;
 * the point-in-time rules each have a test whose answer is known in advance: a figure
   filed in June is invisible to a screen dated March, a restatement does not displace the

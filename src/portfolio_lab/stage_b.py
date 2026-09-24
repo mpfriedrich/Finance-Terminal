@@ -28,6 +28,7 @@ holding period would show up as a phantom gain or loss at the next rebalance.
 
 from __future__ import annotations
 
+import calendar
 import datetime as dt
 from dataclasses import dataclass, field
 
@@ -37,26 +38,32 @@ import pandas as pd
 
 from . import metrics as mx
 from .config import CostModel
-from .screen.engine import run_screen
+from .screen.engine import run_screen, weighted
 from .screen.spec import PortfolioSpec
 
 FREQUENCIES = {"quarterly": 3, "annual": 12, "buy_and_hold": 0}
 
 
 def rebalance_dates(start: dt.date, end: dt.date, frequency: str = "quarterly") -> list[dt.date]:
-    """The dates on which the screen is re-run. Buy-and-hold gives exactly one."""
+    """The dates on which the screen is re-run. Buy-and-hold gives exactly one.
+
+    Every date is counted from `start`, not from the previous date: stepping from the
+    previous one clamped 31 January to 28 April and then stayed on the 28th for the rest
+    of the run.
+    """
     months = FREQUENCIES.get(frequency, 3)
     if months == 0:
         return [start]
-    dates, current = [], start
-    while current <= end:
+    dates: list[dt.date] = []
+    step = 0
+    while True:
+        index = start.month - 1 + step * months
+        year, month = start.year + index // 12, index % 12 + 1
+        current = dt.date(year, month, min(start.day, calendar.monthrange(year, month)[1]))
+        if current > end:
+            return dates
         dates.append(current)
-        year, month = divmod(current.month - 1 + months, 12)
-        try:
-            current = current.replace(year=current.year + year, month=month + 1)
-        except ValueError:                      # 31st in a short month
-            current = current.replace(year=current.year + year, month=month + 1, day=28)
-    return dates
+        step += 1
 
 
 def bars_for(source, tickers: list[str], start: dt.date, end: dt.date) -> pd.DataFrame:
@@ -155,20 +162,42 @@ def run(
     schedule_dates = [d for d in rebalance_dates(start, end, frequency) if d <= end]
     chosen_at: dict[dt.date, dict[str, float]] = {}
     notes: list[str] = []
+    if getattr(source, "universe_basis", "ticker_history") == "securities":
+        notes.append(
+            "ticker_history is empty or older than the newest prices, so listings came "
+            "from the securities master's observed price ranges instead of the Phase 7 "
+            "table. Rebuild it (scripts/build_ticker_history.py, or any price update) so "
+            "the run uses the universe the plan asks for."
+        )
+    # R19: who left the universe between two screens. Counted from the frames the screen
+    # actually saw, so it reflects whatever the source knows about listings.
+    previous: set[str] | None = None
+    departed: set[str] = set()
     for screen_date in schedule_dates:
         frame = frame_for(screen_date)
         if frame is None or frame.empty:
             notes.append(f"{screen_date}: no universe at that date, position kept")
             continue
+        members = set(frame.ticker.astype(str))
+        if previous is not None:
+            departed |= previous - members
+        previous = members
         result = run_screen(frame, spec)
         picks = result.picks
-        if exclude:
+        if exclude and not spec.selected:
             # Used by the sensitivity check (R20): drop one name and see whether the
-            # whole result was standing on it. Excluded at SELECTION, not afterwards, so
-            # the position it would have taken goes to the next name down — which is
-            # what would actually have happened.
-            picks = picks[~picks.ticker.astype(str).str.upper().isin(
-                {t.upper() for t in exclude})]
+            # whole result was standing on it. Excluded from the RANKING, then cut to
+            # size, so the position it would have taken goes to the next name down —
+            # which is what would actually have happened. Filtering the picks instead,
+            # already cut to `size`, just shrank the portfolio by one (independent
+            # review, 24.09.2026).
+            keep = ~result.ranked.ticker.astype(str).str.upper().isin(
+                {t.upper() for t in exclude})
+            picks = weighted(result.ranked[keep].head(spec.size), spec.weighting)
+        elif exclude:
+            # Hand-picked names have no "next one down"; the excluded one just goes.
+            picks = weighted(picks[~picks.ticker.astype(str).str.upper().isin(
+                {t.upper() for t in exclude})], spec.weighting)
         chosen_at[screen_date] = _weights_from(picks.head(spec.size))
         if not chosen_at[screen_date]:
             notes.append(f"{screen_date}: nothing passed, moved to cash")
@@ -177,14 +206,20 @@ def run(
     bars = bars_for(source, wanted_names, start, end)
     if bars.empty:
         return None
-    sessions = pd.Index(sorted(bars.date.unique()))
-    raw_closes = bars.pivot_table(index="date", columns="ticker", values="close_adj")
+    # The calendar is the MARKET's, not the holdings'. Built from the held names alone,
+    # it ended with them: when every holding stopped trading, the run ended on their
+    # last bar, nothing looked delisted, and the stated loss (R18) was never taken.
+    market = source.sessions(start, end) if hasattr(source, "sessions") else []
+    sessions = pd.Index(sorted(set(bars.date.unique()) | set(market)))
+    raw_closes = (bars.pivot_table(index="date", columns="ticker", values="close_adj")
+                  .reindex(sessions))
     # The last real bar has to be found BEFORE the forward fill, or every column runs to
     # the end of the window and nothing ever looks delisted. Stage A gets this right; the
     # first version here did not, and the R18 test caught it.
     last_bar = {t: raw_closes[t].last_valid_index() for t in raw_closes.columns}
     closes = raw_closes.ffill()
-    opens = bars.pivot_table(index="date", columns="ticker", values="open_adj")
+    opens = (bars.pivot_table(index="date", columns="ticker", values="open_adj")
+             .reindex(sessions))
 
     # A name whose bars stop before the window ends did not hold its value there (R18).
     # Its last close is not a price anyone could have sold at; the stated delisting loss
@@ -255,9 +290,18 @@ def run(
             tier = costs.spread_for(cost_tier_market_cap) + costs.commission
             charge = total * turnover_fraction * tier
 
+            # The cost is paid out of the money being invested, not borrowed at 0%. The
+            # first version bought the full pre-cost amount and let cash go negative by
+            # the charge, so the whole book earned a return on money already spent on
+            # trading — small per quarter, a full holding period long for buy-and-hold
+            # (independent review, 24.09.2026).
+            investable = (total - charge) / total if total else 0.0
+            for ticker in target:
+                if ticker in new_holdings and ticker not in stuck:
+                    new_holdings[ticker] *= investable
             spent = sum(shares * tradable[t] for t, shares in new_holdings.items()
                         if t in tradable)
-            cash = max(total - spent, 0.0) - charge
+            cash = max(total - charge - spent, 0.0)
             holdings = new_holdings
 
         # 3. The curve is marked at the close, after whatever happened during the day.
@@ -282,6 +326,21 @@ def run(
             f"{delisting_return:.0%} from its last close rather than held at it (R18); "
             "the assumption is a setting and it moves the result."
         )
+    # R19 asks for both numbers in every report, zero included: a missing sentence reads
+    # as "nothing to see", which is not the same as "counted, and it was nothing". The
+    # second number is the one that carries risk: positions whose prices STOPPED while
+    # held, so the exit is the assumed delisting return, not a price anyone traded at.
+    # (The first attempt counted departed names without a price when last screened,
+    # which the universe construction makes zero by definition — third review.)
+    listed = f" ({', '.join(sorted(departed)[:8])})" if departed else ""
+    exits = sorted(set(delisted))
+    notes.append(
+        f"{len(departed)} name(s) left the universe between rebalance dates{listed}; "
+        f"{len(exits)} position(s) had no price left to sell at and were closed at the "
+        f"assumed {delisting_return:.0%} (R18/R19). Companies that vanished without a "
+        "symbol never entered the universe at all and cannot be counted here — the "
+        "universe verdict says how many of those the data is missing."
+    )
     if stuck_events:
         notes.append(
             f"{stuck_events} rebalance(s) met a holding with no opening price that day. "
@@ -327,9 +386,15 @@ def _benchmark_curve(con, symbol: str, index) -> pd.Series | None:
     ).fetch_df()
     if frame.empty:
         return None
-    series = frame.set_index("date")["close_adj"].reindex(index).ffill().bfill()
-    if series.isna().all():
+    # Forward only. A back-fill handed the first days of a run the index's FIRST later
+    # value when the series started after the backtest — a price from the future.
+    stored = pd.Series(frame["close_adj"].to_numpy(),
+                       index=pd.to_datetime(frame["date"]))
+    wanted = pd.to_datetime(pd.Index(index))
+    series = stored.reindex(stored.index.union(wanted)).ffill().reindex(wanted)
+    if series.isna().any():
         return None
+    series.index = index
     return 100.0 * series / series.iloc[0]
 
 
