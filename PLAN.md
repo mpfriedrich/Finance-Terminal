@@ -173,7 +173,8 @@ Dies ist die vollständige Liste der Felder, die `PortfolioSpec` filtern und sor
 | Kurs-Cashflow-Verhältnis | Marktkapitalisierung ÷ operativer Cashflow | abgeleitet |
 | Gewinn (4 Quartale) | Summe der letzten vier Quartale | `us-gaap:NetIncomeLoss` |
 | Kurs-Gewinn-Verhältnis | Marktkapitalisierung ÷ Gewinn; bei Verlust nicht definiert | abgeleitet |
-| Sektor / Branche | Branchenschlüssel des Melders | SIC-Code aus der EDGAR-Einreichungsdatei |
+| Sektor / Branche | Branchenschlüssel des Melders, im SEC-Wortlaut (389 Werte) | SIC-Code aus der EDGAR-Einreichungsdatei |
+| Branchengruppe | 13 Gruppen, aus dem SIC-Code abgeleitet (`data/industry.py`); der SEC-Wortlaut bleibt daneben sichtbar | abgeleitet |
 | Börse | Notierungsort | Universumsaufbau |
 | Kurs | letzter unbereinigter Schlusskurs | `prices` |
 | Mittleres Tagesvolumen (60 Tage, in USD) | Median aus Kurs × Stückvolumen | `prices` |
@@ -326,9 +327,88 @@ Modelliert: Einstiegskosten einmalig, Dividenden über den bereinigten Kurs (gle
 
 **Erster echter Durchlauf der Gesamtkette** (Chat → Filter → Titel): Die Kriterien „KGV ≤ 1, KBV ≤ 2, Marktkapitalisierung ≤ 2 Mrd." liefern **2 Titel**. Die Aufschlüsselung zeigt warum: KGV ≤ 1 allein lässt im gesamten zulässigen Universum nur **4** Titel übrig.
 
+## Stand 24.09.2026 — was steht, was der Plan noch schuldet
+
+Abgehakt oben: **Phase 1** (Abnahme dokumentiert), **Phase 3** (die Abnahmekriterien sind
+durch `tests/test_translate.py` einzeln abgedeckt: kein Ticker-Feld, geschlossenes Enum,
+zwei aufeinander aufbauende Nachrichten, Zurückweisung erfundener Kriterien, Grenzen
+gegen Chat-Zugriff geschützt), **Phase 4** (läuft; die Abnahme selbst und damit `[A3]`
+gehört dem Nutzer, sie ist nicht erteilt).
+
+**Phase 2 bleibt offen, und zwar an genau einem Kriterium.** Screener, Grenzen, 0-Treffer-
+Aufschlüsselung und die getrennt gezählten Ausschlüsse sind da und getestet. Was fehlt,
+ist der Satz, auf den es in dieser Phase ankommt: *dieselbe* Testreihe gegen `FreeSource`
+**und** `FixtureSource`. Tatsächlich prüft `tests/test_seam.py` die Schnittstelle und die
+Fallen des Fixtures, während `tests/test_screen.py` gegen von Hand gebaute Rahmen läuft —
+der Screener sieht `FixtureSource` nie von Ende zu Ende, weil `screening_frame()` nur auf
+`FreeSource` existiert. Die Austauschbarkeit der Datenschicht ist damit behauptet, nicht
+bewiesen.
+
+**Phasen 5 bis 10 sind unangetastet.** Es gibt keinen Rückblick-Backtest, kein
+Kostenmodell, keine Kennzahlentabelle gegen synthetische Reihen, kein `backtest_runs`,
+kein historisches Universum (`ticker_history` hat 0 Zeilen), keinen Point-in-Time-Lauf,
+keinen Testzähler und keinen freischaltbaren Prüfzeitraum außer der Einstellung
+`holdout_years = 2`, die noch nichts bewirkt.
+
+**Gebaut wurde stattdessen in die Breite**, außerhalb der Phasenliste: Research-Tab mit
+Einzelfirmenanalyse und Restatement-Befunden, Optionen samt Volatilitätsfläche,
+Strategie-Vergleich (Einmalanlage gegen Ratenkauf gegen Dip-Regel), Makro, Rohstoffe,
+Kalender, News, Morning-Briefing, Watchlist, Live-Tracking von Papierdepots — und am
+24.09. der Branchenfilter samt Kerzenchart. Rund 5.600 Zeilen Code, 194 Tests grün.
+
+Das ist eine Entscheidung mit Preis, und sie steht hier, damit sie sichtbar ist: Der
+Leitsatz dieses Plans lautet, dass ein Backtest mit zu guten Zahlen schlimmer ist als
+gar keiner. Solange Phasen 5 bis 9 fehlen, hat die App viele Ansichten und **keine
+belastbare historische Auswertung** — die Frage „hätte das funktioniert" kann sie nicht
+beantworten. Das Live-Tracking (Nachtrag oben) ist der ehrliche Ersatz, aber es braucht
+Zeit, die noch nicht vergangen ist.
+
+Zwei kleinere Befunde aus der Durchsicht am 23.09.:
+
+* **Kriterium 1(e) ist halb eingelöst.** Die Abdeckung je Feld wird gemessen und in die
+  Tabelle `coverage` geschrieben, aber nirgends gelesen — der einzige Zugriff außerhalb
+  von `sec.py`/`schema.py` steht in `scripts/build_fundamentals.py`. Gemessen ist nicht
+  gekennzeichnet; am Bildschirm ist nicht zu sehen, dass ein Filter auf Umsatz (67 % des
+  Gesamtuniversums) auf dünnerem Eis steht als einer auf Eigenkapital (91 %).
+* **`ticker_history` und `shares_outstanding` sind leer.** Für heute folgenlos, aber
+  `shares_outstanding` erklärt, warum 426 Titel mangels Aktienzahl ausgeschlossen
+  werden, und `ticker_history` ist die Voraussetzung für Phase 7.
+
+## Nachtrag 24.09.2026 — Branchenfilter und Kerzenchart
+
+**1. Branchenfilter (user).** Die 389 SEC-Bezeichnungen sind präzise und untippbar. Neu
+ist `data/industry.py`: eine Tabelle von SIC-Bereichen, erster Treffer gewinnt, die auf
+13 Gruppen abbildet (Technology 807 Titel, Health Care 986, Financials 774 …). Ein Test
+prüft, dass kein breiter Bereich einen engeren still überschreibt. 1 Titel fällt in
+„Other", 143 in „Unclassified". Der SEC-Wortlaut bleibt in `sector` und in der
+Ergebnistabelle stehen — die Gruppe ist Bequemlichkeit, die Melderangabe ist das, was
+gegen die Einreichung geprüft werden kann. Das Übersetzungsmodell bekommt jetzt **alle**
+389 Werte statt der ersten 120 (ein abgeschnittenes Vokabular ist schlimmer als keines:
+das Modell kann „fehlt in den Daten" nicht von „abgeschnitten" unterscheiden und erfindet
+eine plausible Formulierung, die nichts trifft) und zusätzlich die 13 Gruppen mit dem
+`in`-Operator für mehrere auf einmal. Titel ohne Branchenangabe fallen durch jeden
+Branchenfilter; ihre Zahl steht jetzt als Hinweis am Ergebnis, statt lautlos zu
+verschwinden.
+
+**2. Kerzenchart mit Bollinger-Bändern (user).** Im Research-Tab, umschaltbar, Bänder
+standardmäßig aus, Zeitraum 6M/1Y/5Y. Dafür brauchte es die Datenlage: `prices` kannte
+nur Eröffnung und Schluss, die Kursquelle liefert Hoch und Tief seit immer und der
+Ingest hat sie weggeworfen. Migrationen 010/011 ergänzen `high`/`low`, der Nachlauf am
+24.09. füllte 1.636.951 von 1.842.747 Zeilen (88,8 %; die restlichen liegen außerhalb des
+460-Tage-Fensters), Plausibilitätsprüfung `high ≥ close ≥ low` ohne Verletzung. Die
+Kerzen werden **pro sichtbarem Zeitraum** angeboten: wo kein Tagesbereich vorliegt, gibt
+es eine Linie und die Begründung dazu, keine dochtlose Kerze, die wie Daten aussieht.
+Die Bänder rechnen mit der Populations-Standardabweichung (Bollingers Definition, nicht
+pandas' Vorgabe — auf 20 Tagen ~2,6 % Unterschied in der Breite) auf derselben
+unbereinigten Reihe, aus der die Kerzen gezeichnet werden.
+
+**Nebenbefund, der einen Ladefehler verhindert hat:** `open_market_for_rebuild()` hat die
+Migrationen übersprungen. Solange nie eine Spalte dazukam, fiel das nicht auf; der erste
+Aufbau auf einer Kopie hätte gegen die alte Tabelle geschrieben und wäre gescheitert.
+
 ## Build Phases
 
-- [ ] **Phase 1: Datenfundament, und der Beweis dass es trägt**
+- [x] **Phase 1: Datenfundament, und der Beweis dass es trägt**
       **Done when:** (a) eine lokale Abfrage filtert das US-Stammaktienuniversum nach Kurs-Buchwert und Marktkapitalisierung in **unter 1 Sekunde**, Trefferzahl und Laufzeit sind notiert; (b) für 5 von Hand gewählte Firmen stimmen Buchwert, Aktienzahl und daraus gerechnetes Kurs-Buchwert-Verhältnis mit deren letztem Geschäftsbericht überein; (c) für dieselben 5 liegen bereinigte **und** unbereinigte Tageskurse vor; (d) eine Tabelle zeigt die **gemessene** XBRL-Abdeckung je Kalenderjahr, und daraus ist ein frühestes belastbares Backtest-Startdatum festgelegt und im Code hinterlegt; (e) **jedes Feld des Kennzahlen-Vokabulars hat eine nachgeprüfte Merkmalsreihenfolge und einen gemessenen Abdeckungsgrad; Felder unter 80 % Abdeckung sind als solche gekennzeichnet** `[A20]`; (f) `FixtureSource` existiert und liefert dieselbe Schnittstelle; (g) die Dauer des Erstaufbaus ist gemessen und notiert.
       **Steps:**
       - `uv init`, `git init`, `.gitignore` für `.env.local` und `data/`
@@ -341,7 +421,7 @@ Modelliert: Einstiegskosten einmalig, Dividenden über den bereinigten Kurs (gle
       - Bei Fehlschlag hier anhalten und die Ausweichoption aus `[A4]`/`[A5]`/`[A11]` ziehen, bevor weitergebaut wird
       **Covers:** Datengrundlage für R4, R13; prüft A4, A5, A9, A11, A19, A20
 
-- [ ] **Phase 2: Spezifikation und Screener, ohne Sprachmodell**
+- [ ] **Phase 2: Spezifikation und Screener, ohne Sprachmodell** — *offen nur am Doppellauf der Testreihe gegen beide Datenquellen; siehe Stand 24.09.2026*
       **Done when:** eine von Hand geschriebene Spezifikation liefert 10 Titel mit allen Filterwerten; **dieselbe Testreihe läuft grün gegen `FreeSource` und gegen `FixtureSource`** — das ist der eigentliche Beweis, dass die Datenschicht austauschbar ist; zu enger Filter erzeugt den 0-Treffer-Hinweis mit Aufschlüsselung je Filter; Ausschlüsse wegen fehlender Daten, Datenalter und Liquidität werden getrennt gezählt und ausgewiesen.
       **Steps:**
       - `PortfolioSpec`: Filter, Sortierregel, Anzahl, Gewichtung, Umschichtung, Mindestkurs, Mindestvolumen, Frischegrenze
@@ -351,7 +431,7 @@ Modelliert: Einstiegskosten einmalig, Dividenden über den bereinigten Kurs (gle
       - Testreihe gegen beide Datenquellen laufen lassen
       **Covers:** R4, R5, R6, R14, R15
 
-- [ ] **Phase 3: Sprachmodell als Übersetzer**
+- [x] **Phase 3: Sprachmodell als Übersetzer**
       **Done when:** die zwei Beispielnachrichten erzeugen nacheinander die erwartete Spezifikation, die zweite ergänzt die erste; der unverständliche Teil der ersten Nachricht wird ausdrücklich als unverstanden gemeldet; ein erfundenes Kriterium wird zurückgewiesen, Spezifikation bleibt unverändert; das Schema enthält nachweislich kein Feld für Ticker; fehlender Schlüssel erzeugt eine klare Meldung. Geprüft wird in dieser Phase über ein kleines Kommandozeilen-Testprogramm, nicht über die Oberfläche.
       **Steps:**
       - Schlüssel aus `.env.local`; dem Nutzer den Befehl zum Öffnen der Datei geben, Wert nie erfragen `[A2]`
@@ -360,7 +440,7 @@ Modelliert: Einstiegskosten einmalig, Dividenden über den bereinigten Kurs (gle
       - Kommandozeilen-Testprogramm; Tests mit festen Modellantworten, damit sie ohne Netz laufen
       **Covers:** R1, R3, R24; prüft A2
 
-- [ ] **Phase 4: Oberfläche und mehrere Portfolios**
+- [x] **Phase 4: Oberfläche und mehrere Portfolios** — *gebaut und in Benutzung; die förmliche Abnahme und damit `[A3]` steht noch aus*
       **Done when:** der Nutzer startet die App mit einem Befehl, baut per Chat ein Portfolio, sieht alle aktiven Filter im Klartext, legt ein zweites an, wechselt, startet neu — beide samt Chatverlauf da; Alter des Datenbestands sichtbar. **Abnahme durch den Nutzer; hier wird `[A3]` bestätigt oder verworfen.**
       **Steps:**
       - Streamlit: Portfolioliste seitlich, Chat und Ergebnistabelle mittig
