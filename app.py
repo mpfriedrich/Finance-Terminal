@@ -73,6 +73,7 @@ from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
 from portfolio_lab import comps, paper, world
+from portfolio_lab import wacc as W
 from portfolio_lab import summary as ai_summary
 
 st.set_page_config(page_title="Portfolio Lab", page_icon="◫", layout="wide")
@@ -1656,6 +1657,79 @@ with tab_research:
                         st.caption("How many standard deviations today's multiple sits "
                                    "from the company's own yearly average. Past years "
                                    "use the price and figures of their own date.")
+
+                # ------------------------------------------ cost of capital and DCF
+                if me is not None:
+                    st.markdown("#### Cost of capital and DCF")
+                    tnx = src.con.execute(
+                        "SELECT close, date FROM prices WHERE ticker = '^TNX' "
+                        "AND close IS NOT NULL ORDER BY date DESC LIMIT 1").fetchone()
+                    rf_default = (tnx[0] / 100.0) if tnx else mx.current_risk_free(
+                        src.con, settings.risk_free_fallback)[0]
+                    beta_raw = (rs.price_stats(src.con, ticker) or {}).get("beta")
+                    w1, w2, w3, w4 = st.columns(4)
+                    rf_in = w1.number_input(
+                        "Risk-free %", 0.0, 15.0, round(rf_default * 100, 2), 0.05,
+                        key=f"rf_{ticker}",
+                        help=f"US 10-year yield{' of ' + str(tnx[1]) if tnx else ''}.")
+                    beta_in = w2.number_input(
+                        "Beta (raw)", -1.0, 4.0, round(float(beta_raw or 1.0), 2), 0.05,
+                        key=f"beta_{ticker}",
+                        help="Daily returns against the S&P 500 total return over the "
+                             "stored history." if beta_raw else "No beta measured; 1.0.")
+                    erp_in = w3.number_input("Equity risk premium %", 2.0, 9.0,
+                                             W.DEFAULT_ERP * 100, 0.25, key=f"erp_{ticker}")
+                    blume = w4.toggle("Blume-adjusted beta", value=True, key=f"blume_{ticker}")
+                    g1, g2, g3 = st.columns(3)
+                    growth_in = g1.number_input("FCFF growth %/yr", -10.0, 30.0, 3.0, 0.5,
+                                                key=f"g_{ticker}")
+                    years_in = g2.number_input("Years", 1, 15, 5, 1, key=f"yrs_{ticker}")
+                    tg_in = g3.number_input("Growth forever %", -2.0, 5.0, 2.0, 0.25,
+                                            key=f"tg_{ticker}")
+                    w_inputs = W.Inputs(risk_free=rf_in / 100, beta=beta_in,
+                                        equity_risk_premium=erp_in / 100, adjust_beta=blume,
+                                        growth=growth_in / 100, years=int(years_in),
+                                        terminal_growth=tg_in / 100)
+                    b = W.build(me, w_inputs)
+                    st.markdown(ui.grid(pd.DataFrame({
+                        "component": ["Cost of equity (CAPM)", "Cost of debt, pre-tax",
+                                      "Tax rate", "Weight of equity", "Weight of debt",
+                                      "WACC"],
+                        "value": [f"{b['cost_of_equity']:.2%}",
+                                  f"{b['cost_of_debt_pre_tax']:.2%}",
+                                  f"{b['tax_rate']:.1%}", f"{b['weight_equity']:.1%}",
+                                  f"{b['weight_debt']:.1%}", f"{b['wacc']:.2%}"],
+                        "from": [f"{rf_in:.2f}% + {b['beta']:.2f} × {erp_in:.2f}%",
+                                 b["cost_of_debt_source"], str(b["tax_rate_source"]),
+                                 f"market cap {ui.money(b['equity_value'])}",
+                                 f"book debt {ui.money(b['debt_value'])}", ""],
+                    }), numeric={"value"}, ticker_col="component"),
+                        unsafe_allow_html=True)
+                    out_dcf = W.dcf(me, b["wacc"], w_inputs)
+                    if "error" in out_dcf:
+                        st.info(f"No DCF: {out_dcf['error']}.")
+                    else:
+                        tone = "up" if out_dcf["vs_price"] >= 0 else "down"
+                        st.markdown(ui.stats([
+                            ("FCFF TTM", ui.money(out_dcf["fcff"]), ""),
+                            ("ENTERPRISE VALUE", ui.money(out_dcf["enterprise_value"]), ""),
+                            ("EQUITY VALUE", ui.money(out_dcf["equity_value"]), ""),
+                            ("PER SHARE", ui.num(out_dcf["per_share"]), tone),
+                            ("VS PRICE", ui.pct(out_dcf["vs_price"], 0), tone),
+                            ("TERMINAL SHARE", f"{out_dcf['terminal_share']:.0%}", ""),
+                        ]), unsafe_allow_html=True)
+                        grid = W.sensitivity(me, b["wacc"], w_inputs)
+                        st.markdown("Per share — WACC down the side, growth forever across")
+                        st.markdown(ui.grid(
+                            grid.map(ui.num).reset_index().rename(columns={"index": "WACC"}),
+                            numeric=set(grid.columns), ticker_col="WACC"),
+                            unsafe_allow_html=True)
+                        st.caption(
+                            "FCFF = operating cash flow − capex + interest × (1 − tax), "
+                            "grown for the stated years, then forever; discounted at the "
+                            "WACC, less net debt, per listed share. Debt is weighted at "
+                            "book value. When the terminal share is high, the answer is "
+                            "mostly the growth-forever guess — which is what the grid shows.")
 
             # ----------------------------------------------------------------- options
             with sections[4]:
