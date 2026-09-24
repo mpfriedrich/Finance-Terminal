@@ -49,7 +49,11 @@ from dataclasses import replace
 
 from portfolio_lab.screen.spec import Filter, spec_to_json
 from portfolio_lab.screen.valuation import Assumptions
+import time
+
 from portfolio_lab import backtest as bktest
+from portfolio_lab import stage_b as bstage
+from portfolio_lab.pit_cache import FrameCache
 from portfolio_lab import coverage as cov
 from portfolio_lab import briefing as bfg
 from portfolio_lab import business as bz
@@ -611,7 +615,121 @@ with tab_screen:
             store.stop_tracking(chosen)
             st.rerun()
 
-    # ------------------------------------------------------------- backtest (stage A)
+    # ------------------------------------------------------------- backtest (stage B)
+    def _stage_b_section():
+        """Point-in-time: re-screen at every date, buy at the next open (Phase 8)."""
+        st.markdown("#### Backtest — stage B (point-in-time)")
+        st.caption(
+            "Stage A runs today's basket backwards, which is hindsight. This re-runs the "
+            "screen at every rebalance date on only the filings published by then, and "
+            "fills at the next session's open. It answers a different question: would "
+            "the RULE have worked, not would these names have worked."
+        )
+        snapshot = src.snapshot()
+        cache = FrameCache(src, CACHE_DIR / "pit", snapshot.fingerprint())
+
+        c1, c2, c3 = st.columns([1.1, 1, 1.1])
+        pit_start = c1.date_input(
+            "From", value=dt.date(2011, 1, 3), min_value=dt.date(2011, 1, 3),
+            max_value=asof, key=f"pit_start_{chosen}",
+            help="2011 is where XBRL coverage becomes usable — measured in phase 1.")
+        frequency = c2.selectbox(
+            "Rebalance", ["quarterly", "annual", "buy_and_hold"], index=0,
+            key=f"pit_freq_{chosen}")
+        dates = bstage.rebalance_dates(pit_start, asof, frequency)
+        ready = sum(1 for d in dates if cache.path_for(d).exists())
+        go_pit = c3.button("Run point-in-time", use_container_width=True,
+                           key=f"pit_go_{chosen}")
+
+        if ready < len(dates):
+            st.warning(
+                f"{len(dates) - ready} of {len(dates)} dates are not cached yet. Each one "
+                "costs 6-10 seconds to assemble, almost all of it the point-in-time "
+                "fundamentals — so a cold run takes minutes, not seconds. Warm it once "
+                "with `uv run python scripts/warm_pit_cache.py`; every later run, with "
+                "any screen, is then fast. The cache changes speed and nothing else."
+            )
+
+        if go_pit:
+            with st.spinner(f"Re-screening {len(dates)} dates"):
+                started = time.time()
+                out = bstage.run(
+                    src, spec, pit_start, asof, costs=settings.cost,
+                    frequency=frequency, risk_free=mx.risk_free_rate(
+                        src.con, pit_start, asof, settings.risk_free_fallback)[0],
+                    label=bstage.stage_b_label(_universe_verdict()),
+                    data_fingerprint=snapshot.fingerprint(),
+                    frame_for=cache.frame_for,
+                )
+                st.session_state[f"pit_result_{chosen}"] = out
+                st.session_state[f"pit_seconds_{chosen}"] = time.time() - started
+            if out is not None:
+                store.record_run(
+                    chosen, "stage_b", spec.fingerprint(), snapshot.fingerprint(),
+                    out.dates[0], out.dates[-1],
+                    {"frequency": frequency, "dates": len(dates)}, out.metrics)
+
+        out = st.session_state.get(f"pit_result_{chosen}")
+        if out is None and go_pit:
+            st.info("Nothing passed the screen at any rebalance date in that window.")
+        elif out is not None:
+            m = out.metrics
+            st.markdown(ui.stats([
+                ("FROM", str(out.dates[0]), ""),
+                ("YEARS", f"{out.years:.1f}", ""),
+                ("PORTFOLIO P.A.", ui.pct(m["annual_return"]),
+                 "up" if m["annual_return"] >= 0 else "down"),
+                ("S&P 500 TR P.A.", ui.pct(m.get("benchmark_annual_return")), ""),
+                ("EXCESS P.A.", ui.pct(m.get("excess_annual")),
+                 "up" if (m.get("excess_annual") or 0) >= 0 else "down"),
+                ("TURNOVER P.A.", ui.pct(out.turnover), ""),
+                ("REBALANCES", f"{len(out.rebalances):,}", ""),
+            ]), unsafe_allow_html=True)
+
+            curve = pd.DataFrame({"Portfolio": out.portfolio}, index=out.dates)
+            if out.benchmark:
+                curve[out.benchmark_symbol] = out.benchmark
+            st.line_chart(curve, height=300, color=[ui.AMBER, ui.CYAN])
+
+            rows = [
+                ("Return p.a.", m["annual_return"], m.get("benchmark_annual_return")),
+                ("Volatility p.a.", m["volatility"], m.get("benchmark_volatility")),
+                ("Max drawdown", m["max_drawdown"], m.get("benchmark_max_drawdown")),
+                ("Deviation from index", m.get("tracking_error"), None),
+            ]
+            st.markdown(ui.grid(pd.DataFrame({
+                "metric": [r[0] for r in rows] + ["Sharpe", "Turnover p.a."],
+                "portfolio": [ui.pct(r[1]) for r in rows]
+                             + [ui.num(m["sharpe"]), ui.pct(out.turnover)],
+                out.benchmark_symbol or "index":
+                    [ui.pct(r[2]) if r[2] is not None else "—" for r in rows]
+                    + [ui.num(m.get("benchmark_sharpe")), "—"],
+            }), numeric=set(), ticker_col="metric"), unsafe_allow_html=True)
+
+            if not out.rebalances.empty:
+                with st.expander(f"What it held, {len(out.rebalances)} rebalances"):
+                    reb = out.rebalances
+                    st.markdown(ui.grid(pd.DataFrame({
+                        "screened": reb.screened_on.astype(str),
+                        "filled": reb.filled_on.astype(str),
+                        "names": reb.names.astype(int),
+                        "turnover": reb.turnover.map(ui.pct),
+                        "cost": reb.cost.map(lambda v: ui.pct(v, 2)),
+                    }), numeric={"names"}, ticker_col="screened"),
+                        unsafe_allow_html=True)
+
+            for note in out.notes[:5]:
+                st.warning(note)
+            st.warning(out.label)
+            seconds = st.session_state.get(f"pit_seconds_{chosen}", 0.0)
+            tried = store.backtest_count(spec.fingerprint(), out.data_fingerprint)
+            st.caption(
+                f"Ran in {seconds:.0f} seconds over {len(dates)} rebalance dates. This "
+                f"exact screen has been tested {tried}× against this data build."
+            )
+
+    _stage_b_section()
+
     st.markdown("#### Backtest — stage A")
     if picks.empty:
         st.caption(
