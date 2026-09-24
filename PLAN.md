@@ -773,7 +773,7 @@ Aufbau auf einer Kopie hätte gegen die alte Tabelle geschrieben und wäre gesch
       - Zählung und Anzeige nach R19
       **Covers:** R18, R19
 
-- [ ] **Phase 8: Point-in-Time-Backtest (Fundamentaldaten)** — *Gegenprüfung 25.09.2026: durchgefallen, drei schwere Befunde behoben; von den offenen sind `period_start`, `ticker_history` und R19 am 24.09. behoben; der Cache-Schlüssel ist dokumentiert statt gelöst; es fehlen die Messung der Wirkung auf die Zahlen (braucht die lokale Datenbank) und die erneute unabhängige Gegenprüfung; siehe oben*
+- [ ] **Phase 8: Point-in-Time-Backtest (Fundamentaldaten)** — *drei Gegenprüfungen; alle Befunde behoben (siehe „Dritte Gegenprüfung“). Offen nur, was die lokale Datenbank braucht: 5-Minuten-Grenze, Wirkung auf die Zahlen, Häufigkeit der R13-Lecks*
       **Done when:** quartalsweise Umschichtung, die je Stichtag **das Universum aus Phase 7** und ausschließlich die bis dahin gemeldeten Bilanzdaten benutzt; **drei Tests sind grün:** ein Datensatz mit späterem Meldedatum gelangt nicht in die Auswahl; eine nachträgliche Korrektur verdrängt die ursprüngliche Fassung nicht; ein Titel, der zum Stichtag noch nicht notiert war oder schon verschwunden ist, erscheint nicht in der Auswahl. Der Test nach R16 belegt die Ausführung zur Folgetags-Eröffnung. Das Etikett nennt, welche Verzerrungen korrigiert sind und welche nicht — mit der in Phase 7 gemessenen Quote. Ein voller Durchlauf über den gesamten belastbaren Zeitraum braucht **höchstens 5 Minuten**; wird das überschritten, werden Zwischenergebnisse je Stichtag zwischengespeichert, bis es eingehalten ist.
       **Steps:**
       - Stichtagsabfrage über Meldedatum, Auswahlregel „früheste Fassung" (R13)
