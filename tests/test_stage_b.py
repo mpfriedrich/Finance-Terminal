@@ -439,8 +439,19 @@ def test_the_departure_count_is_stated_even_when_it_is_zero():
         facts(1001, book=1_000_000_000.0, shares=100_000_000, filed=dt.date(2023, 1, 5)))
     spec = PortfolioSpec(size=1, min_dollar_volume=0, min_trading_days_60=0)
     r = stage_b.run(src, spec, dt.date(2023, 2, 1), dt.date(2023, 12, 29), costs=FREE)
-    assert any(n.startswith("0 name(s) left the universe") and "0 of them without a price"
+    assert any(n.startswith("0 name(s) left the universe") and "0 position(s) had no price"
                in n for n in r.notes), r.notes
+
+
+def test_a_held_name_whose_prices_stop_is_counted_as_an_assumed_exit():
+    """ZZZ is the only name at price-to-book 0.33, is held, and its prices stop at the end of June: one
+    departure, and one exit at the assumed delisting return rather than a real price."""
+    src = phase7_source()
+    spec = PortfolioSpec(size=1, filters=(Filter("price_to_book", "<=", 0.4),),
+                         min_dollar_volume=0, min_trading_days_60=0)
+    r = stage_b.run(src, spec, dt.date(2023, 2, 1), dt.date(2024, 6, 28), costs=FREE)
+    assert r.ever_held == ["ZZZ"]
+    assert any("1 position(s) had no price left to sell at" in n for n in r.notes), r.notes
 
 
 def test_moving_the_screen_day_close_does_not_move_the_fill():

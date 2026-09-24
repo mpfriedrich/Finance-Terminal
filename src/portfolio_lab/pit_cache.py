@@ -38,7 +38,8 @@ import pandas as pd
 # v3: restatements are matched by period end and length class, not exact start.
 # v4: the universe is read from ticker_history, and the frame always has data_age_days.
 # v5: the first filing of a period speaks for it across tags, not per tag.
-CACHE_VERSION = "v5"
+# v6: first filing is found before the age limit is applied.
+CACHE_VERSION = "v6"
 
 
 def _build_id(fingerprint: str) -> str:

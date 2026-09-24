@@ -112,12 +112,16 @@ def share_counts(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFrame:
     df = con.execute(
         """
         WITH candidates AS (
-            SELECT cik, value, period_end, filed, tag_rank,
-                   MIN(filed) OVER (PARTITION BY cik, period_end) AS first_filed
-            FROM fundamentals
-            WHERE filed <= ? AND metric = 'shares_outstanding'
-              AND value IS NOT NULL AND value >= ?
-              AND date_diff('day', filed, ?) <= ?
+            -- The age limit is applied AFTER the first filing is found, never before:
+            -- filtering first let an amendment become the "first" filing of its
+            -- period once the original aged out (R13, third review).
+            SELECT * FROM (
+                SELECT cik, value, period_end, filed, tag_rank,
+                       MIN(filed) OVER (PARTITION BY cik, period_end) AS first_filed
+                FROM fundamentals
+                WHERE filed <= ? AND metric = 'shares_outstanding'
+                  AND value IS NOT NULL AND value >= ?
+            ) WHERE date_diff('day', filed, ?) <= ?
         ),
         visible AS (
             -- Only the first filing of a period may speak for it, WHATEVER tag a later
@@ -164,13 +168,15 @@ def instant_values(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFram
     df = con.execute(
         """
         WITH candidates AS (
-            SELECT cik, metric, value, period_end, filed, tag_rank,
-                   MIN(filed) OVER (PARTITION BY cik, metric, period_end) AS first_date
-            FROM fundamentals
-            WHERE filed <= ? AND metric IN (SELECT UNNEST(?))
-              AND period_start IS NULL
-              AND value IS NOT NULL
-              AND date_diff('day', filed, ?) <= ?
+            -- First filing over EVERYTHING visible, then the age limit; see share_counts.
+            SELECT * FROM (
+                SELECT cik, metric, value, period_end, filed, tag_rank,
+                       MIN(filed) OVER (PARTITION BY cik, metric, period_end) AS first_date
+                FROM fundamentals
+                WHERE filed <= ? AND metric IN (SELECT UNNEST(?))
+                  AND period_start IS NULL
+                  AND value IS NOT NULL
+            ) WHERE date_diff('day', filed, ?) <= ?
         ),
         visible AS (
             -- The first filing of a period speaks for it; the tag preference below only

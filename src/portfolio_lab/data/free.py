@@ -88,6 +88,20 @@ class FreeSource:
             [tickers, start, end],
         ).fetch_df()
 
+    def sessions(self, start: dt.date, end: dt.date) -> list[dt.date]:
+        """Market sessions in the window: the days on which any share traded.
+
+        Equities only, like `session_coverage`: futures and indices keep their own
+        calendar. Used by stage B so its clock does not stop when its holdings do.
+        """
+        rows = self.con.execute(
+            "SELECT DISTINCT p.date FROM prices p WHERE p.date BETWEEN ? AND ? "
+            "AND EXISTS (SELECT 1 FROM securities s WHERE s.ticker = p.ticker) "
+            "ORDER BY 1",
+            [start, end],
+        ).fetchall()
+        return [pd.Timestamp(r[0]).date() for r in rows]
+
     @property
     def survivorship_free(self) -> bool:
         return False

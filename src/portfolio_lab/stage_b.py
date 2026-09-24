@@ -173,16 +173,12 @@ def run(
     # actually saw, so it reflects whatever the source knows about listings.
     previous: set[str] | None = None
     departed: set[str] = set()
-    priced_when_last_seen: dict[str, bool] = {}
     for screen_date in schedule_dates:
         frame = frame_for(screen_date)
         if frame is None or frame.empty:
             notes.append(f"{screen_date}: no universe at that date, position kept")
             continue
         members = set(frame.ticker.astype(str))
-        if "price" in frame.columns:
-            priced_when_last_seen.update(
-                zip(frame.ticker.astype(str), frame.price.notna()))
         if previous is not None:
             departed |= previous - members
         previous = members
@@ -210,14 +206,20 @@ def run(
     bars = bars_for(source, wanted_names, start, end)
     if bars.empty:
         return None
-    sessions = pd.Index(sorted(bars.date.unique()))
-    raw_closes = bars.pivot_table(index="date", columns="ticker", values="close_adj")
+    # The calendar is the MARKET's, not the holdings'. Built from the held names alone,
+    # it ended with them: when every holding stopped trading, the run ended on their
+    # last bar, nothing looked delisted, and the stated loss (R18) was never taken.
+    market = source.sessions(start, end) if hasattr(source, "sessions") else []
+    sessions = pd.Index(sorted(set(bars.date.unique()) | set(market)))
+    raw_closes = (bars.pivot_table(index="date", columns="ticker", values="close_adj")
+                  .reindex(sessions))
     # The last real bar has to be found BEFORE the forward fill, or every column runs to
     # the end of the window and nothing ever looks delisted. Stage A gets this right; the
     # first version here did not, and the R18 test caught it.
     last_bar = {t: raw_closes[t].last_valid_index() for t in raw_closes.columns}
     closes = raw_closes.ffill()
-    opens = bars.pivot_table(index="date", columns="ticker", values="open_adj")
+    opens = (bars.pivot_table(index="date", columns="ticker", values="open_adj")
+             .reindex(sessions))
 
     # A name whose bars stop before the window ends did not hold its value there (R18).
     # Its last close is not a price anyone could have sold at; the stated delisting loss
@@ -325,15 +327,19 @@ def run(
             "the assumption is a setting and it moves the result."
         )
     # R19 asks for both numbers in every report, zero included: a missing sentence reads
-    # as "nothing to see", which is not the same as "counted, and it was nothing".
-    unpriced = sorted(t for t in departed if not priced_when_last_seen.get(t, False))
+    # as "nothing to see", which is not the same as "counted, and it was nothing". The
+    # second number is the one that carries risk: positions whose prices STOPPED while
+    # held, so the exit is the assumed delisting return, not a price anyone traded at.
+    # (The first attempt counted departed names without a price when last screened,
+    # which the universe construction makes zero by definition — third review.)
     listed = f" ({', '.join(sorted(departed)[:8])})" if departed else ""
+    exits = sorted(set(delisted))
     notes.append(
-        f"{len(departed)} name(s) left the universe between rebalance dates{listed}, "
-        f"{len(unpriced)} of them without a price when last screened; from then on none "
-        "of them could be chosen (R19). Companies that vanished without a symbol never "
-        "entered the universe at all and cannot be counted here — the universe verdict "
-        "above says how many of those the data is missing."
+        f"{len(departed)} name(s) left the universe between rebalance dates{listed}; "
+        f"{len(exits)} position(s) had no price left to sell at and were closed at the "
+        f"assumed {delisting_return:.0%} (R18/R19). Companies that vanished without a "
+        "symbol never entered the universe at all and cannot be counted here — the "
+        "universe verdict says how many of those the data is missing."
     )
     if stuck_events:
         notes.append(

@@ -209,3 +209,34 @@ def test_a_restatement_under_a_better_tag_does_not_displace_the_original():
     assert inst[inst.metric == "book_value"].value.iloc[0] == 900.0, "amendment leaked"
     shares = pit.share_counts(c, later)
     assert shares.value.iloc[0] == 100_000_000.0, "amended share count leaked"
+
+
+def test_an_amendment_does_not_become_the_first_filing_once_the_original_ages_out():
+    """R13 against the age limit. A delinquent filer's FY2023 original (filed Feb 2024)
+    passes the 400-day limit; a 10-K/A for the same period arrives in May 2025. Picking
+    the earliest filing AFTER the age filter made the amendment the 'first' one — with
+    a fresh filing date that also made a stale filer look current (third independent
+    review, 24.09.2026)."""
+    c = duckdb.connect(":memory:")
+    _apply(c, MARKET_MIGRATIONS)
+    rows = [
+        (12, "book_value", 900.0, None, D(2023, 12, 31), D(2024, 2, 15), "m1",
+         "StockholdersEquity", 0),
+        (12, "shares_outstanding", 100_000_000.0, None, D(2023, 12, 31), D(2024, 2, 15),
+         "m1", "EntityCommonStockSharesOutstanding", 0),
+        (12, "book_value", 1400.0, None, D(2023, 12, 31), D(2025, 5, 20), "m2",
+         "StockholdersEquity", 0),
+        (12, "shares_outstanding", 50_000_000.0, None, D(2023, 12, 31), D(2025, 5, 20),
+         "m2", "EntityCommonStockSharesOutstanding", 0),
+    ]
+    c.executemany(
+        "INSERT INTO fundamentals (cik, metric, value, period_start, period_end, filed, "
+        "accession, xbrl_tag, tag_rank) VALUES (?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    before = D(2025, 3, 1)
+    assert pit.instant_values(c, before).value.iloc[0] == 900.0
+    assert pit.share_counts(c, before).value.iloc[0] == 100_000_000.0
+    after = D(2025, 6, 1)
+    assert pit.instant_values(c, after).empty, "the amendment stood in for an aged-out original"
+    assert pit.share_counts(c, after).empty, "the amended share count stood in"

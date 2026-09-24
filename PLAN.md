@@ -478,6 +478,37 @@ prüfen sollte, ohne je zu unterbrechen.
 | dasselbe, jährlich | 11,95 % | **11,69 %** | −2,27 → **−2,53** |
 | KBV ≤ 1, 20 Titel, jährlich | 15,77 % | **15,22 %** | +1,55 → **+1,01** |
 
+## Dritte Gegenprüfung Phase 7 + 8 — 24.09.2026 (Cloud-Sitzung)
+
+Derselbe Prüfer hat die Fixes der zweiten Runde zu brechen versucht. Alle acht halten.
+**Verdikt: Phase 7 bestanden; Phase 8 durchgefallen an genau einem Befund**, der inzwischen
+behoben ist:
+
+1. **Blockierend (R13): Die Altersgrenze wurde VOR der Wahl der ersten Einreichung
+   angewandt.** War das Original älter als 400 Tage, wurde eine spätere Korrektur
+   derselben Periode zur „ersten“ — mit frischem Datum, das einen säumigen Melder obendrein
+   als aktuell durchgehen ließ. Genau die notleidenden, billigen Titel eines Value-Screens.
+   Jetzt: erste Einreichung über alles Sichtbare, erst danach die Altersgrenze. Test mit
+   dem Szenario des Prüfers. `CACHE_VERSION` → `v6`. Häufigkeit ungemessen, Obergrenze:
+   `SELECT COUNT(*) FROM (SELECT cik, metric, period_end, MIN(filed) f0, MAX(filed) f1, COUNT(DISTINCT value) nv FROM fundamentals WHERE period_start IS NULL GROUP BY ALL) WHERE date_diff('day', f0, f1) > 400 AND nv > 1`
+2. **R19-Zahl „ohne Kurs“ war konstruktionsbedingt immer null.** Ersetzt durch die Zahl, die
+   Risiko trägt: Positionen, deren Kurse endeten, während sie gehalten wurden, und die zum
+   angenommenen Delisting-Abschlag geschlossen wurden.
+
+**Beim Test zu 2 selbst gefunden, nicht vom Prüfer:** Der Handelskalender von Stufe B wurde
+nur aus den Kursen der gehaltenen Titel gebaut. Verschwanden alle gehaltenen Titel, endete
+der Kalender mit ihnen — nichts sah delistet aus, der −30-%-Abschlag (R18) griff nie, und
+der Lauf hörte still früher auf. Jetzt liefert die Quelle den Marktkalender
+(`FreeSource.sessions`). Aufwärtsverzerrung, betraf konzentrierte Depots mit Pleiten.
+
+Vom Prüfer als Verdacht notiert, nicht behoben: auf der bezahlten Quelle bekommt jeder
+Abgang pauschal −30 % (Übernahmen mit Aufschlag ebenso wie Pleiten; Sharadar ACTIONS wird
+nicht genutzt), und das Etikett sagt dort weiterhin „Überlebende“ — vorsichtig falsch.
+
+**Stand Phase 8:** Nach Einschätzung des Prüfers mit Fix 1 bestanden, vorbehaltlich der nur
+lokal möglichen Messungen: 5-Minuten-Grenze (Cache `v6` neu wärmen), Wirkung auf die drei
+Vergleichsvarianten, Häufigkeit der R13-Lecks.
+
 ## Zweite Gegenprüfung Phase 7 + 8 — 24.09.2026 (Cloud-Sitzung)
 
 Ein unabhängiger Prüfer (eigener Agent, hat den Code nicht geschrieben) hat Phase 7 und 8
