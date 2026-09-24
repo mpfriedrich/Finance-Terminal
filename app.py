@@ -72,7 +72,7 @@ from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
-from portfolio_lab import comps, export, fred, insiders, paper, world
+from portfolio_lab import comps, export, fred, fts, insiders, paper, world
 from portfolio_lab import wacc as W
 from portfolio_lab import summary as ai_summary
 
@@ -3258,6 +3258,46 @@ with tab_lab:
 
 
 with tab_news:
+    with st.expander("Search every SEC filing (full text, 2001 onwards)", expanded=False):
+        with st.form("fts_form"):
+            f1, f2 = st.columns([3, 1])
+            fts_q = f1.text_input("Words", placeholder='"pricing pressure" tariff',
+                                  help='Phrases in double quotes. Every word must appear.')
+            fts_ticker = f2.text_input("Only this ticker", placeholder="optional")
+            f3, f4, f5 = st.columns([2, 1, 1])
+            fts_forms = f3.multiselect(
+                "Forms", ["10-K", "10-Q", "8-K", "20-F", "6-K", "S-1", "DEF 14A", "SC 13D"],
+                default=["10-K", "10-Q", "8-K"])
+            fts_from = f4.date_input("From", value=dt.date.today() - dt.timedelta(days=730))
+            fts_to = f5.date_input("To", value=dt.date.today())
+            go_fts = st.form_submit_button("Search", use_container_width=True)
+        if go_fts and fts_q.strip():
+            fts_cik = None
+            if fts_ticker.strip():
+                hit_cik = src.con.execute(
+                    "SELECT cik FROM securities WHERE upper(ticker) = upper(?) LIMIT 1",
+                    [fts_ticker.strip()]).fetchone()
+                fts_cik = hit_cik[0] if hit_cik else None
+                if fts_cik is None:
+                    st.warning(f"{fts_ticker} is not a US listing in the store; "
+                               "searching all companies.")
+            fts_failed = False
+            try:
+                found, total = fts.search(fts_q, fts_forms, fts_from, fts_to, fts_cik,
+                                          pages=2)
+            except Exception as exc:                                  # noqa: BLE001
+                found, total, fts_failed = pd.DataFrame(), 0, True
+                st.error(f"The SEC search could not be reached ({type(exc).__name__}).")
+            if not found.empty:
+                st.caption(f"{total:,} filings contain it; the latest {len(found)} shown. "
+                           "A hit means the words appear, not that they matter — "
+                           "risk-factor boilerplate matches too.")
+                st.dataframe(found, hide_index=True, use_container_width=True,
+                             column_config={"url": st.column_config.LinkColumn(
+                                 "filing", display_text="open")})
+            elif not fts_failed:
+                st.info("No filing contains that.")
+
     st.markdown("#### Daily briefing")
     followed = store.everything_followed()
     if not followed:
