@@ -54,6 +54,7 @@ from portfolio_lab import briefing as bfg
 from portfolio_lab import business as bz
 from portfolio_lab import macro as mc
 from portfolio_lab import metrics as mx
+from portfolio_lab import numeraire as nm
 from portfolio_lab import options as op
 from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
@@ -219,6 +220,19 @@ with st.sidebar:
     hi = c2.number_input("Max $bn", value=float(hi or 0.0), min_value=0.0, step=0.1,
                          help="0 means no upper limit")
     st.caption("Applies on top of anything you said in chat.")
+
+    st.markdown("#### Unit")
+    unit = st.radio(
+        "Price in", options=[nm.USD, nm.GOLD],
+        format_func=lambda u: "US dollars" if u == nm.USD else "Ounces of gold",
+        horizontal=True, label_visibility="collapsed", key="unit",
+    )
+    if unit == nm.GOLD:
+        st.caption(
+            "Charts and backtest curves are divided by the gold price of the same day. "
+            "Ratios and the eligibility floors stay in dollars — see the note under any "
+            "converted chart."
+        )
 
     st.markdown("#### Industry")
     groups = st.multiselect(
@@ -619,12 +633,23 @@ with tab_screen:
                     commission=0.0, spread_tiers=((float("inf"), 0.0),))
                 rate, rate_source = mx.risk_free_rate(
                     src.con, start_on, last_bar, settings.risk_free_fallback)
+                gold = (nm.gold_series(src.con, start_on, last_bar)
+                        if unit == nm.GOLD else pd.Series(dtype=float))
+                if unit == nm.GOLD and not nm.covers(gold, start_on, last_bar):
+                    st.warning(
+                        "No gold price stored for the whole window, so this run stays in "
+                        "dollars. `uv run python scripts/build_commodities.py` fills it."
+                    )
+                    gold = pd.Series(dtype=float)
                 result = bktest.buy_and_hold(
                     src.con, picks, start_on, last_bar, costs=model,
                     risk_free=rate, delisting_return=settings.delisting_return,
                     data_fingerprint=snapshot.fingerprint(),
                     universe_verdict=_universe_verdict(),
+                    numeraire=gold if len(gold) else None,
                 )
+                st.session_state[f"bt_unit_{chosen}"] = (
+                    nm.GOLD if len(gold) else nm.USD)
                 st.session_state[f"bt_rate_{chosen}"] = (rate, rate_source)
                 if result is None:
                     st.session_state[f"bt_result_{chosen}"] = None
@@ -657,6 +682,9 @@ with tab_screen:
                 if result.benchmark:
                     curve[result.benchmark_symbol] = result.benchmark
                 st.line_chart(curve, height=280, color=[ui.AMBER, ui.CYAN])
+                run_unit = st.session_state.get(f"bt_unit_{chosen}", nm.USD)
+                if run_unit == nm.GOLD:
+                    st.caption(nm.note(nm.GOLD))
 
                 # Every figure R9 asks for, portfolio and index side by side, both
                 # computed by the same function so the yardstick cannot differ from the
@@ -864,7 +892,24 @@ with tab_research:
                         # Bands are computed on the FULL history and only then cropped to
                         # the visible span. Computing them on the crop would leave the
                         # first 20 sessions of every view without an envelope.
-                        view = px_hist.join(rs.bollinger(px_hist))
+                        chart_px = px_hist
+                        chart_unit = nm.USD
+                        if unit == nm.GOLD:
+                            gold_px = nm.gold_series(src.con)
+                            if not gold_px.empty:
+                                priced = chart_px.set_index("date")[
+                                    ["open", "high", "low", "close"]]
+                                converted = nm.convert(priced, gold_px).dropna(how="all")
+                                if not converted.empty:
+                                    chart_px = (chart_px.set_index("date")
+                                                .drop(columns=["open", "high", "low", "close"])
+                                                .join(converted, how="right")
+                                                .reset_index())
+                                    chart_unit = nm.GOLD
+                        # Bands are computed on the SAME series the candles are drawn
+                        # from, so they follow the unit rather than sitting in dollars
+                        # around a chart in ounces.
+                        view = chart_px.join(rs.bollinger(chart_px))
                         view = view.tail({"6M": 126, "1Y": 252, "5Y": 1260}[span])
                         # Judged on what is actually on screen: older bars predate the
                         # high/low columns, so a long view can fall back to a line while
@@ -918,6 +963,8 @@ with tab_research:
                         )
                         st.plotly_chart(fig, use_container_width=True,
                                         key=f"pxchart_{ticker}")
+                        if chart_unit == nm.GOLD:
+                            st.caption(nm.note(nm.GOLD))
                         if not can_candle:
                             st.caption(
                                 "Line, not candles: the bars in this range carry no high "

@@ -40,6 +40,7 @@ import numpy as np
 import pandas as pd
 
 from . import metrics as mx
+from . import numeraire as nm
 from .config import CostModel
 
 BENCHMARK = "^SP500TR"
@@ -115,6 +116,7 @@ def buy_and_hold(
     delisting_return: float = -0.30,
     data_fingerprint: str = "",
     universe_verdict: str = "",
+    numeraire: pd.Series | None = None,
 ) -> BacktestResult | None:
     """Buy `holdings` at their weights on `start`, hold to `end`, never rebalance (R16b).
 
@@ -139,6 +141,16 @@ def buy_and_hold(
             .sort_index())
     if wide.empty:
         return None
+
+    # Changing the unit BEFORE anything is computed, so the curve, the metrics and the
+    # benchmark all end up in the same one. Converting only the chart would leave a
+    # picture in ounces above a table in dollars.
+    if numeraire is not None and not numeraire.empty:
+        wide = nm.convert(wide, numeraire).dropna(how="all")
+        if not bench.empty:
+            bench = nm.convert(bench, numeraire).dropna()
+        if wide.empty:
+            return None
 
     notes: list[str] = []
     # A name must be priced on the FIRST day of the window; one that lists later cannot be
