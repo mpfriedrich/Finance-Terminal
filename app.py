@@ -72,7 +72,7 @@ from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
-from portfolio_lab import comps, export, fred, paper, world
+from portfolio_lab import comps, export, fred, insiders, paper, world
 from portfolio_lab import wacc as W
 from portfolio_lab import summary as ai_summary
 
@@ -115,6 +115,15 @@ def _market_source():
 @st.cache_resource
 def _store():
     return Store(open_user(USER_DB))
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _insider_trades(cik: int) -> pd.DataFrame | None:
+    """Form 4 trades from EDGAR; None when the SEC cannot be reached."""
+    try:
+        return insiders.fetch(int(cik))
+    except Exception:                                                # noqa: BLE001
+        return None
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -2028,6 +2037,44 @@ with tab_research:
 
             # --------------------------------------------------------------- ownership
             with sections[7]:
+                st.markdown("#### Insider transactions (Form 4)")
+                if st.button("Load insider trades from the SEC", key=f"ins_{ticker}"):
+                    st.session_state[f"ins_loaded_{ticker}"] = True
+                if st.session_state.get(f"ins_loaded_{ticker}"):
+                    with st.spinner("Reading the latest Form 4 filings…"):
+                        trades = _insider_trades(cik)
+                    if trades is None:
+                        st.warning("The SEC could not be reached.")
+                    elif trades.empty:
+                        st.info("No Form 4 filings with share transactions.")
+                    else:
+                        ins = insiders.summary(trades, asof)
+                        st.markdown(ui.stats([
+                            ("BOUGHT (12M)", f"{ins['bought_trades']} by "
+                             f"{ins['bought_insiders']}", "up" if ins["bought_trades"] else ""),
+                            ("BOUGHT VALUE", ui.money(ins["bought_value"]), ""),
+                            ("SOLD (12M)", f"{ins['sold_trades']} by "
+                             f"{ins['sold_insiders']}", "down" if ins["sold_trades"] else ""),
+                            ("SOLD VALUE", ui.money(ins["sold_value"]), ""),
+                        ]), unsafe_allow_html=True)
+                        st.markdown(ui.grid(pd.DataFrame({
+                            "date": trades["date"].astype(str),
+                            "insider": trades["insider"].astype(str).str.slice(0, 26),
+                            "role": trades["role"].astype(str).str.slice(0, 30),
+                            "what": trades["what"],
+                            "shares": trades["shares"].map(
+                                lambda v: f"{v:,.0f}" if pd.notna(v) else "—"),
+                            "price": trades["price"].map(ui.num),
+                            "value": trades["value"].map(ui.money),
+                        }).head(40), numeric={"shares", "price", "value"},
+                            ticker_col="date"), unsafe_allow_html=True)
+                        st.caption(
+                            "The counts above are open-market purchases and sales only — "
+                            "an insider spending their own money at the market price. "
+                            "Grants, option exercises, tax withholding and gifts are "
+                            "listed but not counted: they are pay, not decisions. From "
+                            "the last 30 Form 4 filings.")
+                st.markdown("#### Institutions")
                 hold = rs.holders(ticker)
                 if hold.empty:
                     st.info("No institutional holdings reported for this ticker.")
