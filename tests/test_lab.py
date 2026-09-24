@@ -5,6 +5,8 @@ The single most valuable test in this file is the look-ahead one. A backtest tha
 at the close it screened on earns the average overnight move on every trade, in the
 direction of the signal, every time — and it looks like skill.
 """
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -191,3 +193,93 @@ def test_the_fingerprint_survives_a_round_trip_and_separates_rules():
     b = StrategySpec(signal="ma_cross", fast_days=51)
     assert a.fingerprint() != b.fingerprint()
     assert spec_from_json(spec_to_json(a)).fingerprint() == a.fingerprint()
+
+
+# --- the translator: a closed vocabulary, and an honest gap where it ends -------------
+
+from portfolio_lab.lab import translate as LT  # noqa: E402
+
+
+def test_the_schema_cannot_hold_a_company():
+    """The model translates a rule; it does not pick stocks. There is no field to do it
+    with, which is stronger than telling it not to."""
+    blob = json.dumps(LT.TOOL).lower()
+    for word in ("ticker", "symbol", "company", "cik", "stock_name"):
+        assert word not in blob
+
+
+def test_the_signals_are_a_closed_enum():
+    assert set(LT.TOOL["input_schema"]["properties"]["signal"]["enum"]) == set(
+        ("always_in", "ma_cross", "momentum", "mean_reversion"))
+    assert LT.TOOL["strict"] is True
+
+
+def test_a_golden_cross_becomes_the_rule_it_names():
+    spec = LT.payload_to_spec(
+        {"signal": "ma_cross", "fast_days": 50, "slow_days": 200, "stop": "none",
+         "weighting": "equal", "unsupported": []}, StrategySpec())
+    assert spec.signal == "ma_cross" and spec.fast_days == 50 and spec.slow_days == 200
+
+
+def test_a_second_message_refines_rather_than_restarts():
+    first = LT.payload_to_spec(
+        {"signal": "ma_cross", "fast_days": 20, "slow_days": 100, "stop": "none",
+         "weighting": "equal", "unsupported": []}, StrategySpec())
+    second = LT.payload_to_spec(
+        {"signal": "ma_cross", "stop": "trailing_stop", "stop_pct": 0.15,
+         "weighting": "equal", "unsupported": []}, first)
+    assert second.fast_days == 20 and second.slow_days == 100   # kept
+    assert second.stop == "trailing_stop" and second.stop_pct == 0.15
+
+
+def test_what_cannot_be_expressed_is_reported_not_approximated():
+    """An RSI rule has no home in this vocabulary. Turning it into the nearest available
+    indicator would hand the person a result they would read as their own idea."""
+    spec = LT.payload_to_spec(
+        {"signal": "always_in", "stop": "none", "weighting": "equal",
+         "unsupported": ["buy when the RSI drops below 30"]}, StrategySpec())
+    assert spec.unsupported == ("buy when the RSI drops below 30",)
+    assert spec.signal == "always_in"
+
+
+def test_a_swapped_pair_of_averages_is_refused_rather_than_reordered():
+    """The engine cannot compute a fast average longer than the slow one, and silently
+    swapping them would change the person's rule into a different one."""
+    previous = StrategySpec(signal="ma_cross", fast_days=50, slow_days=200)
+    spec = LT.payload_to_spec(
+        {"signal": "ma_cross", "fast_days": 200, "slow_days": 50, "stop": "none",
+         "weighting": "equal", "unsupported": []}, previous)
+    assert (spec.fast_days, spec.slow_days) == (50, 200)
+    assert any("shorter than" in u for u in spec.unsupported)
+
+
+def test_the_diff_says_what_changed():
+    before = StrategySpec(signal="always_in")
+    after = StrategySpec(signal="momentum", lookback_days=252)
+    changed = " ".join(LT.diff_summary(before, after))
+    assert "signal" in changed and "lookback_days" in changed
+
+
+# --- prices that are not prices --------------------------------------------------------
+
+def test_a_zero_price_is_treated_as_missing_rather_than_as_a_collapse():
+    """The data source carries stretches of zero adjusted closes — 732 days of them for
+    one name in this universe. Dividing by zero gives an infinity that multiplies into
+    every later day, and the whole run reports +inf% a year. Found exactly that way."""
+    frame = bars([100, 0, 0, 120])
+    r = lab.run(frame, StrategySpec(signal="always_in"), costs=FREE)
+    assert np.isfinite(r.metrics["total_return"])
+    assert np.isfinite(r.metrics["annual_return"])
+    assert any("zero or less" in n for n in r.notes)
+
+
+def test_the_broken_days_are_named_not_just_survived():
+    frame = bars([100, 0, 100, 100])
+    r = lab.run(frame, StrategySpec(signal="always_in"), costs=FREE)
+    assert any("AAA" in n for n in r.notes)
+
+
+def test_a_negative_price_is_refused_too():
+    frame = bars([100, -5, 100, 110])
+    r = lab.run(frame, StrategySpec(signal="always_in"), costs=FREE)
+    assert np.isfinite(r.metrics["total_return"])

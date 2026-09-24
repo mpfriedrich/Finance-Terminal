@@ -106,8 +106,23 @@ def run(
     costs = costs or CostModel()
     closes = bars.pivot_table(index="date", columns="ticker", values="close_adj").sort_index()
     opens = bars.pivot_table(index="date", columns="ticker", values="open_adj").sort_index()
-    closes = closes.ffill()
-    opens = opens.ffill()
+
+    # A price of zero is not a price. The free source carries stretches of zero adjusted
+    # closes for some names — Diversified Energy has 732 of them — and dividing by one
+    # produces an infinite return that propagates through the whole curve. Found exactly
+    # that way: a rule reporting +inf% a year.
+    notes: list[str] = []
+    bad = {t: int((closes[t] <= 0).sum()) for t in closes.columns}
+    broken = {t: n for t, n in bad.items() if n}
+    if broken:
+        notes.append(
+            "ignored days with a price of zero or less, which the data source carries for "
+            + ", ".join(f"{t} ({n} days)" for t, n in sorted(
+                broken.items(), key=lambda kv: -kv[1])[:5])
+            + ". Those days are treated as no price at all rather than as a collapse."
+        )
+    closes = closes.where(closes > 0).ffill()
+    opens = opens.where(opens > 0).ffill()
     if len(closes) < 2:
         return None
 
@@ -130,7 +145,7 @@ def run(
     for i in range(1, len(dates)):
         today, yesterday = dates[i], dates[i - 1]
         # 1. overnight, still on yesterday's position
-        overnight = (opens.loc[today] / closes.loc[yesterday] - 1.0).fillna(0.0)
+        overnight = _finite(opens.loc[today] / closes.loc[yesterday] - 1.0)
         value *= 1.0 + float((current * overnight).sum())
 
         # 2. the trade, at the open, on the signal from yesterday's close
@@ -143,7 +158,7 @@ def run(
             current = target
 
         # 3. the rest of the day, on the new position
-        intraday = (closes.loc[today] / opens.loc[today] - 1.0).fillna(0.0)
+        intraday = _finite(closes.loc[today] / opens.loc[today] - 1.0)
         value *= 1.0 + float((current * intraday).sum())
 
         values.append(value)
@@ -170,8 +185,18 @@ def run(
         trades=trades,
         turnover=traded_total / years,
         label=lab_label(),
-        notes=[],
+        notes=notes,
     )
+
+
+def _finite(returns: pd.Series) -> pd.Series:
+    """Anything that is not a real number is a missing observation, not a move.
+
+    A single infinity here does not spoil one day: it multiplies into the running value
+    and every figure after it, which is how a broken price two years ago turns a whole
+    backtest into +inf% a year.
+    """
+    return returns.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
 def lab_label() -> str:

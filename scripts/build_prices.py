@@ -67,6 +67,12 @@ print(f"\nseries worth a look ({len(odd)} of them): a reassigned ticker splices 
       flush=True)
 print(odd.head(25).to_string(index=False), flush=True)
 
+zeros = px.non_prices(con)
+if len(zeros):
+    print(f"\nbars priced at zero or less ({len(zeros)} tickers) — an absent price, not "
+          "a collapse; anything dividing by one of these produces an infinity", flush=True)
+    print(zeros.head(10).to_string(index=False), flush=True)
+
 print(f"\ntotal {time.time()-t0:.0f}s", flush=True)
 if finish_rebuild(con, work, MARKET_DB):
     print("swapped the rebuilt store into place; restart the app to see it",

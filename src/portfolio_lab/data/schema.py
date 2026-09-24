@@ -225,6 +225,17 @@ USER_MIGRATIONS: list[str] = [
         created_at       TIMESTAMP NOT NULL
     );
     """,
+    # 014 — the strategy lab. Chat threads are separated by `kind` so the screen's
+    # conversation and the rule's conversation do not read as one muddled thread, and
+    # the rule lives per portfolio because it is tested on that portfolio's names.
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS kind VARCHAR DEFAULT 'screen';",
+    """
+    CREATE TABLE IF NOT EXISTS strategies (
+        portfolio_id  VARCHAR PRIMARY KEY,
+        spec_json     VARCHAR NOT NULL,
+        updated_at    TIMESTAMP NOT NULL
+    );
+    """,
 ]
 
 

@@ -56,6 +56,8 @@ from portfolio_lab import business as bz
 from portfolio_lab import macro as mc
 from portfolio_lab import metrics as mx
 from portfolio_lab import numeraire as nm
+from portfolio_lab.lab import engine as lab_engine
+from portfolio_lab.lab import translate as LT
 from portfolio_lab import options as op
 from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
@@ -273,9 +275,9 @@ if not chosen:
 
 spec = store.get_spec(chosen)
 
-(tab_screen, tab_research, tab_options, tab_strategy, tab_macro, tab_commodities,
- tab_calendar, tab_news) = st.tabs(
-    ["SCREEN", "RESEARCH", "OPTIONS", "STRATEGY", "MACRO", "COMMODITIES",
+(tab_screen, tab_research, tab_options, tab_strategy, tab_lab, tab_macro,
+ tab_commodities, tab_calendar, tab_news) = st.tabs(
+    ["SCREEN", "RESEARCH", "OPTIONS", "STRATEGY", "LAB", "MACRO", "COMMODITIES",
      "CALENDAR", "NEWS"]
 )
 
@@ -2113,6 +2115,158 @@ with tab_calendar:
                 "moved forward 364 days — accurate to within a few days because filing "
                 "deadlines do not move much, but still an estimate. Announced dates "
                 "come from the company."
+            )
+
+
+with tab_lab:
+    st.markdown('<div class="tl-cmd"><span class="p">&gt;</span></div>',
+                unsafe_allow_html=True)
+    held_now = store.get_spec(chosen).selected
+    if not held_now:
+        st.caption(
+            "The lab tests a RULE on the names you hold. Tick some in SCREEN first — "
+            "the rule decides when to be in them, not which ones to own."
+        )
+    else:
+        lab_spec = store.get_strategy(chosen)
+        for msg in store.messages(chosen, kind="lab"):
+            st.markdown(
+                f'<div class="tl-msg"><span class="p">&gt;</span> {msg["text"]}</div>'
+                if msg["role"] == "user" else
+                f'<div class="tl-reply">{msg["text"]}</div>',
+                unsafe_allow_html=True,
+            )
+
+        # A plain text input rather than a second chat_input: chat_input pins itself to
+        # the bottom of the page, and two of them on one page is confusing rather than
+        # convenient. (The empty tab that first sent me looking here was neither — the
+        # calendar tab above was still computing, and Streamlit renders the tabs after
+        # it only once the script gets that far.)
+        prompt = st.text_input(
+            "Rule", placeholder="50/200 crossover, 15% trailing stop",
+            label_visibility="collapsed", key=f"lab_prompt_{chosen}",
+        )
+        if prompt and prompt == st.session_state.get(f"lab_last_{chosen}"):
+            prompt = None                      # already handled on the previous rerun
+        elif prompt:
+            st.session_state[f"lab_last_{chosen}"] = prompt
+        if prompt:
+            if not secret("ANTHROPIC_API_KEY"):
+                st.error("ANTHROPIC_API_KEY missing from .env.local.")
+            else:
+                store.add_message(chosen, "user", prompt, kind="lab")
+                try:
+                    out = LT.translate(prompt, lab_spec)
+                    store.save_strategy(chosen, out.spec)
+                    store.add_message(
+                        chosen, "assistant",
+                        "<br>".join(f"- {c}" for c in out.changed) or "- no change",
+                        kind="lab")
+                except Exception as exc:                      # noqa: BLE001
+                    store.add_message(chosen, "assistant", f"could not translate: {exc}",
+                                      kind="lab")
+                st.rerun()
+
+        st.markdown("#### Rule")
+        for line in lab_spec.describe():
+            st.markdown(f"- {line}")
+        if lab_spec.unsupported:
+            st.warning("Not applied: " + "; ".join(lab_spec.unsupported))
+
+        c1, c2 = st.columns([1, 1])
+        lab_start = c1.date_input(
+            "From", value=max(dt.date(2011, 1, 3), asof - dt.timedelta(days=365 * 10)),
+            min_value=dt.date(2010, 1, 4), max_value=asof, key=f"lab_start_{chosen}")
+        go_lab = c2.button("Run rule", use_container_width=True, key=f"lab_go_{chosen}")
+
+        if go_lab:
+            bars = src.con.execute(
+                """
+                SELECT ticker, date,
+                       open * (close_adj / NULLIF(close, 0)) AS open_adj, close_adj
+                FROM prices
+                WHERE ticker IN (SELECT UNNEST(?)) AND date BETWEEN ? AND ?
+                  AND open IS NOT NULL AND close_adj IS NOT NULL
+                ORDER BY date
+                """,
+                [list(held_now), lab_start, asof],
+            ).fetch_df()
+            bench = src.con.execute(
+                "SELECT date, close_adj FROM prices WHERE ticker = ? "
+                "AND date BETWEEN ? AND ? ORDER BY date",
+                [bktest.BENCHMARK, lab_start, asof],
+            ).fetch_df()
+            rate_l, rate_l_src = mx.risk_free_rate(src.con, lab_start, asof,
+                                                   settings.risk_free_fallback)
+            caps = _frame(asof).set_index("ticker").reindex(list(held_now))
+            median_cap = float(pd.to_numeric(
+                caps.get("shares_outstanding", pd.Series(dtype=float)), errors="coerce"
+            ).mul(pd.to_numeric(caps.get("price", pd.Series(dtype=float)),
+                                errors="coerce")).median() or 0.0)
+            out = lab_engine.run(
+                bars, lab_spec, costs=settings.cost,
+                benchmark=(bench.set_index("date")["close_adj"] if len(bench) else None),
+                benchmark_symbol=bktest.BENCHMARK, risk_free=rate_l,
+                cost_tier_market_cap=median_cap,
+            )
+            st.session_state[f"lab_result_{chosen}"] = out
+            if out is not None:
+                store.record_run(
+                    chosen, "lab", lab_spec.fingerprint(), src.snapshot().fingerprint(),
+                    out.dates[0], out.dates[-1],
+                    {"signal": lab_spec.signal, "names": len(held_now)}, out.metrics)
+
+        out = st.session_state.get(f"lab_result_{chosen}")
+        if out is None and go_lab:
+            st.info("No overlapping price history for these names in that window.")
+        elif out is not None:
+            m = out.metrics
+            st.markdown(ui.stats([
+                ("FROM", str(out.dates[0]), ""),
+                ("YEARS", f"{out.years:.1f}", ""),
+                ("RULE P.A.", ui.pct(m["annual_return"]),
+                 "up" if m["annual_return"] >= 0 else "down"),
+                ("S&P 500 TR P.A.", ui.pct(m.get("benchmark_annual_return")), ""),
+                ("EXCESS P.A.", ui.pct(m.get("excess_annual")),
+                 "up" if (m.get("excess_annual") or 0) >= 0 else "down"),
+                ("IN THE MARKET", ui.pct(m.get("average_exposure")), ""),
+                ("TRADES", f"{out.trades:,}", ""),
+            ]), unsafe_allow_html=True)
+
+            curve = pd.DataFrame({"Rule": out.portfolio}, index=out.dates)
+            if out.benchmark:
+                curve[out.benchmark_symbol] = out.benchmark
+            st.line_chart(curve, height=300, color=[ui.AMBER, ui.CYAN])
+
+            rows = [
+                ("Return p.a.", m["annual_return"], m.get("benchmark_annual_return")),
+                ("Volatility p.a.", m["volatility"], m.get("benchmark_volatility")),
+                ("Max drawdown", m["max_drawdown"], m.get("benchmark_max_drawdown")),
+                ("Deviation from index", m.get("tracking_error"), None),
+            ]
+            st.markdown(ui.grid(pd.DataFrame({
+                "metric": [r[0] for r in rows] + ["Sharpe", "Turnover p.a."],
+                "rule": [ui.pct(r[1]) for r in rows]
+                        + [ui.num(m["sharpe"]), ui.pct(out.turnover)],
+                out.benchmark_symbol or "index":
+                    [ui.pct(r[2]) if r[2] is not None else "—" for r in rows]
+                    + [ui.num(m.get("benchmark_sharpe")), "—"],
+            }), numeric=set(), ticker_col="metric"), unsafe_allow_html=True)
+
+            st.caption(
+                f"Sharpe uses a risk-free rate of {rate_l:.2%} ({rate_l_src}). Turnover "
+                "is one-way and annualised: 200% means the whole basket changed hands "
+                "twice a year, and every one of those changes paid a spread."
+            )
+            for note in out.notes:
+                st.warning(note)
+            st.warning(out.label)
+            tried = store.backtest_count(lab_spec.fingerprint(),
+                                         src.snapshot().fingerprint())
+            st.caption(
+                f"This exact rule has been tried {tried}× against this data build. A lab "
+                "has more knobs than a screen, so the count matters more here: turn "
+                "enough of them and something always looks good."
             )
 
 

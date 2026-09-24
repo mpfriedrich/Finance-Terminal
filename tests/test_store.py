@@ -149,3 +149,48 @@ def test_opening_a_missing_store_read_only_explains_itself(tmp_path):
 
     with pytest.raises(RuntimeError, match="Open the app once"):
         open_user(tmp_path / "never_created.duckdb", read_only=True)
+
+
+# --- the strategy lab lives beside the screen, not inside it -------------------------
+
+def test_the_two_chat_threads_do_not_bleed_into_each_other(store):
+    """The screen and the rule are different conversations about the same portfolio.
+    Read interleaved, both become nonsense."""
+    from portfolio_lab.lab.spec import StrategySpec
+
+    pid = store.create("Deep value")
+    store.add_message(pid, "user", "cheap small caps")
+    store.add_message(pid, "user", "50/200 crossover", kind="lab")
+
+    assert [m["text"] for m in store.messages(pid)] == ["cheap small caps"]
+    assert [m["text"] for m in store.messages(pid, kind="lab")] == ["50/200 crossover"]
+
+
+def test_a_portfolio_without_a_rule_starts_from_the_baseline(store):
+    from portfolio_lab.lab.spec import StrategySpec
+
+    pid = store.create("Deep value")
+    assert store.get_strategy(pid) == StrategySpec()
+
+
+def test_a_rule_survives_a_round_trip_with_its_fingerprint(store):
+    from portfolio_lab.lab.spec import StrategySpec
+
+    pid = store.create("Deep value")
+    rule = StrategySpec(signal="ma_cross", fast_days=20, slow_days=100,
+                        stop="trailing_stop", stop_pct=0.15)
+    store.save_strategy(pid, rule)
+    back = store.get_strategy(pid)
+    assert back == rule
+    assert back.fingerprint() == rule.fingerprint()
+
+
+def test_saving_a_rule_replaces_the_previous_one(store):
+    from portfolio_lab.lab.spec import StrategySpec
+
+    pid = store.create("Deep value")
+    store.save_strategy(pid, StrategySpec(signal="momentum"))
+    store.save_strategy(pid, StrategySpec(signal="mean_reversion"))
+    assert store.get_strategy(pid).signal == "mean_reversion"
+    assert store.con.execute(
+        "SELECT COUNT(*) FROM strategies WHERE portfolio_id = ?", [pid]).fetchone()[0] == 1

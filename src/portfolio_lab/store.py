@@ -58,21 +58,42 @@ class Store:
             "UPDATE portfolios SET spec_json = ? WHERE id = ?", [spec_to_json(spec), pid]
         )
 
-    def add_message(self, pid: str, role: str, text: str, spec: PortfolioSpec | None = None) -> None:
+    def add_message(self, pid: str, role: str, text: str,
+                    spec: PortfolioSpec | None = None, kind: str = "screen") -> None:
         self.con.execute(
-            "INSERT INTO messages (id, portfolio_id, role, text, spec_json, created_at) "
-            "VALUES (?,?,?,?,?,?)",
+            "INSERT INTO messages (id, portfolio_id, role, text, spec_json, kind, "
+            "created_at) VALUES (?,?,?,?,?,?,?)",
             [uuid.uuid4().hex[:12], pid, role, text,
-             spec_to_json(spec) if spec else None, dt.datetime.now()],
+             spec_to_json(spec) if spec else None, kind, dt.datetime.now()],
         )
 
-    def messages(self, pid: str) -> list[dict]:
+    def messages(self, pid: str, kind: str = "screen") -> list[dict]:
+        """One thread per conversation. The screen and the strategy lab are different
+        conversations about the same portfolio, and reading them interleaved would make
+        both of them nonsense."""
         rows = self.con.execute(
             "SELECT role, text, created_at FROM messages WHERE portfolio_id = ? "
-            "ORDER BY created_at",
-            [pid],
+            "AND COALESCE(kind, 'screen') = ? ORDER BY created_at",
+            [pid, kind],
         ).fetchall()
         return [{"role": r[0], "text": r[1], "at": r[2]} for r in rows]
+
+    # ---- the strategy lab --------------------------------------------------------
+    def get_strategy(self, pid: str):
+        from .lab.spec import StrategySpec, spec_from_json as strategy_from_json
+
+        row = self.con.execute(
+            "SELECT spec_json FROM strategies WHERE portfolio_id = ?", [pid]).fetchone()
+        return strategy_from_json(row[0]) if row else StrategySpec()
+
+    def save_strategy(self, pid: str, spec) -> None:
+        from .lab.spec import spec_to_json as strategy_to_json
+
+        self.con.execute("DELETE FROM strategies WHERE portfolio_id = ?", [pid])
+        self.con.execute(
+            "INSERT INTO strategies (portfolio_id, spec_json, updated_at) VALUES (?,?,?)",
+            [pid, strategy_to_json(spec), dt.datetime.now()],
+        )
 
     def backtest_count(self, spec_fingerprint: str, data_fingerprint: str) -> int:
         """How often this exact screen has been tested against this exact data build.

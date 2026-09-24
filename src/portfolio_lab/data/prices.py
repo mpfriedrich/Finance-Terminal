@@ -296,3 +296,21 @@ def rebuild_raw_closes(con: duckdb.DuckDBPyConnection) -> int:
     )
     return int(con.execute(
         "SELECT COUNT(*) FROM prices WHERE close_raw IS NOT NULL").fetchone()[0])
+
+
+def non_prices(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    """Bars whose price is zero or negative, per ticker.
+
+    Not a jump and therefore invisible to `suspicious_series`: the source carries long
+    stretches of zero adjusted closes for some names (732 consecutive days for one name
+    in this universe). A zero is not a collapse, it is an absent price — and dividing by
+    one turns a whole backtest into an infinite return, which is how this was found.
+    """
+    return con.execute(
+        """
+        SELECT ticker, COUNT(*) AS days, MIN(date) AS first, MAX(date) AS last
+        FROM prices
+        WHERE close_adj IS NOT NULL AND close_adj <= 0
+        GROUP BY ticker ORDER BY days DESC
+        """
+    ).fetch_df()
