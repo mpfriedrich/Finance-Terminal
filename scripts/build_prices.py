@@ -46,7 +46,10 @@ else:
     print(f"incremental: {len(tickers)} tickers, {start} .. {end} "
           f"(last stored {last})", flush=True)
     if start >= end:
-        print("already current; nothing to do")
+        # Prices are current, but the windows may not be: a run that failed after the
+        # download (the ticker_history key clash, 24.09.2026) left them behind.
+        history.refresh_price_windows(con)
+        print("already current; price windows refreshed")
         finish_rebuild(con, work, MARKET_DB)
         raise SystemExit(0)
 

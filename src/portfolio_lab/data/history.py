@@ -128,7 +128,8 @@ def build_ticker_history(
     }
 
 
-def refresh_price_windows(con: duckdb.DuckDBPyConnection) -> int:
+def refresh_price_windows(con: duckdb.DuckDBPyConnection,
+                          own_transaction: bool = True) -> int:
     """Rewrite the `observed_prices` rows from the bars currently stored.
 
     The second source: the bars we actually hold. Same symbol as the filing rows,
@@ -137,16 +138,29 @@ def refresh_price_windows(con: duckdb.DuckDBPyConnection) -> int:
     `universe_at` reads these windows: left at the date of the last Phase 7 build, every
     name would drop out of today's universe ten days later.
     """
-    con.execute("DELETE FROM ticker_history WHERE source = ?", [SOURCE_PRICES])
-    con.execute(
-        """
-        INSERT INTO ticker_history (cik, ticker, valid_from, valid_to, source)
-        SELECT s.cik, p.ticker, p.lo, p.hi, ?
-        FROM (SELECT ticker, MIN(date) lo, MAX(date) hi FROM prices GROUP BY 1) p
-        JOIN securities s ON s.ticker = p.ticker
-        """,
-        [SOURCE_PRICES],
-    )
+    # One transaction: a failure after the DELETE must not leave the store without
+    # windows, which would quietly switch the universe back to today's survivors. A
+    # caller already inside its own transaction (the paid-source build) passes
+    # own_transaction=False; DuckDB does not nest them.
+    if own_transaction:
+        con.execute("BEGIN")
+    try:
+        con.execute("DELETE FROM ticker_history WHERE source = ?", [SOURCE_PRICES])
+        con.execute(
+            """
+            INSERT INTO ticker_history (cik, ticker, valid_from, valid_to, source)
+            SELECT s.cik, p.ticker, p.lo, p.hi, ?
+            FROM (SELECT ticker, MIN(date) lo, MAX(date) hi FROM prices GROUP BY 1) p
+            JOIN securities s ON s.ticker = p.ticker
+            """,
+            [SOURCE_PRICES],
+        )
+        if own_transaction:
+            con.execute("COMMIT")
+    except Exception:
+        if own_transaction:
+            con.execute("ROLLBACK")
+        raise
     return con.execute(
         "SELECT COUNT(*) FROM ticker_history WHERE source = ?", [SOURCE_PRICES]
     ).fetchone()[0]
