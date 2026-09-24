@@ -127,6 +127,19 @@ def has_intraday_range(px: pd.DataFrame) -> bool:
     return bool(both.sum() >= 2)
 
 
+def reporting_currency(con: duckdb.DuckDBPyConnection, cik: int) -> str:
+    """The currency this filer's amounts are stored in — 'USD' for domestic filers.
+
+    The history tables show figures as filed, in this currency; only the screen and the
+    valuation convert to dollars, at the rate of their date.
+    """
+    row = con.execute(
+        "SELECT arg_max(currency, filed) FROM fundamentals "
+        "WHERE cik = ? AND currency IS NOT NULL", [cik],
+    ).fetchone()
+    return (row[0] if row and row[0] else "USD")
+
+
 def annual_history(con: duckdb.DuckDBPyConnection, cik: int) -> pd.DataFrame:
     """One row per fiscal year, as first reported.
 
@@ -258,14 +271,35 @@ def valuation_history(
         return pd.DataFrame()
     px["date"] = pd.to_datetime(px["date"])
 
+    # A foreign filer: its figures are in its own currency and its share count is in
+    # ordinary shares, while the price is in dollars per LISTED share. Both have to be
+    # put on the price's basis, or a Toyota-style ADR shows a multiple ten times too
+    # high. Without a rate or a measured ratio, no multiple rather than a wrong one.
+    from .data import listing, pit
+
+    currency = reporting_currency(con, cik)
+    form = con.execute(
+        "SELECT arg_max(form, filed) FROM fundamentals WHERE cik = ? AND form IS NOT NULL",
+        [cik]).fetchone()
+    ratio = 1.0
+    if form and form[0] in listing.FOREIGN_FORMS:
+        ratio = listing.stored_ratios(con).get(ticker.upper())
+        if ratio is None:
+            return pd.DataFrame()
+
     rows = []
     for r in hist.itertuples():
         target = pd.Timestamp(year=int(r.year), month=12, day=31)
         near = px[px.date <= target]
         if near.empty or pd.isna(r.shares_outstanding):
             continue
+        fx = pit.fx_to_usd(con, [currency], target.date()).get(currency)
+        if fx is None:
+            continue
+        r = r._replace(net_income=r.net_income * fx, book_value=r.book_value * fx,
+                       revenue=r.revenue * fx)
         price = near.iloc[-1].close
-        cap = price * r.shares_outstanding
+        cap = price * r.shares_outstanding / ratio
         rows.append({
             "year": int(r.year), "price": price, "market_cap": cap,
             "price_to_earnings": cap / r.net_income if r.net_income and r.net_income > 0 else np.nan,

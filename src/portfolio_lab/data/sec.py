@@ -98,9 +98,47 @@ TAG_MAP: dict[str, list[tuple[str, str, str]]] = {
     ],
 }
 
+# IFRS equivalents, for the foreign private issuers that file 20-F under IFRS (added
+# 2026-09-24). Appended AFTER the US-GAAP candidates: a filer reports in one taxonomy,
+# so the ranks never compete. Chosen from the IFRS taxonomy by concept, NOT yet measured
+# against the archive — `measure_coverage()` is the check, per metric and per year.
+IFRS_CANDIDATES: dict[str, list[tuple[str, str]]] = {
+    "book_value": [('ifrs-full', 'EquityAttributableToOwnersOfParent'), ('ifrs-full', 'Equity')],
+    "revenue": [('ifrs-full', 'Revenue'), ('ifrs-full', 'RevenueFromContractsWithCustomers')],
+    "net_income": [('ifrs-full', 'ProfitLossAttributableToOwnersOfParent'), ('ifrs-full', 'ProfitLoss')],
+    "operating_cash_flow": [('ifrs-full', 'CashFlowsFromUsedInOperatingActivities')],
+    "total_assets": [('ifrs-full', 'Assets')],
+    "total_liabilities": [('ifrs-full', 'Liabilities')],
+    "long_term_debt": [('ifrs-full', 'NoncurrentPortionOfNoncurrentBorrowings'), ('ifrs-full', 'LongtermBorrowings')],
+    "current_debt": [('ifrs-full', 'CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings'), ('ifrs-full', 'CurrentPortionOfLongtermBorrowings'), ('ifrs-full', 'ShorttermBorrowings')],
+    "cash": [('ifrs-full', 'CashAndCashEquivalents')],
+    "current_assets": [('ifrs-full', 'CurrentAssets')],
+    "current_liabilities": [('ifrs-full', 'CurrentLiabilities')],
+    "capex": [('ifrs-full', 'PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities'), ('ifrs-full', 'PurchaseOfPropertyPlantAndEquipment')],
+}
+for _metric, _candidates in IFRS_CANDIDATES.items():
+    TAG_MAP[_metric] = TAG_MAP[_metric] + [(tax, tag, "USD") for tax, tag in _candidates]
+
+# In TAG_MAP, "USD" means "an amount of money": the unit actually accepted is any ISO
+# currency code. Until 2026-09-24 only USD was read, so every filer reporting in euros,
+# yen or rupees had no fundamentals at all, US-GAAP 20-F filers included. The amounts
+# stay in the reporting currency here; pit.py converts them at the rate of the screen
+# date, which is the only rate an investor on that date could have used.
+MONEY = "USD"
+
+
+def _unit_kind(unit: str) -> str | None:
+    """'shares', 'money' (any three-letter currency code), or None (per-share etc.)."""
+    if unit == "shares":
+        return "shares"
+    if len(unit) == 3 and unit.isalpha() and unit.isupper():
+        return "money"
+    return None
+
+
 # Reverse index so one pass over a filer's facts can classify every tag it meets.
 _TAG_LOOKUP: dict[tuple[str, str, str], tuple[str, int]] = {
-    (tax, tag, unit): (metric, rank)
+    (tax, tag, "money" if unit == MONEY else unit): (metric, rank)
     for metric, candidates in TAG_MAP.items()
     for rank, (tax, tag, unit) in enumerate(candidates)
 }
@@ -148,14 +186,22 @@ def extract_rows(doc: dict) -> list[tuple]:
     if cik is None or not facts:
         return []
 
-    # (metric, period_start, period_end, value) -> (filed, accession, tag, rank)
+    currency = reporting_currency(facts)
+
+    # (metric, period_start, period_end, value) -> (filed, accession, tag, rank, form)
     best: dict[tuple, tuple] = {}
 
     for taxonomy, tags in facts.items():
         for tag, payload in tags.items():
             for unit, entries in (payload.get("units") or {}).items():
-                hit = _TAG_LOOKUP.get((taxonomy, tag, unit))
+                kind = _unit_kind(unit)
+                hit = _TAG_LOOKUP.get((taxonomy, tag, kind)) if kind else None
                 if hit is None:
+                    continue
+                # One currency per filer. Some foreign filers also tag convenience
+                # translations of the same figure in USD; keeping both would put two
+                # values for one period side by side, in different units.
+                if kind == "money" and unit != currency:
                     continue
                 metric, rank = hit
                 for e in entries:
@@ -174,20 +220,36 @@ def extract_rows(doc: dict) -> list[tuple]:
                     key = (metric, start, end, float(val))
                     prev = best.get(key)
                     if prev is None or filed < prev[0]:
-                        best[key] = (filed, e.get("accn") or "", tag, rank)
+                        best[key] = (filed, e.get("accn") or "", tag, rank,
+                                     e.get("form"))
 
     # Where two candidate tags produced the same period, keep the higher-priority tag.
     by_period: dict[tuple, tuple] = {}
-    for (metric, start, end, val), (filed, accn, tag, rank) in best.items():
+    for (metric, start, end, val), (filed, accn, tag, rank, form) in best.items():
         k = (metric, start, end, filed)
         prev = by_period.get(k)
-        if prev is None or rank < prev[-1]:
-            by_period[k] = (val, accn, tag, rank)
+        if prev is None or rank < prev[3]:
+            by_period[k] = (val, accn, tag, rank, form)
 
     return [
-        (int(cik), metric, val, start, end, filed, accn, tag, rank)
-        for (metric, start, end, filed), (val, accn, tag, rank) in by_period.items()
+        (int(cik), metric, val, start, end, filed, accn, tag, rank,
+         None if metric == "shares_outstanding" else currency, form)
+        for (metric, start, end, filed), (val, accn, tag, rank, form) in by_period.items()
     ]
+
+
+def reporting_currency(facts: dict) -> str | None:
+    """The currency a filer reports its amounts in: the one most of its tracked
+    monetary facts use. None when it tags no monetary fact we read."""
+    counts: dict[str, int] = defaultdict(int)
+    for taxonomy, tags in facts.items():
+        for tag, payload in tags.items():
+            for unit, entries in (payload.get("units") or {}).items():
+                if _unit_kind(unit) == "money" and (taxonomy, tag, "money") in _TAG_LOOKUP:
+                    counts[unit] += len(entries)
+    if not counts:
+        return None
+    return max(sorted(counts), key=lambda c: counts[c])
 
 
 def ingest(
@@ -208,6 +270,8 @@ def ingest(
         "accession",
         "xbrl_tag",
         "tag_rank",
+        "currency",
+        "form",
     ]
     con.execute("DELETE FROM fundamentals;")
 
@@ -221,9 +285,10 @@ def ingest(
         con.register("_incoming", frame)
         con.execute(
             "INSERT INTO fundamentals "
-            "(cik, metric, value, period_start, period_end, filed, accession, xbrl_tag, tag_rank) "
-            "SELECT cik, metric, value, period_start, period_end, filed, accession, xbrl_tag, tag_rank "
-            "FROM _incoming"
+            "(cik, metric, value, period_start, period_end, filed, accession, xbrl_tag, "
+            "tag_rank, currency, form) "
+            "SELECT cik, metric, value, period_start, period_end, filed, accession, "
+            "xbrl_tag, tag_rank, currency, form FROM _incoming"
         )
         con.unregister("_incoming")
         buffer.clear()

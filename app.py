@@ -1336,6 +1336,12 @@ with tab_research:
             # -------------------------------------------------------------- financials
             with sections[1]:
                 hist = rs.annual_history(src.con, cik)
+                filed_in = rs.reporting_currency(src.con, cik)
+                if filed_in != "USD":
+                    st.caption(
+                        f"Figures below are in {filed_in}, as filed. The screen and the "
+                        "valuation convert them to USD at the exchange rate of their date."
+                    )
                 if hist.empty:
                     st.info("No annual XBRL figures for this filer.")
                 else:

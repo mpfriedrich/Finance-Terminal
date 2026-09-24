@@ -85,6 +85,11 @@ def data_sheet(con: duckdb.DuckDBPyConnection, ticker: str, cik: int,
         }
     else:
         sheet["valuation_now"] = "missing: the company is not in today's screening frame"
+    # History tables are in the filer's own currency; valuation_now is in USD. Said in
+    # the sheet, so the summary cannot set euros against a dollar price.
+    sheet["reporting_currency"] = rs.reporting_currency(con, cik)
+    sheet["units"] = ("valuation_now in USD; annual_as_first_filed, quarterly_trend and "
+                      "restatements in reporting_currency")
     sheet["annual_as_first_filed"] = _records(rs.annual_history(con, cik), limit=6)
     sheet["quarterly_trend"] = _records(rs.quarterly_trend(con, cik, quarters=8))
     sheet["restatements"] = _records(rs.restatements(con, cik), limit=10)

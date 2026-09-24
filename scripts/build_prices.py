@@ -54,6 +54,12 @@ else:
         raise SystemExit(0)
 
 stats = px.fetch_into_store(con, tickers, start, end)
+# Exchange rates for the foreign filers (scripts/build_fx.py stored their history);
+# kept current here, or every screen after ten days would lose them as stale.
+fx_symbols = [r[0] for r in con.execute(
+    "SELECT DISTINCT ticker FROM prices WHERE ticker LIKE '%USD=X'").fetchall()]
+if fx_symbols:
+    px.fetch_into_store(con, fx_symbols, start, end)
 universe.observed_ranges(con)
 # ticker_history's price windows are what the universe is read from; keep them current.
 history.refresh_price_windows(con)

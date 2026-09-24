@@ -158,7 +158,7 @@ def build_screening_frame(
     screener can be driven by ANY source that implements the protocol, including the
     fixture, and the identical test series runs against both (PLAN.md Phase 2).
     """
-    from . import industry
+    from . import industry, listing
 
     uni = source.universe(asof)
     if uni.empty:
@@ -210,4 +210,5 @@ def build_screening_frame(
         out["trading_days_60"] = float("nan")
     if "data_age_days" not in out.columns:
         out["data_age_days"] = float("nan")
+    out = listing.apply(out, getattr(source, "con", None))
     return industry.add_industry_group(out)

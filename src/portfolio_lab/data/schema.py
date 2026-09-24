@@ -138,6 +138,24 @@ MARKET_MIGRATIONS: list[str] = [
         PRIMARY KEY (measured_at)
     );
     """,
+    # 018 — the currency a monetary fact is reported in (NULL = USD, and always NULL for
+    # share counts) and the form it came from. Until now only USD facts were read, so
+    # every filer reporting in another currency had no fundamentals; the form tells a
+    # foreign private issuer (20-F, 40-F) from a domestic one, which matters because
+    # its US listing is often an ADR whose ratio the filing does not state.
+    "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS currency VARCHAR;",
+    "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS form VARCHAR;",
+    # 019 — ordinary shares per US-listed share for foreign filers (listing.py). Not in
+    # the SEC data; measured by scripts/build_listing_ratios.py or set by hand.
+    """
+    CREATE TABLE IF NOT EXISTS listing_ratios (
+        ticker       VARCHAR PRIMARY KEY,
+        ratio        DOUBLE,
+        source       VARCHAR NOT NULL,
+        measured_on  DATE    NOT NULL,
+        detail       VARCHAR
+    );
+    """,
     # 017 — ticker_history's key gains the source. Without it a filing window and a
     # price window starting on the same day collided (Nutrien: first 10-K and first bar
     # both 2018-01-02), and every price build after the Phase 7 build failed. DuckDB

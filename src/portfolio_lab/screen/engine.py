@@ -251,6 +251,16 @@ def run_screen(
 
     max_age = spec.max_filing_age_months * 31
     drop(data["price"].notna(), "no current price")
+    # Foreign filers (added 2026-09-24): an amount in a currency with no exchange rate on
+    # the screen date cannot be compared with a dollar price, and a US listing whose
+    # ADR ratio is unknown has no honest market cap. Each is its own reason, so the
+    # screen says why a name is missing instead of pricing it wrong.
+    if "fx_missing" in data.columns:
+        drop(~data["fx_missing"].fillna(False).astype(bool),
+             "no exchange rate for the reporting currency")
+    if "listing_ratio_unknown" in data.columns:
+        drop(~data["listing_ratio_unknown"].fillna(False).astype(bool),
+             "foreign listing: ADR ratio not measured")
     # The column can be absent entirely on a date before anything was filed, which is a
     # universe where nothing is eligible — not an error, and not a crash.
     if "shares_outstanding" not in data.columns:

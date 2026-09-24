@@ -665,6 +665,42 @@ Total Return. Was dabei gemessen statt angenommen wurde:
 liegen 2010–2026 vor, für die Einzelaktien nicht. Ein tieferer Kursdownload ist eine
 Entscheidung über Zeit und Datenmenge, keine Programmieraufgabe.
 
+## Weltmarkt, Stufe 1 — ausländische Filer der SEC (24.09.2026, Cloud-Sitzung)
+
+Auf Wunsch des Nutzers, als erster Schritt Richtung Weltmarkt. Bis hierhin las
+`sec.py` nur Beträge **in USD unter US-GAAP-Tags**: jede Firma, die in Euro, Yen oder
+Rupien berichtet — auch US-GAAP-Filer mit 20-F — und jede IFRS-Firma hatte **gar keine**
+Fundamentaldaten. Jetzt:
+
+* **Einlesen** (`sec.py`): IFRS-Tags je Kennzahl (nach Konzept gewählt, noch nicht gegen
+  das Archiv gemessen — `measure_coverage()` ist die Prüfung), Beträge in jeder
+  ISO-Währung; je Filer eine Berichtswährung (die der meisten Fakten), damit
+  Convenience-Übersetzungen nicht als zweiter Wert daneben stehen. Neue Spalten
+  `fundamentals.currency` und `.form`.
+* **Umrechnung zum Stichtag** (`pit.to_usd`): Geldwerte werden zum Kurs des
+  Screening-Datums in USD umgerechnet (`{CUR}USD=X`, höchstens 10 Tage alt), nie zu einem
+  späteren. Ohne Kurs: keine Beträge, eigener Ausschlussgrund
+  „no exchange rate for the reporting currency“. Kurse: `scripts/build_fx.py` einmal,
+  danach frischt `build_prices.py` sie täglich auf.
+* **ADR-Verhältnis** (`data/listing.py`, Tabelle `listing_ratios`): Filer mit 20-F/40-F
+  melden Originalaktien, ihr US-Kurs gilt je ADR (Toyota: 1 ADR = 10 Aktien) — ohne
+  Korrektur wäre der Börsenwert zehnfach zu hoch. `scripts/build_listing_ratios.py`
+  misst das Verhältnis über Yahoo (SEC-Aktien / Yahoo-Aktien) und übernimmt es nur nahe
+  einem üblichen Verhältnis; `--set TICKER=VERHÄLTNIS` setzt es von Hand. Ohne
+  gemessenes Verhältnis: eigener Ausschlussgrund „foreign listing: ADR ratio not
+  measured“. **Yahoo ist dafür keine Primärquelle** — die Liste der Verhältnisse ≠ 1
+  nach dem Lauf ansehen.
+* Beide Wege zum Screening-Rahmen wenden das gleich an (Test). Die Bewertungshistorie im
+  RESEARCH-Reiter ebenso (Kurs zum Jahresende, Verhältnis); die Tabellen dort zeigen
+  Beträge wie gemeldet und nennen die Währung. `CACHE_VERSION` → `v7`.
+* **Ungemessen:** wie viele Filer dazukommen, wie viele Verhältnisse sich auflösen. Das
+  zeigt der lokale Lauf (unten). Bestehende Daten ohne Währungsangabe gelten als USD —
+  bis zum Neuaufbau ändert sich also nichts.
+
+**Lokal ausführen, in dieser Reihenfolge:** `scripts/build_fundamentals.py` (Neuaufbau,
+zeigt am Ende die Filer je Währung), `scripts/build_fx.py`,
+`scripts/build_listing_ratios.py`, dann `scripts/warm_pit_cache.py`.
+
 ## Nachtrag 24.09.2026 (Cloud-Sitzung) — Papierdepots, Einzeltitel-Regeln, Chart
 
 Auf Zuruf des Nutzers, außerhalb der Phasenliste:

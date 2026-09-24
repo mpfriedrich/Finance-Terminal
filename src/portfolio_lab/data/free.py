@@ -14,7 +14,7 @@ import json
 import duckdb
 import pandas as pd
 
-from . import history, industry, pit, prices as px
+from . import history, industry, listing, pit, prices as px
 from .base import Snapshot
 
 TABLES = ("securities", "fundamentals", "prices", "ticker_history", "shares_outstanding")
@@ -144,6 +144,7 @@ class FreeSource:
         # 400 days after the only filing.
         if "data_age_days" not in out.columns:
             out["data_age_days"] = float("nan")
+        out = listing.apply(out, self.con)
         # The SEC wording stays in `sector`; `industry_group` is the coarse, typeable
         # version of the same fact. Both travel with the row so the screen can filter on
         # one and still show the other.

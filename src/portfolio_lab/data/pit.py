@@ -283,6 +283,84 @@ def ttm_values(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
+FOREIGN_FORMS = ("20-F", "40-F")
+
+# Amounts that carry a currency and are converted to USD; share counts and ages do not.
+MONEY_FIELDS = tuple(INSTANT_METRICS) + tuple(f"{m}_ttm" for m in DURATION_METRICS)
+
+# A rate older than this on the screen date is not today's rate.
+FX_MAX_AGE_DAYS = 10
+
+
+def fx_symbol(currency: str) -> str:
+    """The price-store symbol of a currency against the dollar: USD per one unit."""
+    return f"{currency}USD=X"
+
+
+def reporting_currencies(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFrame:
+    """cik -> the currency of the filer's latest monetary fact visible on `asof`.
+
+    A filer that switches reporting currency (it happens after a redomiciling) is read in
+    the currency of what it filed most recently, as an investor then would have.
+    """
+    return con.execute(
+        """
+        SELECT cik, arg_max(currency, filed) AS currency
+        FROM fundamentals
+        WHERE filed <= ? AND currency IS NOT NULL
+        GROUP BY cik
+        """,
+        [asof],
+    ).fetch_df()
+
+
+def fx_to_usd(con: duckdb.DuckDBPyConnection, currencies, asof: dt.date) -> dict:
+    """USD per unit of each currency, at the last close on or before `asof` and no older
+    than FX_MAX_AGE_DAYS. A currency without such a rate is absent from the result."""
+    rates = {"USD": 1.0}
+    wanted = sorted({c for c in currencies if c and c != "USD"})
+    if not wanted:
+        return rates
+    rows = con.execute(
+        """
+        SELECT ticker, arg_max(close, date) AS rate, MAX(date) AS on_date
+        FROM prices
+        WHERE ticker IN (SELECT UNNEST(?)) AND date <= ? AND date >= ? AND close > 0
+        GROUP BY ticker
+        """,
+        [[fx_symbol(c) for c in wanted], asof,
+         asof - dt.timedelta(days=FX_MAX_AGE_DAYS)],
+    ).fetchall()
+    by_symbol = {r[0]: float(r[1]) for r in rows}
+    for c in wanted:
+        if fx_symbol(c) in by_symbol:
+            rates[c] = by_symbol[fx_symbol(c)]
+    return rates
+
+
+def to_usd(wide: pd.DataFrame, con: duckdb.DuckDBPyConnection,
+           asof: dt.date) -> pd.DataFrame:
+    """Convert every amount to USD at the rate of the screen date.
+
+    The rate of the screen date, not of the filing date: a balance sheet in euros is
+    worth what those euros buy in dollars on the day the screen compares it with a
+    dollar price — and it is the only rate an investor on that day could have used.
+    A filer whose currency has no rate keeps no amounts and is flagged, never mixed.
+    """
+    if wide.empty:
+        return wide
+    cur = reporting_currencies(con, asof)
+    wide = wide.merge(cur, on="cik", how="left")
+    wide["currency"] = wide["currency"].fillna("USD")
+    rates = fx_to_usd(con, wide["currency"].unique(), asof)
+    rate = wide["currency"].map(rates)
+    wide["fx_missing"] = rate.isna()
+    for field in MONEY_FIELDS:
+        if field in wide.columns:
+            wide[field] = wide[field] * rate
+    return wide.rename(columns={"currency": "reporting_currency"})
+
+
 def fundamentals_wide(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFrame:
     """One row per filer: book_value, shares_outstanding, net_income_ttm, revenue_ttm,
     operating_cash_flow_ttm, plus the age of the oldest input used."""
@@ -314,4 +392,13 @@ def fundamentals_wide(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataF
     out = wide.join(ages)
     if not methods.empty:
         out = out.join(methods)
-    return out.reset_index()
+    out = to_usd(out.reset_index(), con, asof)
+    # Which filers are foreign private issuers, by the form of their latest filing:
+    # their US listing may be an ADR, and listing.apply needs to know.
+    forms = con.execute(
+        "SELECT cik, arg_max(form, filed) AS form FROM fundamentals "
+        "WHERE filed <= ? AND form IS NOT NULL GROUP BY cik", [asof],
+    ).fetch_df()
+    out = out.merge(forms, on="cik", how="left")
+    out["foreign_filer"] = out.pop("form").isin(FOREIGN_FORMS)
+    return out

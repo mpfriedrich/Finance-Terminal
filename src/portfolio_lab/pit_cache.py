@@ -39,7 +39,8 @@ import pandas as pd
 # v4: the universe is read from ticker_history, and the frame always has data_age_days.
 # v5: the first filing of a period speaks for it across tags, not per tag.
 # v6: first filing is found before the age limit is applied.
-CACHE_VERSION = "v6"
+# v7: foreign filers — amounts converted to USD, shares on the listed-share basis.
+CACHE_VERSION = "v7"
 
 
 def _build_id(fingerprint: str) -> str:
