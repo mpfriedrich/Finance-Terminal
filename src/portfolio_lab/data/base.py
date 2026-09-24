@@ -113,3 +113,88 @@ class DataSource(Protocol):
         reassuring silence (PLAN.md Phase 7, <50% branch).
         """
         ...
+
+    def screening_frame(self, asof: dt.date) -> pd.DataFrame:
+        """One row per security with everything a screen needs.
+
+        Columns: ticker, cik, name, sector, industry_group, exchange, price,
+        median_dollar_volume_60d, data_age_days, plus whatever fundamental fields the
+        source can supply (book_value, net_income_ttm, shares_outstanding, ...).
+
+        `build_screening_frame` below assembles exactly this from the three primitives
+        above, so a source gets it for free. A source may override it with a faster
+        query, in which case the equivalence is a test, not a hope.
+        """
+        ...
+
+
+def wide_from_long(facts: pd.DataFrame, asof: dt.date) -> pd.DataFrame:
+    """Long point-in-time facts -> one row per filer, plus the age of its latest filing.
+
+    MIN age, not max: the question the freshness floor asks is "has this company reported
+    recently", so the most recent filing decides. Taking the oldest metric's age instead
+    marks a company stale because one slow-moving annual figure lags (PLAN.md R14).
+    """
+    if facts.empty:
+        return pd.DataFrame(columns=["cik", "data_age_days"])
+    wide = facts.pivot_table(index="cik", columns="metric", values="value", aggfunc="last")
+    age = (pd.to_datetime(asof) - pd.to_datetime(facts["filed"])).dt.days
+    ages = age.groupby(facts["cik"]).min().rename("data_age_days")
+    return wide.join(ages).reset_index()
+
+
+def build_screening_frame(
+    source: "DataSource",
+    asof: dt.date,
+    volume_sessions: int = 60,
+    lookback_days: int = 1825,
+) -> pd.DataFrame:
+    """The reference screening frame, built only from the seam's own primitives.
+
+    This is what makes "the data layer is exchangeable" a fact rather than a claim: the
+    screener can be driven by ANY source that implements the protocol, including the
+    fixture, and the identical test series runs against both (PLAN.md Phase 2).
+    """
+    from . import industry
+
+    uni = source.universe(asof)
+    if uni.empty:
+        return uni
+    facts = source.fundamentals(asof)
+    # A source may already answer wide (one row per filer). Both shapes are accepted
+    # because the pivot is the only difference, and refusing one would mean two code
+    # paths in every caller instead of one here.
+    wide = wide_from_long(facts, asof) if "metric" in facts.columns else facts
+
+    # The lookback is deliberately long. Liquidity is the median of the last
+    # `volume_sessions` SESSIONS, not of the sessions inside some calendar window: a name
+    # that trades four days a year would otherwise be measured over four bars here and
+    # over sixty there, and the two builders would disagree about who is tradable.
+    # (That such a name passes a liquidity floor at all is a separate problem, recorded
+    # in PLAN.md rather than quietly fixed by a windowing choice.)
+    bars = source.prices(
+        list(uni.ticker.astype(str)),
+        asof - dt.timedelta(days=lookback_days),
+        asof,
+    )
+    if bars.empty:
+        last_px = pd.DataFrame(columns=["ticker", "price"])
+        liquidity = pd.DataFrame(columns=["ticker", "median_dollar_volume_60d"])
+    else:
+        bars = bars[pd.to_datetime(bars.date) <= pd.to_datetime(asof)].sort_values("date")
+        last_px = (bars.groupby("ticker", as_index=False)
+                       .last()[["ticker", "close"]]
+                       .rename(columns={"close": "price"}))
+        recent = bars.groupby("ticker").tail(volume_sessions).copy()
+        recent["dollar_volume"] = recent["close"] * recent["volume"]
+        liquidity = (recent.groupby("ticker")["dollar_volume"].median()
+                           .rename("median_dollar_volume_60d").reset_index())
+
+    out = uni
+    if not wide.empty:
+        out = out.merge(wide, on="cik", how="left")
+    out = out.merge(last_px, on="ticker", how="left")
+    out = out.merge(liquidity, on="ticker", how="left")
+    if "data_age_days" not in out.columns:
+        out["data_age_days"] = float("nan")
+    return industry.add_industry_group(out)

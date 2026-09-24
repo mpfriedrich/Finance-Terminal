@@ -18,7 +18,7 @@ import datetime as dt
 import numpy as np
 import pandas as pd
 
-from .base import Snapshot
+from .base import Snapshot, build_screening_frame
 
 _D = dt.date
 
@@ -126,6 +126,15 @@ class FixtureSource:
         df = self._prices
         m = df.ticker.isin(tickers) & (df.date >= start) & (df.date <= end)
         return df.loc[m].reset_index(drop=True)
+
+    def screening_frame(self, asof: dt.date) -> pd.DataFrame:
+        """Built by the shared reference assembler, not by a private path.
+
+        That is the point of the fixture: the screener meets it through exactly the same
+        construction it meets the live source through, so the test series proves the seam
+        instead of proving that two different builders happen to agree (PLAN.md Phase 2).
+        """
+        return build_screening_frame(self, asof)
 
     @property
     def survivorship_free(self) -> bool:

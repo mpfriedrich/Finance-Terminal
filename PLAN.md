@@ -263,6 +263,12 @@ Grundhaltung: **laut scheitern**. Eine klare Fehlermeldung ist besser als eine G
 
 ## Open Items (nichts blockiert den Baubeginn)
 
+* **Handelsfrequenz als eigene Grenze (24.09.2026).** Die Liquiditätsgrenze prüft die Höhe
+  des Umsatzes, nicht seine Regelmäßigkeit. Vorschlag: eine Mindestzahl an Handelstagen im
+  Fenster verlangen (etwa 40 der letzten 60 Sitzungen) und die Ausgeschlossenen, wie alle
+  anderen Grenzen, getrennt zählen und anzeigen. Ändert die Ergebnisse bestehender
+  Screens, deshalb eine Entscheidung des Nutzers und keine stille Korrektur.
+
 **Geklärt in Q7 (user):** „cap to price max 1/1" heißt **price to profit**, also Kurs-Gewinn-Verhältnis ≤ 1. Das Feld ist im Kennzahlen-Vokabular bereits vorhanden; die zugehörigen XBRL-Merkmale lädt Phase 1 mit. **Oberflächensprache ist Englisch.** Hinweis ohne Handlungsbedarf: ein KGV ≤ 1 ist ein extrem enger Filter, der in vielen Quartalen null oder sehr wenige Treffer liefert — die App zeigt dafür die Aufschlüsselung, wie viele Titel jeder Filter **einzeln** übrig ließe, sodass sofort sichtbar ist, welcher Filter beißt.
 
 **Vier Restschwächen, die der unabhängige Prüfer stehen ließ — sie sind nicht behoben, sondern benannt:**
@@ -335,14 +341,30 @@ zwei aufeinander aufbauende Nachrichten, Zurückweisung erfundener Kriterien, Gr
 gegen Chat-Zugriff geschützt), **Phase 4** (läuft; die Abnahme selbst und damit `[A3]`
 gehört dem Nutzer, sie ist nicht erteilt).
 
-**Phase 2 bleibt offen, und zwar an genau einem Kriterium.** Screener, Grenzen, 0-Treffer-
-Aufschlüsselung und die getrennt gezählten Ausschlüsse sind da und getestet. Was fehlt,
-ist der Satz, auf den es in dieser Phase ankommt: *dieselbe* Testreihe gegen `FreeSource`
-**und** `FixtureSource`. Tatsächlich prüft `tests/test_seam.py` die Schnittstelle und die
-Fallen des Fixtures, während `tests/test_screen.py` gegen von Hand gebaute Rahmen läuft —
-der Screener sieht `FixtureSource` nie von Ende zu Ende, weil `screening_frame()` nur auf
-`FreeSource` existiert. Die Austauschbarkeit der Datenschicht ist damit behauptet, nicht
-bewiesen.
+**Phase 2 ist seit dem 24.09.2026 abgeschlossen.** Das offene Kriterium war der Satz, auf
+den es in dieser Phase ankommt: *dieselbe* Testreihe gegen `FreeSource` **und**
+`FixtureSource`. Zuvor prüfte `tests/test_seam.py` nur die Schnittstelle, `test_screen.py`
+lief gegen von Hand gebaute Rahmen, und der Screener sah das Fixture nie von Ende zu Ende,
+weil `screening_frame()` allein auf `FreeSource` existierte. Umgesetzt:
+
+* `base.build_screening_frame()` baut den Screening-Rahmen **nur aus den drei Primitiven
+  der Schnittstelle** (`universe`, `fundamentals`, `prices`). Jede Quelle, die das
+  Protokoll erfüllt, bekommt den Rahmen damit geschenkt; `FixtureSource` nutzt genau ihn.
+* `tests/test_screener_contract.py` schreibt die Zusicherungen **einmal** und lässt sie
+  über beide Quellen laufen: Spaltenvertrag, abgeleitete Kennzahlen gegen ihre Rohwerte,
+  vollständig abgerechnete Ausschlüsse (`Summe der Ausschlüsse == Universum − zulässig`),
+  Frischegrenze, 0-Treffer mit Aufschlüsselung, Sortierung, Branchenfilter, Gewichte,
+  und dass kein Fakt aus der Zukunft in den Rahmen gerät.
+* `FreeSource` behält seine schnelle SQL-Fassung — aber ein Test vergleicht sie über alle
+  5.363 Titel mit der Referenz und verlangt Gleichheit auf 1e-9 bei Kurs, Liquidität und
+  Datenalter. Die Abkürzung ist damit überwacht statt gehofft.
+
+**Dabei aufgefallen (offen, nicht behoben): die Liquiditätsgrenze misst nicht, wie oft ein
+Titel überhaupt handelt.** Der Vergleich der beiden Bauweisen wich anfangs bei genau drei
+Titeln ab — BRR, HWH, CSAN. Alle drei haben im letzten Jahr **vier Handelstage**. Die
+Grenze nimmt den Median von 60 Bars, gleich wie alt sie sind; ein Titel, der an vier Tagen
+je über 1 Mio. USD umsetzt und danach 361 Tage gar nicht, besteht sie. R15 will genau
+solche Titel fernhalten, und tut es hier nicht. Ein Vorschlag steht unter Open Items.
 
 **Phasen 5 bis 10 sind unangetastet.** Es gibt keinen Rückblick-Backtest, kein
 Kostenmodell, keine Kennzahlentabelle gegen synthetische Reihen, kein `backtest_runs`,
@@ -421,7 +443,7 @@ Aufbau auf einer Kopie hätte gegen die alte Tabelle geschrieben und wäre gesch
       - Bei Fehlschlag hier anhalten und die Ausweichoption aus `[A4]`/`[A5]`/`[A11]` ziehen, bevor weitergebaut wird
       **Covers:** Datengrundlage für R4, R13; prüft A4, A5, A9, A11, A19, A20
 
-- [ ] **Phase 2: Spezifikation und Screener, ohne Sprachmodell** — *offen nur am Doppellauf der Testreihe gegen beide Datenquellen; siehe Stand 24.09.2026*
+- [x] **Phase 2: Spezifikation und Screener, ohne Sprachmodell**
       **Done when:** eine von Hand geschriebene Spezifikation liefert 10 Titel mit allen Filterwerten; **dieselbe Testreihe läuft grün gegen `FreeSource` und gegen `FixtureSource`** — das ist der eigentliche Beweis, dass die Datenschicht austauschbar ist; zu enger Filter erzeugt den 0-Treffer-Hinweis mit Aufschlüsselung je Filter; Ausschlüsse wegen fehlender Daten, Datenalter und Liquidität werden getrennt gezählt und ausgewiesen.
       **Steps:**
       - `PortfolioSpec`: Filter, Sortierregel, Anzahl, Gewichtung, Umschichtung, Mindestkurs, Mindestvolumen, Frischegrenze
