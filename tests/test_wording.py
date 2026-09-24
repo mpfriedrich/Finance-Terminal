@@ -92,3 +92,26 @@ def test_the_footer_disclaimer_is_still_on_screen():
     assert "places no orders" in rendered
     assert "connects to no broker" in rendered
     assert "recommends no security" in rendered
+
+
+# --- the chat log is a sink, and text put into it is escaped --------------------------
+
+def test_the_conversation_log_escapes_what_it_renders():
+    """Everything in the log came from a text box or from a model, and it is rendered
+    with unsafe_allow_html. Escaping at the sink is the only place that can be relied
+    on — not the tool schema, and not the person's good manners."""
+    from portfolio_lab import ui
+
+    rendered = ui.log([("user", "<script>alert(1)</script>"),
+                       ("assistant", "5 < 6 & 7 > 2")])
+    assert "<script>" not in rendered
+    assert "&lt;script&gt;" in rendered
+    assert "&amp;" in rendered
+
+
+def test_no_hand_rolled_chat_markup_bypasses_the_escaping():
+    """The strategy lab originally built its own <div> with an f-string, which skipped
+    the escaping that ui.log does. One helper, one sink."""
+    source = (ROOT / "app.py").read_text()
+    assert 'class="tl-msg"' not in source
+    assert 'class="tl-reply"' not in source

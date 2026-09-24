@@ -62,8 +62,15 @@ class FreeSource:
         return pit.fundamentals_wide(self.con, asof)
 
     def prices(self, tickers: list[str], start: dt.date, end: dt.date) -> pd.DataFrame:
+        # `open` has to come back on the SAME basis as the close beside it. The stored
+        # open is split-adjusted like the stored close, so handing over the reconstructed
+        # close next to the untouched open would put two different bases in one row —
+        # and any consumer taking their ratio (a next-day fill against that day's close,
+        # for instance) would read a split as a gap of several hundred percent.
         return self.con.execute(
-            "SELECT ticker, date, open, COALESCE(close_raw, close) AS close, "
+            "SELECT ticker, date, "
+            "open * COALESCE(close_raw / NULLIF(close, 0), 1) AS open, "
+            "COALESCE(close_raw, close) AS close, "
             "close_adj, volume FROM prices "
             "WHERE ticker IN (SELECT UNNEST(?)) AND date BETWEEN ? AND ?",
             [tickers, start, end],
@@ -95,6 +102,11 @@ class FreeSource:
         liq = px.median_dollar_volume(self.con, asof)
         shvol = px.median_share_volume(self.con, asof)
         sessions = px.session_coverage(self.con, asof)
+        # A date where nothing has been filed yet is a real date, not an error. Walking a
+        # point-in-time backtest back far enough reaches one, and merging against an
+        # empty frame with no columns raises instead of returning an empty screen.
+        if fund.empty or "cik" not in fund.columns:
+            fund = pd.DataFrame({"cik": pd.Series(dtype="int64")})
         out = (uni.merge(fund, on="cik", how="left")
                   .merge(last_px, on="ticker", how="left")
                   .merge(liq, on="ticker", how="left")

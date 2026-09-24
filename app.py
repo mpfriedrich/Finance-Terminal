@@ -2129,11 +2129,13 @@ with tab_lab:
         )
     else:
         lab_spec = store.get_strategy(chosen)
-        for msg in store.messages(chosen, kind="lab"):
+        lab_history = store.messages(chosen, kind="lab")
+        if lab_history:
+            # ui.log escapes the text; the hand-rolled f-string this replaced did not,
+            # which made anything typed into the box — or returned by the model — run as
+            # HTML in the person's own browser.
             st.markdown(
-                f'<div class="tl-msg"><span class="p">&gt;</span> {msg["text"]}</div>'
-                if msg["role"] == "user" else
-                f'<div class="tl-reply">{msg["text"]}</div>',
+                ui.log([(m["role"], m["text"]) for m in lab_history]),
                 unsafe_allow_html=True,
             )
 
@@ -2160,7 +2162,7 @@ with tab_lab:
                     store.save_strategy(chosen, out.spec)
                     store.add_message(
                         chosen, "assistant",
-                        "<br>".join(f"- {c}" for c in out.changed) or "- no change",
+                        "\n".join(f"- {c}" for c in out.changed) or "- no change",
                         kind="lab")
                 except Exception as exc:                      # noqa: BLE001
                     store.add_message(chosen, "assistant", f"could not translate: {exc}",

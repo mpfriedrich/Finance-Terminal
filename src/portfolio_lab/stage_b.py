@@ -59,25 +59,32 @@ def rebalance_dates(start: dt.date, end: dt.date, frequency: str = "quarterly") 
     return dates
 
 
-def adjusted_opens(con: duckdb.DuckDBPyConnection, start: dt.date,
-                   end: dt.date) -> pd.DataFrame:
-    """Opening prices on the adjusted basis, one row per ticker and date.
+def bars_for(source, tickers: list[str], start: dt.date, end: dt.date) -> pd.DataFrame:
+    """Daily bars for the names that were ever selected, through the seam.
 
-    `open × close_adj / close` puts the fill price on the same footing as the series the
-    return is measured from. Skipping this makes every split inside a holding period look
-    like a gain or a loss at the next rebalance.
+    Through `source.prices()` rather than SQL, so the identical loop runs against the
+    fixture and against the live store — which is what makes the three point-in-time
+    tests below worth anything.
+
+    Only the names a rebalance actually chose are fetched. The alternative, loading the
+    whole universe for sixteen years, is fifteen million rows to simulate a portfolio
+    that never holds more than a few dozen.
     """
-    return con.execute(
-        """
-        SELECT ticker, date,
-               open * (close_adj / NULLIF(close, 0)) AS open_adj,
-               close_adj
-        FROM prices
-        WHERE date BETWEEN ? AND ? AND open IS NOT NULL AND close_adj IS NOT NULL
-        ORDER BY date
-        """,
-        [start, end],
-    ).fetch_df()
+    if not tickers:
+        return pd.DataFrame()
+    frame = source.prices(sorted(set(tickers)), start, end)
+    if frame.empty:
+        return frame
+    # The fill happens at the open, the return is measured on the adjusted close, so the
+    # open is put on the adjusted basis with that day's own adjustment factor. Without
+    # it every split inside a holding period reads as a gap at the next rebalance.
+    factor = frame["close_adj"] / frame["close"].replace(0.0, np.nan)
+    frame = frame.assign(open_adj=frame["open"] * factor)
+    # One date type through the whole loop. DuckDB hands pandas a datetime64 column while
+    # the rebalance schedule is built from `datetime.date`, and comparing the two raises —
+    # the same mismatch that broke the gold conversion, in a different module.
+    frame = frame.assign(date=[pd.Timestamp(d).date() for d in frame["date"]])
+    return frame.dropna(subset=["close_adj"])
 
 
 def next_session(dates: pd.Index, after: dt.date):
@@ -129,6 +136,7 @@ def run(
     label: str = "",
     data_fingerprint: str = "",
     frame_for=None,
+    cost_tier_market_cap: float = 0.0,
 ) -> StageBResult | None:
     """Re-screen at each rebalance date and trade into the result at the next open.
 
@@ -138,23 +146,36 @@ def run(
     """
     costs = costs or CostModel()
     frame_for = frame_for or source.screening_frame
-    con = source.con
 
-    bars = adjusted_opens(con, start, end)
+    # Pass one: re-screen at every date and remember what was chosen. Nothing is priced
+    # yet, so nothing here can see a price it should not.
+    schedule_dates = [d for d in rebalance_dates(start, end, frequency) if d <= end]
+    chosen_at: dict[dt.date, dict[str, float]] = {}
+    notes: list[str] = []
+    for screen_date in schedule_dates:
+        frame = frame_for(screen_date)
+        if frame is None or frame.empty:
+            notes.append(f"{screen_date}: no universe at that date, position kept")
+            continue
+        result = run_screen(frame, spec)
+        chosen_at[screen_date] = _weights_from(result.picks.head(spec.size))
+        if not chosen_at[screen_date]:
+            notes.append(f"{screen_date}: nothing passed, moved to cash")
+
+    wanted_names = sorted({t for picks in chosen_at.values() for t in picks})
+    bars = bars_for(source, wanted_names, start, end)
     if bars.empty:
         return None
     sessions = pd.Index(sorted(bars.date.unique()))
     closes = bars.pivot_table(index="date", columns="ticker", values="close_adj").ffill()
     opens = bars.pivot_table(index="date", columns="ticker", values="open_adj")
 
-    notes: list[str] = []
     holdings: dict[str, float] = {}       # ticker -> shares (in adjusted terms)
     cash = 1.0                            # everything starts in cash, value 1.0
     value_by_date: dict[dt.date, float] = {}
     rebalance_rows: list[dict] = []
 
-    schedule = [d for d in rebalance_dates(start, end, frequency) if d <= end]
-    pending = {d: next_session(sessions, d) for d in schedule}
+    pending = {d: next_session(sessions, d) for d in chosen_at}
 
     for session in sessions:
         # value the book at today's close
@@ -169,15 +190,7 @@ def run(
         if not due:
             continue
         for screen_date in due:
-            frame = frame_for(screen_date)
-            if frame is None or frame.empty:
-                notes.append(f"{screen_date}: no universe, position left unchanged")
-                continue
-            result = run_screen(frame, spec)
-            target = _weights_from(result.picks.head(spec.size))
-            if not target:
-                notes.append(f"{screen_date}: nothing passed, moved to cash")
-
+            target = chosen_at[screen_date]
             total = value_by_date[session]
             # sell everything at today's open, then buy the target at the same open
             priced = {t: opens.at[session, t] for t in set(target) | set(holdings)
@@ -201,9 +214,7 @@ def run(
             # being traded. One rate for the basket is close enough here and wrong in an
             # obvious direction: it understates a basket of micro-caps, so the cost is
             # taken from the names bought.
-            caps = result.picks.get("market_cap")
-            tier = (costs.spread_for(float(np.nanmedian(caps))) + costs.commission
-                    if caps is not None and len(caps) else costs.round_trip_cost(0.0))
+            tier = costs.spread_for(cost_tier_market_cap) + costs.commission
             charge = total * turnover_fraction * tier
 
             holdings = new_holdings
@@ -223,7 +234,7 @@ def run(
 
     curve = pd.Series(value_by_date).sort_index()
     curve = 100.0 * curve / curve.iloc[0]
-    bench = _benchmark_curve(con, benchmark, curve.index)
+    bench = _benchmark_curve(getattr(source, "con", None), benchmark, curve.index)
 
     years = max((curve.index[-1] - curve.index[0]).days, 1) / 365.25
     rebalances = pd.DataFrame(rebalance_rows)
@@ -248,6 +259,10 @@ def run(
 
 
 def _benchmark_curve(con, symbol: str, index) -> pd.Series | None:
+    """The index on the same dates. A source without one (the fixture) simply has none,
+    and the result says so rather than inventing a comparison."""
+    if con is None:
+        return None
     frame = con.execute(
         "SELECT date, close_adj FROM prices WHERE ticker = ? ORDER BY date", [symbol]
     ).fetch_df()
