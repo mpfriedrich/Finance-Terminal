@@ -273,3 +273,38 @@ def test_the_user_name_is_sent_in_lower_case(monkeypatch):
     monkeypatch.setattr(psycopg2, "connect", lambda **kw: seen.update(kw) or "conn")
     assert wrds.connect(" MPFriedrich ", "x") == "conn"
     assert seen["user"] == "mpfriedrich"
+
+
+def test_a_column_wrds_returns_entirely_empty_does_not_break_the_build(tmp_path):
+    """Without the ISIN licence every ISIN is blank; parquet then has no type for the
+    column and DuckDB read it as INTEGER beside the text ticker (first real run)."""
+    import duckdb
+
+    from portfolio_lab.data.schema import MARKET_MIGRATIONS, _apply
+    from tests import wrds_fixture
+
+    directory = wrds_fixture.write_files(tmp_path / "wrds")
+    sec = wrds_fixture.security().assign(isin=None, dldtei=None)
+    sec.to_parquet(directory / "g_security" / "g_security_000.parquet", index=False)
+    con = duckdb.connect(":memory:")
+    _apply(con, MARKET_MIGRATIONS)
+    assert wrds.ingest(con, directory)["companies"] == 4
+
+
+def test_numeric_values_from_postgres_are_stored_as_floats(tmp_path):
+    import decimal
+
+    import pandas as pd
+
+    server = _FakeServer({})
+    server.rows = [(decimal.Decimal("12.50"), "x")]
+
+    class Cursor(_FakeCursor):
+        def execute(self, sql, params=()):
+            self.description = [("prccd",), ("tic",)]
+            self._rows = list(server.rows)
+
+    server.cursor = lambda name=None: Cursor(server)
+    wrds._fetch(server, "SELECT prccd, tic FROM comp.g_secd", (), tmp_path / "t.parquet")
+    frame = pd.read_parquet(tmp_path / "t_000.parquet")
+    assert frame["prccd"].dtype == float

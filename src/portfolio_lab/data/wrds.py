@@ -37,6 +37,7 @@ download is not tested at all. PLAN.md records both.
 from __future__ import annotations
 
 import datetime as dt
+import decimal
 from pathlib import Path
 
 import duckdb
@@ -241,6 +242,13 @@ def _fetch(con, sql: str, params: tuple, dest: Path, chunk: int = 250_000) -> in
                 break
             cols = [d[0] for d in cur.description]
             frame = pd.DataFrame(batch, columns=cols)
+            # PostgreSQL NUMERIC arrives as Decimal; parquet would store a decimal type
+            # whose precision can differ between parts. Money and prices are floats here.
+            for c in frame.columns:
+                if frame[c].dtype == object:
+                    first = frame[c].dropna().head(1)
+                    if len(first) and isinstance(first.iloc[0], decimal.Decimal):
+                        frame[c] = frame[c].astype(float)
             frame.to_parquet(dest.with_name(f"{dest.stem}_{part:03d}.parquet"), index=False)
             rows += len(frame)
             part += 1
@@ -333,7 +341,19 @@ def _load(con, table: str, source: Path) -> set[str]:
         return set()
     con.execute(f"CREATE OR REPLACE TEMP TABLE _{table} AS SELECT * FROM "
                 "read_parquet(?, union_by_name = true)", [[str(f) for f in files]])
+    untyped_as_text(con, f"_{table}")
     return {r[0].lower() for r in con.execute(f"DESCRIBE _{table}").fetchall()}
+
+
+def untyped_as_text(con, table: str) -> None:
+    """A column WRDS returned entirely empty (ISIN and SEDOL are blank without their own
+    licence) arrives in parquet with no type, which DuckDB reads as INTEGER — and then
+    cannot be combined with the text column beside it. Such a column is text."""
+    for name, kind, *_ in con.execute(f"DESCRIBE {table}").fetchall():
+        if kind.upper() in ("INTEGER", '"NULL"', "NULL"):
+            empty = con.execute(f'SELECT COUNT("{name}") FROM {table}').fetchone()[0] == 0
+            if empty:
+                con.execute(f'ALTER TABLE {table} ALTER "{name}" TYPE VARCHAR')
 
 
 def _col(present: set[str], name: str, default: str = "NULL") -> str:
@@ -376,18 +396,23 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path) -> dict[str, int]:
         tpci = ("AND COALESCE(CAST(s.tpci AS VARCHAR), '0') = '0'"
                 if "tpci" in cols["g_security"] else "")
         excntry = _col(cols["g_security"], "s.excntry", "c.loc")
+        isin = "CAST(s.isin AS VARCHAR)" if "isin" in cols["g_security"] else "NULL"
         con.execute(
             f"""
             CREATE OR REPLACE TEMP TABLE _issue AS
             SELECT {GVKEY_OFFSET} + CAST(c.gvkey AS BIGINT) AS cik,
                    CAST(c.gvkey AS VARCHAR) AS gvkey, s.iid,
-                   upper(regexp_replace(trim(COALESCE(s.tic, s.isin, c.gvkey)),
+                   upper(regexp_replace(trim(COALESCE(CAST(s.tic AS VARCHAR),
+                                                      {isin}, CAST(c.gvkey AS VARCHAR))),
                                         '[^A-Za-z0-9]', '', 'g'))
-                       || '.' || upper(COALESCE({excntry}, c.loc)) AS ticker,
+                       || '.' || upper(COALESCE(CAST({excntry} AS VARCHAR),
+                                                CAST(c.loc AS VARCHAR))) AS ticker,
                    c.conm AS name, CAST(c.sic AS VARCHAR) AS sic,
-                   upper(COALESCE({excntry}, c.loc)) AS exchange
+                   upper(COALESCE(CAST({excntry} AS VARCHAR),
+                                  CAST(c.loc AS VARCHAR))) AS exchange
             FROM _g_company c JOIN _g_security s
-              ON s.gvkey = c.gvkey AND s.iid = c.prirow
+              ON CAST(s.gvkey AS VARCHAR) = CAST(c.gvkey AS VARCHAR)
+             AND CAST(s.iid AS VARCHAR) = CAST(c.prirow AS VARCHAR)
             WHERE TRUE {tpci}
             """
         )
@@ -424,7 +449,8 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path) -> dict[str, int]:
                    CAST(d.cshtrd AS DOUBLE) AS volume,
                    CAST(d.cshoc AS DOUBLE) AS cshoc
             FROM _g_secd d JOIN _issue i
-              ON CAST(i.gvkey AS VARCHAR) = CAST(d.gvkey AS VARCHAR) AND i.iid = d.iid
+              ON CAST(i.gvkey AS VARCHAR) = CAST(d.gvkey AS VARCHAR)
+             AND CAST(i.iid AS VARCHAR) = CAST(d.iid AS VARCHAR)
             WHERE d.prccd > 0
             """
         )

@@ -44,7 +44,7 @@ import duckdb
 import pandas as pd
 
 from . import industry
-from .wrds import GVKEY_OFFSET, _fetch, available_columns
+from .wrds import GVKEY_OFFSET, _fetch, available_columns, untyped_as_text
 
 CRSP_OFFSET = 2_000_000_000
 # Share codes 10 and 11: ordinary common shares of US companies. Exchange codes 1, 2, 3:
@@ -187,6 +187,7 @@ def _load(con, source: Path, schema: str, table: str) -> set[str]:
         return set()
     con.execute(f"CREATE OR REPLACE TEMP TABLE {name} AS SELECT * FROM "
                 "read_parquet(?, union_by_name = true)", [[str(f) for f in files]])
+    untyped_as_text(con, name)
     return {r[0].lower() for r in con.execute(f"DESCRIBE {name}").fetchall()}
 
 
