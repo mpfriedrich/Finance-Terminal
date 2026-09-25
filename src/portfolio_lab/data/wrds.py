@@ -72,33 +72,46 @@ FX_MAX_AGE_DAYS = 10
 SUBUNITS = {"GBX": ("GBP", 100.0), "GBP_P": ("GBP", 100.0), "ZAC": ("ZAR", 100.0),
             "ILA": ("ILS", 100.0)}
 
-# Stored metric -> Compustat item. Annual (g_funda) and quarterly (g_fundq, suffix q).
-# Items are in millions of the reporting currency.
+# Stored metric -> Compustat items, in order of preference. Annual (g_funda) and
+# quarterly (g_fundq, suffix q). Items are in millions of the reporting currency.
+# Compustat Global names some items differently from the North American file: net
+# income there is NICON (consolidated), shares CSHOI or CSHPRIA, and it has no gross
+# profit item at all — that one is sales minus cost of goods sold (see GROSS_PROFIT).
+# The first candidate the WRDS table actually carries is used.
 DURATION = {
-    "revenue": "sale",
-    "net_income": "ni",
-    "operating_cash_flow": "oancf",
-    "capex": "capx",
-    "operating_income": "oiadp",
-    "depreciation_amortization": "dp",
-    "interest_expense": "xint",
-    "income_tax": "txt",
-    "pretax_income": "pi",
-    "gross_profit": "gp",
+    "revenue": ("sale",),
+    "net_income": ("ni", "nicon", "ib"),
+    "operating_cash_flow": ("oancf",),
+    "capex": ("capx",),
+    "operating_income": ("oiadp",),
+    "depreciation_amortization": ("dp",),
+    "interest_expense": ("xint",),
+    "income_tax": ("txt",),
+    "pretax_income": ("pi",),
+    "gross_profit": ("gp",),
 }
 INSTANT = {
-    "book_value": "ceq",
-    "total_assets": "at",
-    "total_liabilities": "lt",
-    "long_term_debt": "dltt",
-    "current_debt": "dlc",
-    "cash": "che",
-    "current_assets": "act",
-    "current_liabilities": "lct",
+    "book_value": ("ceq",),
+    "total_assets": ("at",),
+    "total_liabilities": ("lt",),
+    "long_term_debt": ("dltt",),
+    "current_debt": ("dlc",),
+    "cash": ("che",),
+    "current_assets": ("act",),
+    "current_liabilities": ("lct",),
 }
+SHARES = ("csho", "cshoi", "cshpria")
+SHARES_Q = ("cshoq", "cshoiq", "cshprq")
+# Fallback when no gross-profit item exists: sales minus cost of goods sold.
+GROSS_PROFIT = ("sale", "cogs")
 # Cash-flow items are year-to-date in the quarterly table (oancfy, capxy); summing them
 # as quarters would double-count, so quarterly cash flow is not read. Annual only.
 QUARTERLY_SKIP = ("operating_cash_flow", "capex")
+
+
+def _quarterly(items: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(f"{c}q" for c in items)
+
 
 TABLES = ("g_company", "g_security", "g_secd", "g_funda", "g_fundq", "g_exrt_dly")
 WANTED = {
@@ -107,13 +120,40 @@ WANTED = {
                    "dldtei", "dlrsni"),
     "g_secd": ("gvkey", "iid", "datadate", "prcod", "prchd", "prcld", "prccd", "cshtrd",
                "ajexdi", "trfd", "curcdd", "cshoc", "qunit"),
-    "g_funda": ("gvkey", "datadate", "fyear", "curcd", "csho",
-                *DURATION.values(), *INSTANT.values()),
-    "g_fundq": ("gvkey", "datadate", "fyearq", "fqtr", "curcdq", "rdq", "cshoq",
-                *(f"{c}q" for m, c in DURATION.items() if m not in QUARTERLY_SKIP),
-                *(f"{c}q" for c in INSTANT.values())),
+    "g_funda": ("gvkey", "datadate", "fyear", "curcd", *SHARES, *GROSS_PROFIT,
+                *(c for cands in (*DURATION.values(), *INSTANT.values()) for c in cands)),
+    "g_fundq": ("gvkey", "datadate", "fyearq", "fqtr", "curcdq", "rdq", *SHARES_Q,
+                *_quarterly(GROSS_PROFIT),
+                *(c for m, cands in DURATION.items() if m not in QUARTERLY_SKIP
+                  for c in _quarterly(cands)),
+                *(c for cands in INSTANT.values() for c in _quarterly(cands))),
     "g_exrt_dly": ("datadate", "fromcurd", "tocurd", "exratd"),
 }
+# A name can be wanted for two reasons (sales is revenue and half of gross profit);
+# asked for twice, the query would return the column twice.
+WANTED = {t: tuple(dict.fromkeys(cols)) for t, cols in WANTED.items()}
+# An alternative name that is absent is expected, not a problem worth printing.
+ALTERNATIVES = ({c for cands in (*DURATION.values(), *INSTANT.values()) for c in cands[1:]}
+                | set(SHARES[1:]) | {"cogs"})
+
+
+def pick(present: set[str], candidates: tuple[str, ...]) -> str | None:
+    """The first candidate item the table has, or None."""
+    return next((c for c in candidates if c in present), None)
+
+
+def item_expression(present: set[str], metric: str, quarterly: bool) -> tuple[str, str] | None:
+    """(SQL expression over alias f, item name for the record) for one metric, or None."""
+    table = {**DURATION, **INSTANT}[metric]
+    cands = _quarterly(table) if quarterly else table
+    chosen = pick(present, cands)
+    if chosen:
+        return f"f.{chosen}", chosen
+    if metric == "gross_profit":
+        sale, cogs = _quarterly(GROSS_PROFIT) if quarterly else GROSS_PROFIT
+        if sale in present and cogs in present:
+            return f"(f.{sale} - f.{cogs})", f"{sale}-{cogs}"
+    return None
 
 
 class NotConfigured(RuntimeError):
@@ -190,7 +230,8 @@ def download(con, dest: Path, countries=DEFAULT_COUNTRIES, since: dt.date = DEFA
     countries = tuple(sorted({c.upper() for c in countries}))
     cols = {t: available_columns(con, t) for t in TABLES}
     for t in TABLES:
-        missing = set(WANTED[t]) - set(cols[t])
+        missing = {c for c in set(WANTED[t]) - set(cols[t])
+                   if c.removesuffix("q") not in ALTERNATIVES and c not in ALTERNATIVES}
         if missing:
             log(f"  {t}: not in WRDS, skipped: {', '.join(sorted(missing))}")
     firms = "SELECT gvkey FROM comp.g_company WHERE loc IN %s"
@@ -454,28 +495,31 @@ def _fundamentals(con, cols: dict[str, set[str]]) -> None:
     if a:
         filed = f"CAST(f.datadate AS DATE) + INTERVAL {ANNUAL_LAG_MONTHS} MONTH"
         span = "CAST(CAST(f.datadate AS DATE) - INTERVAL 12 MONTH + INTERVAL 1 DAY AS DATE)"
-        for metric, item in {**DURATION, **INSTANT}.items():
-            if item not in a:
+        for metric in {**DURATION, **INSTANT}:
+            found = item_expression(a, metric, quarterly=False)
+            if not found:
                 continue
+            expr, item = found
             start = span if metric in DURATION else "NULL"
             con.execute(
                 insert +
-                f"""SELECT i.cik, '{metric}', CAST(f.{item} AS DOUBLE) * 1e6, {start},
+                f"""SELECT i.cik, '{metric}', CAST({expr} AS DOUBLE) * 1e6, {start},
                            CAST(f.datadate AS DATE), {_col(a, 'f.fyear')}, 'est',
                            CAST({filed} AS DATE),
                            'compustat:funda:' || i.gvkey || ':' || CAST(f.datadate AS VARCHAR),
                            'compustat:{item}', 1, upper(f.curcd)
-                    FROM _g_funda f {join} WHERE f.{item} IS NOT NULL"""
+                    FROM _g_funda f {join} WHERE {expr} IS NOT NULL"""
             )
-        if "csho" in a:
+        shares = pick(a, SHARES)
+        if shares:
             con.execute(
                 insert +
-                f"""SELECT i.cik, 'shares_outstanding', CAST(f.csho AS DOUBLE) * 1e6, NULL,
+                f"""SELECT i.cik, 'shares_outstanding', CAST(f.{shares} AS DOUBLE) * 1e6, NULL,
                            CAST(f.datadate AS DATE), {_col(a, 'f.fyear')}, 'est',
                            CAST({filed} AS DATE),
                            'compustat:funda:' || i.gvkey || ':' || CAST(f.datadate AS VARCHAR),
-                           'compustat:csho', 1, NULL
-                    FROM _g_funda f {join} WHERE f.csho > 0"""
+                           'compustat:{shares}', 1, NULL
+                    FROM _g_funda f {join} WHERE f.{shares} > 0"""
             )
 
     q = cols["g_fundq"]
@@ -489,30 +533,33 @@ def _fundamentals(con, cols: dict[str, set[str]]) -> None:
         else:
             filed, how = est, "'est'"
         span = "CAST(CAST(f.datadate AS DATE) - INTERVAL 3 MONTH + INTERVAL 1 DAY AS DATE)"
-        items = {m: f"{c}q" for m, c in {**DURATION, **INSTANT}.items()
-                 if m not in QUARTERLY_SKIP}
-        for metric, item in items.items():
-            if item not in q:
+        for metric in {**DURATION, **INSTANT}:
+            if metric in QUARTERLY_SKIP:
                 continue
+            found = item_expression(q, metric, quarterly=True)
+            if not found:
+                continue
+            expr, item = found
             start = span if metric in DURATION else "NULL"
             con.execute(
                 insert +
-                f"""SELECT i.cik, '{metric}', CAST(f.{item} AS DOUBLE) * 1e6, {start},
+                f"""SELECT i.cik, '{metric}', CAST({expr} AS DOUBLE) * 1e6, {start},
                            CAST(f.datadate AS DATE), {_col(q, 'f.fyearq')}, {how},
                            CAST({filed} AS DATE),
                            'compustat:fundq:' || i.gvkey || ':' || CAST(f.datadate AS VARCHAR),
                            'compustat:{item}', 0, upper(f.curcdq)
-                    FROM _g_fundq f {join} WHERE f.{item} IS NOT NULL"""
+                    FROM _g_fundq f {join} WHERE {expr} IS NOT NULL"""
             )
-        if "cshoq" in q:
+        shares = pick(q, SHARES_Q)
+        if shares:
             con.execute(
                 insert +
-                f"""SELECT i.cik, 'shares_outstanding', CAST(f.cshoq AS DOUBLE) * 1e6, NULL,
+                f"""SELECT i.cik, 'shares_outstanding', CAST(f.{shares} AS DOUBLE) * 1e6, NULL,
                            CAST(f.datadate AS DATE), {_col(q, 'f.fyearq')}, {how},
                            CAST({filed} AS DATE),
                            'compustat:fundq:' || i.gvkey || ':' || CAST(f.datadate AS VARCHAR),
-                           'compustat:cshoq', 1, NULL
-                    FROM _g_fundq f {join} WHERE f.cshoq > 0"""
+                           'compustat:{shares}', 1, NULL
+                    FROM _g_fundq f {join} WHERE f.{shares} > 0"""
             )
 
     # The share count the market sees: the primary issue's shares outstanding from the

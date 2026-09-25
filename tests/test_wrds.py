@@ -232,3 +232,32 @@ def test_a_failed_login_says_what_failed_without_the_password(monkeypatch):
         wrds.connect("someone", "hunter2-secret")
     assert "password authentication failed" in str(err.value)
     assert "hunter2-secret" not in str(err.value)
+
+
+def test_global_names_are_used_when_the_north_american_ones_are_absent(tmp_path):
+    """Compustat Global has no NI, CSHO or GP: net income is NICON, shares CSHOI, and
+    gross profit is sales minus cost of goods sold."""
+
+    from tests import wrds_fixture
+
+    directory = wrds_fixture.write_files(tmp_path / "wrds")
+    funda = wrds_fixture.funda().rename(columns={"ni": "nicon", "csho": "cshoi"})
+    funda = funda.drop(columns=["gp"]).assign(cogs=5000.0)
+    for old in (directory / "g_funda").glob("*.parquet"):
+        old.unlink()
+    funda.to_parquet(directory / "g_funda" / "g_funda_000.parquet", index=False)
+
+    import duckdb
+    from portfolio_lab.data.schema import MARKET_MIGRATIONS, _apply
+
+    con = duckdb.connect(":memory:")
+    _apply(con, MARKET_MIGRATIONS)
+    wrds.ingest(con, directory)
+    rows = dict(con.execute(
+        "SELECT xbrl_tag, value FROM fundamentals f JOIN securities s USING (cik) "
+        "WHERE s.ticker = 'DMA.DEU' AND period_end = DATE '2025-12-31' "
+        "AND metric IN ('net_income', 'gross_profit', 'shares_outstanding')").fetchall())
+    assert rows["compustat:nicon"] == pytest.approx(600e6)
+    assert rows["compustat:sale-cogs"] == pytest.approx(3000e6)
+    assert rows["compustat:cshoi"] == pytest.approx(1000e6)
+    assert len(set(wrds.WANTED["g_funda"])) == len(wrds.WANTED["g_funda"])
