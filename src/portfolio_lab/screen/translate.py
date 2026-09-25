@@ -17,7 +17,7 @@ import json
 from dataclasses import dataclass
 
 from ..config import require_secret
-from ..data import industry
+from ..data import industry, listing
 from .spec import FILTERABLE, Filter, PortfolioSpec
 
 MODEL = "claude-opus-5"
@@ -95,7 +95,8 @@ TOOL = {
                             "items": {"type": "string"},
                             "description": (
                                 "Plain number for numeric metrics (2000000000, not '2bn'). "
-                                "String for industry_group, sector or exchange. A list of "
+                                "String for industry_group, sector, exchange or country. "
+                                "A list of "
                                 "strings only with op \"in\" — that is how several "
                                 "industries are allowed at once."
                             ),
@@ -221,6 +222,15 @@ def translate(
         + "\n".join(f"- {g}" for g in industry.GROUPS)
         + "\nUse op \"in\" with a list, or \"==\" / \"!=\" for a single one. These are "
         "exact values, not fragments."
+    )
+    # Countries: ISO-3 codes of the market a line trades in. "Japanese stocks" is
+    # country == "JPN"; "outside the US" is country != "USA".
+    system += (
+        "\n\nFor a market or country, filter `country` with ISO-3 codes of the market "
+        "the stock trades in: "
+        + ", ".join(f"{code} ({name})" for code, name in listing.COUNTRIES.items())
+        + ". \"Japanese stocks\" is country == \"JPN\"; \"European\" is country in "
+        "the European codes; \"outside the US\" is country != \"USA\"."
     )
     if sectors:
         # The full list, not a sample. A truncated vocabulary is worse than none: the

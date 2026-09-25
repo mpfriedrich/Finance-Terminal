@@ -41,7 +41,8 @@ import pandas as pd
 # v6: first filing is found before the age limit is applied.
 # v7: foreign filers — amounts converted to USD, shares on the listed-share basis.
 # v8: EBIT, D&A, interest, tax, gross profit and prior-year revenue in the frame.
-CACHE_VERSION = "v8"
+# v9: `country`, the market a line trades in (world store).
+CACHE_VERSION = "v9"
 
 
 def _build_id(fingerprint: str) -> str:

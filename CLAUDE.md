@@ -186,6 +186,13 @@ ticker; ended lines use their last CRSP ticker, with `-permno` appended on a col
 - `research.peers()` must return an empty frame that keeps its columns (`frame.iloc[0:0]`),
   not `pd.DataFrame()`.
 - `st.line_chart(color=[...])` needs exactly one colour per column. Slice the list.
+- `copy_us` once deleted Compustat's FX rows (every non-US company then had "no exchange
+  rate"). It must only replace series that the free store itself supplies.
+- In `app.py`, `listing` is a local variable name. Import `data.listing` names directly
+  (`MARKET_NAMES`).
+- Every screening frame has `country`: the ISO-3 code of the market where the line
+  trades (USA for SEC/CRSP lines, the Compustat country otherwise). It is filterable in
+  chat and in the sidebar.
 
 ## 9. How to work here
 

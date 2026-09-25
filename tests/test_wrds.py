@@ -308,3 +308,27 @@ def test_numeric_values_from_postgres_are_stored_as_floats(tmp_path):
     wrds._fetch(server, "SELECT prccd, tic FROM comp.g_secd", (), tmp_path / "t.parquet")
     frame = pd.read_parquet(tmp_path / "t_000.parquet")
     assert frame["prccd"].dtype == float
+
+
+def test_every_line_knows_the_market_it_trades_in(tmp_path):
+    from portfolio_lab.screen.engine import run_screen
+    from portfolio_lab.screen.spec import Filter, PortfolioSpec
+    from tests.paid_fixture import build_store as build_us
+
+    us = build_us(tmp_path / "us")
+    us.con.close()
+    src, _ = build_store(tmp_path)
+    wrds.copy_us(src.con, tmp_path / "us" / "paid.duckdb")
+    # Copying the US store in must not take Compustat's exchange rates with it.
+    assert src.con.execute("SELECT COUNT(*) FROM prices WHERE ticker = 'JPYUSD=X'"
+                           ).fetchone()[0] > 0
+    frame = src.screening_frame(END)
+    assert not frame.loc[frame.ticker == "6701.JPN", "fx_missing"].iloc[0]
+    by_ticker = frame.set_index("ticker")["country"]
+    assert by_ticker["DMA.DEU"] == "DEU" and by_ticker["6701.JPN"] == "JPN"
+    assert by_ticker["AAA"] == "USA"
+    spec = PortfolioSpec(size=10, filters=(Filter("country", "in", ["JPN", "DEU"]),),
+                         min_price=0.0, min_dollar_volume=0.0, min_trading_days_60=0,
+                         max_filing_age_months=24)
+    picked = set(run_screen(frame, spec).ranked.ticker)
+    assert picked and picked <= {"DMA.DEU", "6701.JPN"}

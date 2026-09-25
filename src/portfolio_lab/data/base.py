@@ -210,5 +210,5 @@ def build_screening_frame(
         out["trading_days_60"] = float("nan")
     if "data_age_days" not in out.columns:
         out["data_age_days"] = float("nan")
-    out = listing.apply(out, getattr(source, "con", None))
+    out = listing.add_country(listing.apply(out, getattr(source, "con", None)))
     return industry.add_industry_group(out)

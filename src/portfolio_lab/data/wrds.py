@@ -710,7 +710,15 @@ def copy_us(con: duckdb.DuckDBPyConnection, market_db: Path, log=_quiet) -> dict
                               SELECT cik FROM securities WHERE cik >= {GVKEY_OFFSET})"""
             owned_tickers = f"(SELECT ticker FROM securities WHERE cik IN {owned_ciks})"
             log("US prices")
-            con.execute(f"DELETE FROM prices WHERE ticker NOT IN {owned_tickers}")
+            # Only the series the free store supplies are replaced. Everything else not
+            # owned by a company line stays — above all Compustat's exchange rates
+            # (EURUSD=X, JPYUSD=X, ...), without which every non-US company is excluded
+            # for want of a rate. A rate Yahoo also has is taken from Yahoo.
+            con.execute(f"""DELETE FROM prices WHERE ticker NOT IN {owned_tickers}
+                            AND ticker IN (SELECT DISTINCT ticker FROM us.prices)""")
+            con.execute("""DELETE FROM prices WHERE ticker IN (SELECT ticker FROM securities
+                            WHERE cik < ? AND cik NOT IN (SELECT cik FROM crsp_link))""",
+                        [GVKEY_OFFSET])
             con.execute(
                 f"""INSERT INTO prices BY NAME SELECT * FROM us.prices
                     WHERE ticker NOT IN {owned_tickers}

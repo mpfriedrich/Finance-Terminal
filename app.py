@@ -40,6 +40,7 @@ if not st.runtime.exists():
 from portfolio_lab import charts, ui
 from portfolio_lab.config import ALERTS_STATE, CACHE_DIR, USER_DB, CostModel, Settings, secret
 from portfolio_lab.data import history as hist, industry
+from portfolio_lab.data.listing import COUNTRIES as MARKET_NAMES
 from portfolio_lab.data.paid import MissingKey
 from portfolio_lab.data.schema import open_user
 from portfolio_lab.data.sources import SourceNotReady, open_selected
@@ -156,6 +157,17 @@ def _universe_verdict() -> str:
                 "survivors only; where the data records what holders received at the end "
                 "(CRSP), that return is used instead of the assumed loss.")
     return hist.universe_verdict(hist.stored_recovery(source.con))
+
+
+@st.cache_data(ttl=3600)
+def _markets() -> list[str]:
+    """The markets the store holds lines in, USA first."""
+    con = _market_source().con
+    rows = con.execute(
+        "SELECT DISTINCT CASE WHEN cik BETWEEN 1000000000 AND 1999999999 "
+        "THEN upper(exchange) ELSE 'USA' END FROM securities").fetchall()
+    found = sorted({r[0] for r in rows if r[0]})
+    return (["USA"] if "USA" in found else []) + [c for c in found if c != "USA"]
 
 
 @st.cache_data(ttl=3600)
@@ -303,6 +315,18 @@ with st.sidebar:
         "Grouped from the filer's own SEC code — the SEC's own wording stays visible "
         "in the table. Also applies on top of the chat."
     )
+
+    # Markets appear only when the store holds more than one (the world store).
+    markets_available = _markets()
+    markets: list[str] = []
+    if len(markets_available) > 1:
+        st.markdown("#### Market")
+        markets = st.multiselect(
+            "Markets", options=markets_available, label_visibility="collapsed",
+            key="markets", placeholder="Every market",
+            format_func=lambda c: f"{c} · {MARKET_NAMES.get(c, c)}")
+        st.caption("Where the stock trades: a Japanese company's New York ADR is USA, "
+                   "its Tokyo line JPN. Also applies on top of the chat.")
 
     st.markdown("#### Intrinsic value")
     st.caption("A model, not a measurement. These assumptions decide the answer.")
@@ -571,6 +595,8 @@ with tab_screen:
             st.markdown(f"- market cap {' and '.join(bounds)} *(from the sidebar)*")
         if groups:
             st.markdown(f"- industry one of {', '.join(groups)} *(from the sidebar)*")
+        if markets:
+            st.markdown(f"- market one of {', '.join(markets)} *(from the sidebar)*")
         if spec.unsupported:
             st.warning("Not applied: " + "; ".join(spec.unsupported))
 
@@ -583,6 +609,8 @@ with tab_screen:
         elif groups:
             effective = effective.with_filter(
                 Filter("industry_group", "in", list(groups)))
+        if markets and not spec.is_hand_picked:
+            effective = effective.with_filter(Filter("country", "in", list(markets)))
         if lo > 0:
             effective = effective.with_filter(Filter("market_cap", ">=", lo * 1e9))
         if hi > 0:

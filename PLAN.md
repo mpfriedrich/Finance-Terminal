@@ -808,6 +808,14 @@ für die USA, die Phase 7 gemessen hat (0 von 20):
   dem `tidyfinance`-Paket (PyPI) abgeglichen, das dieselben WRDS-Abfragen stellt.
 * **Zweiter WRDS-Account für CRSP** (`WRDS_CRSP_USERNAME`/`_PASSWORD`), weil die FU
   CRSP nicht lizenziert; der Nutzer beantragt einen USYD-Account.
+* **Länderfilter** (`country`, ISO-3 des Handelsplatzes: USA, JPN, DEU, …) im
+  Screening-Rahmen beider Wege, als Filterfeld für den Chat („japanische Aktien“ →
+  `country == "JPN"`) und als Auswahl „Market“ in der Seitenleiste, sobald der Bestand
+  mehr als einen Markt hat. `CACHE_VERSION` → `v9` (Cache neu wärmen).
+* **Gefunden beim Test dazu:** `copy_us` löschte beim Übernehmen des US-Bestands die
+  Wechselkurse aus Compustat (`JPYUSD=X` …); danach wäre jede Nicht-US-Firma mit „no
+  exchange rate“ ausgeschlossen worden. Ersetzt werden jetzt nur die Reihen, die der
+  freie Bestand selbst liefert. Test schlug vorher fehl.
 * Nebenbei behoben: `research.peers` gab bei fehlender Branche eine Tabelle ohne Spalten
   zurück, der Comps-Bereich stürzte ab.
 

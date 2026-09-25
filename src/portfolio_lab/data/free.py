@@ -148,7 +148,7 @@ class FreeSource:
         # 400 days after the only filing.
         if "data_age_days" not in out.columns:
             out["data_age_days"] = float("nan")
-        out = listing.apply(out, self.con)
+        out = listing.add_country(listing.apply(out, self.con))
         # The SEC wording stays in `sector`; `industry_group` is the coarse, typeable
         # version of the same fact. Both travel with the row so the screen can filter on
         # one and still show the other.
