@@ -42,6 +42,13 @@ def arg(name: str) -> str | None:
 
 
 t0 = time.time()
+
+
+def step(message: str) -> None:
+    """Progress between the long silent steps, with the time so far."""
+    print(f"  [{time.time() - t0:5.0f}s] {message} ...", flush=True)
+
+
 us_only = "--us-only" in sys.argv
 from_dir = Path(arg("from-dir")) if arg("from-dir") else None
 countries = (() if arg("countries") == "none" else
@@ -96,19 +103,20 @@ if not us_only and from_dir is None:
             server.close()
 
 WORLD_DB.parent.mkdir(parents=True, exist_ok=True)
+step("opening the world store (a copy if the app holds it)")
 con, work = open_market_for_rebuild(WORLD_DB)
 
 crsp_on_disk = any(any((cache / folder).glob("*.parquet"))
                    for folder in ("crsp_dsf_v2", "crsp_dsf"))
 if not us_only and use_crsp and crsp_on_disk:
-    counts = crsp.ingest(con, cache, MARKET_DB if MARKET_DB.exists() else None)
+    counts = crsp.ingest(con, cache, MARKET_DB if MARKET_DB.exists() else None, log=step)
     print(f"CRSP: {counts}", flush=True)
     print(f"  {counts['ended']:,} US listings ended before {counts['crsp_end']} — the "
           f"companies the free data cannot supply; {counts['with_delisting_return']:,} "
           "of them with the delisting return holders actually received.", flush=True)
 
 if not us_only and countries:
-    counts = wrds.ingest(con, cache)
+    counts = wrds.ingest(con, cache, log=step)
     print(f"Compustat Global: {counts}", flush=True)
     print(f"  {counts['facts_on_estimated_date']:,} of {counts['facts']:,} facts carry an "
           "ESTIMATED publication date (period end + legal deadline).", flush=True)
@@ -118,7 +126,7 @@ if not us_only and countries:
     print(wrds.country_counts(con).to_string(index=False), flush=True)
 
 if MARKET_DB.exists():
-    copied = wrds.copy_us(con, MARKET_DB)
+    copied = wrds.copy_us(con, MARKET_DB, log=step)
     print(f"free US store copied in: {copied}", flush=True)
     if copied.get("crsp_lines_without_current_prices"):
         print(f"  {copied['crsp_lines_without_current_prices']:,} lines trading when CRSP "

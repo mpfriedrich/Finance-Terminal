@@ -253,13 +253,14 @@ def _load(con, source: Path, schema: str, table: str) -> set[str]:
 
 
 def ingest(con: duckdb.DuckDBPyConnection, source: Path,
-           market_db: Path | None = None) -> dict[str, int]:
+           market_db: Path | None = None, log=lambda _m: None) -> dict[str, int]:
     """Translate the CRSP / Compustat NA files under `source` into the market schema.
 
     `market_db` (the free store) supplies today's tickers for lines still trading.
     Replaces what a previous CRSP build wrote, and any free-store rows for the companies
     CRSP now covers. One transaction.
     """
+    log("reading the CRSP files")
     have = {key: _load(con, source, *key) for key in WANTED}
     if have[("crsp", "dsf_v2")]:
         _ciz_as_legacy(con, have)
@@ -384,6 +385,7 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path,
         con.execute("DELETE FROM delisting_returns WHERE source = 'crsp'")
         con.execute("DELETE FROM crsp_link")
 
+        log("daily prices (the long step)")
         # Daily bars. cfacpr puts every price on the line's last-day share basis; the
         # total-return series compounds CRSP's own return and ends at the last close.
         has_open = "openprc" in have[("crsp", "dsf")]
@@ -479,6 +481,7 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path,
                     WHERE d.dlret IS NOT NULL AND NOT f.active"""
             )
 
+        log("Compustat North America figures")
         _compustat_na(con, have)
         con.execute("COMMIT")
     except Exception:

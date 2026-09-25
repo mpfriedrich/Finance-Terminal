@@ -365,12 +365,17 @@ def _col(present: set[str], name: str, default: str = "NULL") -> str:
     return name if name.split(".")[-1] in present else default
 
 
-def ingest(con: duckdb.DuckDBPyConnection, source: Path) -> dict[str, int]:
+def _quiet(_message: str) -> None:
+    pass
+
+
+def ingest(con: duckdb.DuckDBPyConnection, source: Path, log=_quiet) -> dict[str, int]:
     """Translate the Compustat parquet files under `source` into the market schema.
 
     Adds to what is there (the build copies the US store in first) and replaces only
     Compustat rows. One transaction: an interrupted build keeps the previous contents.
     """
+    log("reading the Compustat Global files")
     cols = {t: _load(con, t, source) for t in TABLES}
     con.execute("BEGIN")
     try:
@@ -379,6 +384,7 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path) -> dict[str, int]:
         con.execute("DELETE FROM securities WHERE cik BETWEEN ? AND ?", [GVKEY_OFFSET, GLOBAL_LAST])
         con.execute("DELETE FROM fundamentals WHERE cik BETWEEN ? AND ?", [GVKEY_OFFSET, GLOBAL_LAST])
 
+        log("exchange rates")
         # Dollars per unit of every currency, per day: the rates are quoted as units per
         # pound, so USD per X = (USD per GBP) / (X per GBP).
         con.execute(
@@ -431,6 +437,7 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path) -> dict[str, int]:
             """
         )
 
+        log("daily prices in dollars (the long step)")
         # Daily bars in dollars. qunit: prices quoted per 100 or 1000 shares in some
         # markets. ajexdi: the cumulative split factor (dividing by it puts every day on
         # today's share basis). trfd: the total-return factor (dividends reinvested).
@@ -521,7 +528,9 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path) -> dict[str, int]:
             """
         )
 
+        log("annual and quarterly figures")
         _fundamentals(con, cols)
+        log("listing windows")
         history.refresh_price_windows(con, own_transaction=False)
         con.execute("COMMIT")
     except Exception:
@@ -649,7 +658,7 @@ US_BY_CIK = ("ticker_history", "shares_outstanding")
 US_WHOLE = ("listing_ratios", "macro_series")
 
 
-def copy_us(con: duckdb.DuckDBPyConnection, market_db: Path) -> dict[str, int]:
+def copy_us(con: duckdb.DuckDBPyConnection, market_db: Path, log=_quiet) -> dict[str, int]:
     """Replace the free-store part of the world store with the current free store.
 
     Without CRSP: every US company, its prices and filings, plus the indices, futures and
@@ -667,6 +676,7 @@ def copy_us(con: duckdb.DuckDBPyConnection, market_db: Path) -> dict[str, int]:
             owned_ciks = f"""(SELECT cik FROM crsp_link UNION ALL
                               SELECT cik FROM securities WHERE cik >= {GVKEY_OFFSET})"""
             owned_tickers = f"(SELECT ticker FROM securities WHERE cik IN {owned_ciks})"
+            log("US prices")
             con.execute(f"DELETE FROM prices WHERE ticker NOT IN {owned_tickers}")
             con.execute(
                 f"""INSERT INTO prices BY NAME SELECT * FROM us.prices
@@ -679,6 +689,7 @@ def copy_us(con: duckdb.DuckDBPyConnection, market_db: Path) -> dict[str, int]:
                 f"""INSERT INTO securities BY NAME SELECT * FROM us.securities
                     WHERE cik < ? AND cik NOT IN {owned_ciks}
                       AND ticker NOT IN {owned_tickers}""", [GVKEY_OFFSET])
+            log("SEC filings")
             # SEC filings for every US company, CRSP-covered ones included: they are dated
             # by the SEC, which is the point. CRSP's own facts are kept.
             con.execute(
@@ -693,6 +704,7 @@ def copy_us(con: duckdb.DuckDBPyConnection, market_db: Path) -> dict[str, int]:
             for table in US_WHOLE:
                 con.execute(f"DELETE FROM {table}")
                 con.execute(f"INSERT INTO {table} BY NAME SELECT * FROM us.{table}")
+            log("continuing CRSP lines and listing windows")
             spliced = crsp.extend(con, "us")
             pruned = crsp.prune_compustat(con)
             history.refresh_price_windows(con, own_transaction=False)
