@@ -48,6 +48,10 @@ from .free import FreeSource
 
 KEY_USER = "WRDS_USERNAME"
 KEY_PASSWORD = "WRDS_PASSWORD"
+# Optional second account for CRSP, when the first one's university does not license it
+# (the FU's does not). Unset, CRSP is tried with the first account.
+KEY_CRSP_USER = "WRDS_CRSP_USERNAME"
+KEY_CRSP_PASSWORD = "WRDS_CRSP_PASSWORD"
 HOST = "wrds-pgdata.wharton.upenn.edu"
 PORT = 9737
 DBNAME = "wrds"

@@ -105,6 +105,36 @@ def write_files(directory: Path) -> Path:
     return directory
 
 
+def write_ciz_files(directory: Path) -> Path:
+    """The same lines in CRSP's current format (CIZ): security-info periods, the v2
+    daily file with price-only returns, and each delisting on a row of its own."""
+    names_v2 = pd.DataFrame([
+        {"permno": r.permno, "secinfostartdt": r.namedt, "secinfoenddt": r.nameendt,
+         "ticker": r.ticker, "issuernm": r.comnam, "siccd": r.siccd,
+         "primaryexch": "N" if r.exchcd == 1 else "Q", "sharetype": "NS",
+         "securitytype": "EQTY", "securitysubtype": "COM", "usincflg": "Y",
+         "issuertype": "CORP", "conditionaltype": "RW", "tradingstatusflg": "A"}
+        for r in names().itertuples()])
+    daily = dsf()
+    daily_v2 = pd.DataFrame({
+        "permno": daily.permno, "dlycaldt": daily.date, "dlyprc": daily.prc.abs(),
+        "dlyret": daily.ret, "dlyretx": daily.ret, "dlyvol": daily.vol,
+        "shrout": daily.shrout, "dlyopen": daily.openprc, "dlyhigh": daily.askhi,
+        "dlylow": daily.bidlo, "dlydelflg": "N"})
+    gone = pd.DataFrame([
+        {"permno": p, "dlycaldt": (pd.Timestamp(last) + pd.offsets.BDay(1)).date(),
+         "dlyprc": None, "dlyret": ret, "dlyretx": ret, "dlyvol": None, "shrout": None,
+         "dlyopen": None, "dlyhigh": None, "dlylow": None, "dlydelflg": "Y"}
+        for p, (_, _, _, last, ret, code) in LINES.items() if ret is not None])
+    for folder, frame in (("crsp_stksecurityinfohist", names_v2),
+                          ("crsp_dsf_v2", pd.concat([daily_v2, gone], ignore_index=True)),
+                          ("crsp_ccmxpf_lnkhist", links()), ("comp_company", company()),
+                          ("comp_fundq", fundq())):
+        (directory / folder).mkdir(parents=True, exist_ok=True)
+        frame.to_parquet(directory / folder / f"{folder}_000.parquet", index=False)
+    return directory
+
+
 def free_store(path: Path) -> Path:
     """The free US store: Alpha as ALPH (split basis twice CRSP's), NEWCO, the benchmark,
     and SEC fundamentals for Alpha and Bust."""
@@ -136,13 +166,13 @@ def free_store(path: Path) -> Path:
     return path
 
 
-def build(tmp: Path):
+def build(tmp: Path, ciz: bool = False):
     """A world store with CRSP ingested and the free store copied in."""
     from portfolio_lab.data import crsp, wrds
     from portfolio_lab.data.schema import MARKET_MIGRATIONS, _apply
 
     market = free_store(tmp / "market.duckdb")
-    source = write_files(tmp / "wrds")
+    source = (write_ciz_files if ciz else write_files)(tmp / "wrds")
     con = duckdb.connect(str(tmp / "world.duckdb"))
     _apply(con, MARKET_MIGRATIONS)
     counts = crsp.ingest(con, source, market)

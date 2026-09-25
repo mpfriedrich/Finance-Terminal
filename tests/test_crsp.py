@@ -140,19 +140,28 @@ def test_download_fetches_each_year_once_and_says_when_crsp_is_not_licensed(tmp_
     from tests.test_wrds import _FakeServer
 
     columns = {table: list(cols) for (schema, table), cols in crsp.WANTED.items()}
-    server = _FakeServer(columns)
     since = dt.date(dt.date.today().year - 1, 1, 1)
+    # The current format (CIZ) is taken when the account has it ...
+    server = _FakeServer(columns)
     crsp.download(server, tmp_path, since, log=lambda _: None)
-    assert len(list((tmp_path / "crsp_dsf").glob("dsf_*.parquet"))) == 2
+    assert len(list((tmp_path / "crsp_dsf_v2").glob("dsf_*.parquet"))) == 2
+    names = next(q for q, _ in server.queries if "FROM crsp.stksecurityinfohist WHERE" in q)
+    assert "sharetype = 'NS'" in names
     server.queries.clear()
     crsp.download(server, tmp_path, since, log=lambda _: None)
-    years = [p[1].year for q, p in server.queries if "FROM crsp.dsf " in q and p]
+    years = [p[1].year for q, p in server.queries if "FROM crsp.dsf_v2 " in q and p]
     assert years == [dt.date.today().year]
     fundq = next(q for q, _ in server.queries if "FROM comp.fundq" in q and "LIMIT 1" not in q)
     assert "popsrc = 'D'" in fundq
+    # ... the legacy one otherwise.
+    legacy = _FakeServer({t: c for t, c in columns.items()
+                          if t not in ("dsf_v2", "stksecurityinfohist")})
+    crsp.download(legacy, tmp_path / "old", since, log=lambda _: None)
+    assert len(list((tmp_path / "old" / "crsp_dsf").glob("dsf_*.parquet"))) == 2
 
-    no_crsp = _FakeServer({t: c for t, c in columns.items() if t not in ("dsf", "dsenames")})
-    with pytest.raises(RuntimeError, match="not available to this WRDS account"):
+    no_crsp = _FakeServer({t: c for t, c in columns.items()
+                           if t not in ("dsf", "dsenames", "dsf_v2", "stksecurityinfohist")})
+    with pytest.raises(RuntimeError, match="subscription does not include CRSP"):
         crsp.download(no_crsp, tmp_path / "x", since, log=lambda _: None)
 
 
@@ -179,3 +188,21 @@ def test_a_crsp_table_the_account_may_see_but_not_read_ends_in_a_clear_message(t
     server.rollback = lambda: None
     with pytest.raises(RuntimeError, match="subscription does not include CRSP"):
         crsp.download(server, tmp_path, dt.date(2024, 1, 1), log=lambda _: None)
+
+
+def test_the_current_crsp_format_gives_the_same_store(world, tmp_path):
+    """CIZ: no cumulative price factor (split basis rebuilt from the price return), and
+    the delisting on a row of its own. Same lines, same prices, same exits."""
+    ciz, counts, _, _ = build(tmp_path, ciz=True)
+    legacy, legacy_counts, _, _ = world
+    for key in ("lines", "still_trading", "ended", "with_delisting_return", "crsp_end"):
+        assert counts[key] == legacy_counts[key], key
+    query = ("SELECT ticker, date, close, close_raw, close_adj FROM prices "
+             "WHERE ticker IN ('ALPH', 'BST', 'MRG') ORDER BY 1, 2")
+    a = ciz.con.execute(query).fetch_df()
+    b = legacy.con.execute(query).fetch_df()
+    assert len(a) == len(b)
+    for c in ("close", "close_raw", "close_adj"):
+        assert a[c].to_numpy() == pytest.approx(b[c].to_numpy(), rel=1e-6), c
+    assert ciz.delisting_returns(["BST", "MRG"]) == \
+        {"BST": pytest.approx(-0.85), "MRG": pytest.approx(0.25)}

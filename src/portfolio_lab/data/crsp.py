@@ -67,6 +67,15 @@ WANTED = {
     ("crsp", "dsf"): ("permno", "date", "prc", "ret", "vol", "shrout", "cfacpr",
                       "openprc", "askhi", "bidlo"),
     ("crsp", "dsedelist"): ("permno", "dlstdt", "dlret", "dlstcd"),
+    # CRSP's current format (CIZ, "version 2"); the legacy tables above end with
+    # December 2024, so a current subscription may have only these.
+    ("crsp", "stksecurityinfohist"): ("permno", "secinfostartdt", "secinfoenddt", "ticker",
+                                      "issuernm", "siccd", "primaryexch", "sharetype",
+                                      "securitytype", "securitysubtype", "usincflg",
+                                      "issuertype", "conditionaltype", "tradingstatusflg"),
+    ("crsp", "dsf_v2"): ("permno", "dlycaldt", "dlyprc", "dlyclose", "dlyopen", "dlyhigh",
+                         "dlylow", "dlyret", "dlyretx", "dlyvol", "shrout", "dlycap",
+                         "dlydelflg"),
     ("crsp", "ccmxpf_lnkhist"): ("gvkey", "lpermno", "linktype", "linkprim", "linkdt",
                                  "linkenddt"),
     ("comp", "company"): ("gvkey", "cik", "conm", "sic"),
@@ -87,6 +96,14 @@ INSTANT = {"book_value": "ceq", "total_assets": "at", "total_liabilities": "lt",
            "long_term_debt": "dltt", "current_debt": "dlc", "cash": "che",
            "current_assets": "act", "current_liabilities": "lct"}
 QUARTERLY_SKIP = ("operating_cash_flow", "capex", "gross_profit")
+LEGACY = (("crsp", "dsenames"), ("crsp", "dsf"), ("crsp", "dsedelist"))
+CIZ = (("crsp", "stksecurityinfohist"), ("crsp", "dsf_v2"))
+# Ordinary common shares of US corporations on NYSE, NYSE American or Nasdaq, in the
+# CIZ vocabulary (the filter Tidy Finance uses for the same universe).
+CIZ_COMMON = (("sharetype", "= 'NS'"), ("securitytype", "= 'EQTY'"),
+              ("securitysubtype", "= 'COM'"), ("usincflg", "= 'Y'"),
+              ("issuertype", "IN ('ACOR', 'CORP')"), ("primaryexch", "IN ('N', 'A', 'Q')"),
+              ("conditionaltype", "IN ('RW', 'NW')"), ("tradingstatusflg", "= 'A'"))
 
 
 def _folder(schema: str, table: str) -> str:
@@ -122,22 +139,26 @@ def download(con, dest: Path, since: dt.date, log=print) -> dict[str, int]:
     subscription does not include CRSP."""
     cols = {key: available_columns(con, key[1], wanted, schema=key[0])
             for key, wanted in WANTED.items()}
-    if not cols[("crsp", "dsf")] or not cols[("crsp", "dsenames")]:
-        raise RuntimeError(
-            "CRSP's daily stock file (crsp.dsf) is not available to this WRDS account. "
-            "Check the subscription on the WRDS website, or build without it: "
-            "--us=free.")
     # WRDS lists every table's columns to every account, licensed or not; only reading
     # a row shows whether the subscription covers it (first real run: "permission
-    # denied for schema crsp_a_stock"). So read one row of each before anything else.
-    for schema, table in (("crsp", "dsf"), ("crsp", "dsenames")):
-        if not readable(con, schema, table):
-            raise RuntimeError(
-                f"The WRDS account can see {schema}.{table} but may not read it: the "
-                "university's subscription does not include CRSP. The US half stays the "
-                "free store (SEC + Yahoo), which still lacks most companies that "
-                "stopped trading.")
-    for key in [k for k in cols if cols[k] and not readable(con, *k)]:
+    # denied for schema crsp_a_stock"). The current format is preferred: the legacy one
+    # ends with December 2024.
+    fmt = None
+    if all(cols[k] for k in CIZ) and all(readable(con, *k) for k in CIZ):
+        fmt = "ciz"
+    elif all(cols[k] for k in LEGACY[:2]) and all(readable(con, *k) for k in LEGACY[:2]):
+        fmt = "legacy"
+    if fmt is None:
+        raise RuntimeError(
+            "The WRDS account may not read CRSP's daily stock file (neither crsp.dsf_v2 "
+            "nor crsp.dsf): the university's subscription does not include CRSP. The US "
+            "half stays the free store (SEC + Yahoo), which still lacks most companies "
+            "that stopped trading.")
+    log(f"  CRSP format: {'CIZ (dsf_v2)' if fmt == 'ciz' else 'legacy (dsf, ends 2024)'}")
+    for key in (LEGACY if fmt == "ciz" else CIZ):
+        cols[key] = []
+    for key in [k for k in cols if cols[k] and k not in (*CIZ, *LEGACY[:2])
+                and not readable(con, *k)]:
         log(f"  {key[0]}.{key[1]}: not licensed for this account, skipped")
         cols[key] = []
     for key, wanted in WANTED.items():
@@ -145,9 +166,15 @@ def download(con, dest: Path, since: dt.date, log=print) -> dict[str, int]:
         if missing and cols[key]:
             log(f"  {key[0]}.{key[1]}: not in WRDS, skipped: {', '.join(sorted(missing))}")
 
-    common = ("SELECT DISTINCT permno FROM crsp.dsenames WHERE shrcd IN %s "
-              "AND exchcd IN %s")
-    common_params = (SHARE_CODES, EXCHANGE_CODES)
+    if fmt == "ciz":
+        conditions = " AND ".join(f"{c} {cond}" for c, cond in CIZ_COMMON
+                                  if c in cols[("crsp", "stksecurityinfohist")])
+        common = f"SELECT DISTINCT permno FROM crsp.stksecurityinfohist WHERE {conditions}"
+        common_params: tuple = ()
+    else:
+        common = ("SELECT DISTINCT permno FROM crsp.dsenames WHERE shrcd IN %s "
+                  "AND exchcd IN %s")
+        common_params = (SHARE_CODES, EXCHANGE_CODES)
     counts: dict[str, int] = {}
 
     def fresh(key) -> Path:
@@ -161,9 +188,9 @@ def download(con, dest: Path, since: dt.date, log=print) -> dict[str, int]:
         prefix = f"{alias}." if alias else ""
         return ", ".join(prefix + c for c in cols[key])
 
-    key = ("crsp", "dsenames")
+    key = ("crsp", "stksecurityinfohist") if fmt == "ciz" else ("crsp", "dsenames")
     counts["names"] = _fetch(
-        con, f"SELECT {select(key)} FROM crsp.dsenames WHERE permno IN ({common})",
+        con, f"SELECT {select(key)} FROM crsp.{key[1]} WHERE permno IN ({common})",
         common_params, fresh(key))
     key = ("crsp", "dsedelist")
     if cols[key]:
@@ -189,7 +216,8 @@ def download(con, dest: Path, since: dt.date, log=print) -> dict[str, int]:
                 con, f"SELECT {select(key)} FROM comp.{table} WHERE {std} "
                      "AND datadate >= %s", (fund_since,), fresh(key))
 
-    key = ("crsp", "dsf")
+    key = ("crsp", "dsf_v2") if fmt == "ciz" else ("crsp", "dsf")
+    date_col = "dlycaldt" if fmt == "ciz" else "date"
     folder = dest / _folder(*key)
     folder.mkdir(parents=True, exist_ok=True)
     this_year = dt.date.today().year
@@ -201,8 +229,8 @@ def download(con, dest: Path, since: dt.date, log=print) -> dict[str, int]:
             continue
         for old in done:
             old.unlink()
-        n = _fetch(con, f"SELECT {select(key)} FROM crsp.dsf WHERE date BETWEEN %s AND %s "
-                        f"AND permno IN ({common})",
+        n = _fetch(con, f"SELECT {select(key)} FROM crsp.{key[1]} WHERE {date_col} "
+                        f"BETWEEN %s AND %s AND permno IN ({common})",
                    (max(since, dt.date(year, 1, 1)), dt.date(year, 12, 31), *common_params),
                    folder / f"{stem}.parquet")
         counts["daily"] += n
@@ -233,6 +261,8 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path,
     CRSP now covers. One transaction.
     """
     have = {key: _load(con, source, *key) for key in WANTED}
+    if have[("crsp", "dsf_v2")]:
+        _ciz_as_legacy(con, have)
     if not have[("crsp", "dsf")]:
         raise RuntimeError(f"No CRSP daily prices under {source}.")
     if market_db is not None and Path(market_db).exists():
@@ -365,7 +395,9 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path,
                 SELECT CAST(d.permno AS BIGINT) AS permno, CAST(d.date AS DATE) AS date,
                        abs(CAST(d.prc AS DOUBLE)) AS px,
                        COALESCE(NULLIF(CAST(d.cfacpr AS DOUBLE), 0), 1) AS fac,
-                       {'abs(CAST(d.openprc AS DOUBLE))' if has_open else 'NULL'} AS op,
+                       -- A missing open is the close: the fill logic needs a price.
+                       COALESCE({'abs(CAST(d.openprc AS DOUBLE))' if has_open else 'NULL'},
+                                abs(CAST(d.prc AS DOUBLE))) AS op,
                        {'abs(CAST(d.askhi AS DOUBLE))' if has_hl else 'NULL'} AS hi,
                        {'abs(CAST(d.bidlo AS DOUBLE))' if has_hl else 'NULL'} AS lo,
                        CAST(d.ret AS DOUBLE) AS ret, CAST(d.vol AS DOUBLE) AS vol,
@@ -466,6 +498,78 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path,
             "SELECT COUNT(*) FROM crsp_link WHERE cik >= ?", [CRSP_OFFSET]).fetchone()[0],
         "crsp_end": crsp_end,
     }
+
+
+def _ciz_as_legacy(con, have) -> None:
+    """Put CIZ's tables into the legacy shape the translation reads.
+
+    * Names: `stksecurityinfohist` periods become name records; its exchange letters
+      N/A/Q become the legacy codes 1/2/3.
+    * Split basis: CIZ has no cumulative price factor, so one is built from the price
+      return excluding dividends (`dlyretx`) — the split-adjusted price is by definition
+      the last price walked back through that return. A factor that makes
+      `price / factor × last factor` equal to it is all the translation needs.
+    * Delisting: CIZ puts the delisting on a row of its own (`dlydelflg = 'Y'`) whose
+      return is what holders received. That row becomes a delisting record and is not
+      a trading day.
+    """
+    v = have[("crsp", "dsf_v2")]
+    n = have[("crsp", "stksecurityinfohist")]
+
+    def col(present, name, default="NULL"):
+        return f"d.{name}" if name in present else default
+
+    exch = ("CASE n.primaryexch WHEN 'N' THEN 1 WHEN 'A' THEN 2 WHEN 'Q' THEN 3 END"
+            if "primaryexch" in n else "1")
+    con.execute(
+        f"""CREATE OR REPLACE TEMP TABLE _crsp_dsenames AS
+            SELECT n.permno, n.secinfostartdt AS namedt, n.secinfoenddt AS nameendt,
+                   n.ticker, {'n.issuernm' if 'issuernm' in n else 'NULL'} AS comnam,
+                   11 AS shrcd, {exch} AS exchcd,
+                   {'n.siccd' if 'siccd' in n else 'NULL'} AS siccd
+            FROM _crsp_stksecurityinfohist n"""
+    )
+    delisted = ("COALESCE(d.dlydelflg, 'N') = 'Y'" if "dlydelflg" in v else "FALSE")
+    price = (f"COALESCE(abs(CAST({col(v, 'dlyprc')} AS DOUBLE)), "
+             f"abs(CAST({col(v, 'dlyclose')} AS DOUBLE)))")
+    retx = f"COALESCE(CAST({col(v, 'dlyretx')} AS DOUBLE), 0)"
+    shares = (f"COALESCE(CAST({col(v, 'shrout')} AS DOUBLE), "
+              f"CAST({col(v, 'dlycap')} AS DOUBLE) / NULLIF({price}, 0))")
+    con.execute(
+        f"""CREATE OR REPLACE TEMP TABLE _crsp_dsf AS
+            WITH d AS (
+                SELECT CAST(d.permno AS BIGINT) AS permno, CAST(d.dlycaldt AS DATE) AS date,
+                       {price} AS prc, CAST({col(v, 'dlyret')} AS DOUBLE) AS ret,
+                       CAST({col(v, 'dlyvol')} AS DOUBLE) AS vol, {shares} AS shrout,
+                       CAST({col(v, 'dlyopen')} AS DOUBLE) AS openprc,
+                       CAST({col(v, 'dlyhigh')} AS DOUBLE) AS askhi,
+                       CAST({col(v, 'dlylow')} AS DOUBLE) AS bidlo,
+                       exp(SUM(ln(greatest(1 + {retx}, 1e-9))) OVER (
+                           PARTITION BY d.permno ORDER BY d.dlycaldt)) AS g
+                FROM _crsp_dsf_v2 d
+                WHERE NOT ({delisted}) AND {price} > 0
+            ), w AS (
+                SELECT *, last_value(g) OVER p AS g_last, last_value(prc) OVER p AS prc_last
+                FROM d WINDOW p AS (PARTITION BY permno ORDER BY date
+                                    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+            )
+            SELECT permno, date, prc, ret, vol, shrout, openprc, askhi, bidlo,
+                   prc * g_last / (g * prc_last) AS cfacpr
+            FROM w"""
+    )
+    if "dlydelflg" in v:
+        con.execute(
+            f"""CREATE OR REPLACE TEMP TABLE _crsp_dsedelist AS
+                SELECT CAST(d.permno AS BIGINT) AS permno, CAST(d.dlycaldt AS DATE) AS dlstdt,
+                       CAST(d.dlyret AS DOUBLE) AS dlret, NULL::VARCHAR AS dlstcd
+                FROM _crsp_dsf_v2 d WHERE {delisted}"""
+        )
+    for key in LEGACY:
+        name = f"_{key[0]}_{key[1]}"
+        try:
+            have[key] = {r[0].lower() for r in con.execute(f"DESCRIBE {name}").fetchall()}
+        except duckdb.Error:
+            have[key] = set()
 
 
 def _compustat_na(con, have) -> None:

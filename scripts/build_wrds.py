@@ -9,7 +9,9 @@ fundamentals. Without CRSP (or with --us=free) the US half is the free store as 
 Afterwards set PORTFOLIO_LAB_SOURCE=world in .env.local and restart the app.
 
 Needs a WRDS account: WRDS_USERNAME in .env.local, and WRDS_PASSWORD there or the
-password in ~/.pgpass. With two-factor authentication WRDS sends a Duo push when the
+password in ~/.pgpass. If CRSP comes through a different university's account, add
+WRDS_CRSP_USERNAME and WRDS_CRSP_PASSWORD as well; each account then connects on its own
+(two Duo pushes). With two-factor authentication WRDS sends a Duo push when the
 connection opens — approve it on the phone. Nothing here prints the password.
 
 Run:
@@ -51,32 +53,54 @@ cache = from_dir or CACHE_DIR / "wrds"
 if us_only and not WORLD_DB.exists():
     sys.exit("No world store yet: run scripts/build_wrds.py without --us-only first.")
 
-if not us_only and from_dir is None:
-    user = require_secret(wrds.KEY_USER)
-    print("connecting to WRDS as the configured user (approve the Duo push if asked) ...",
+def connect(user_key: str, password_key: str, what: str):
+    user = require_secret(user_key)
+    print(f"connecting to WRDS for {what} ({user_key}; approve the Duo push if asked) ...",
           flush=True)
-    server = wrds.connect(user, secret(wrds.KEY_PASSWORD))
+    return wrds.connect(user, secret(password_key))
+
+
+def download_crsp(server) -> bool:
+    print(f"downloading CRSP (US, every listing since {since}) and Compustat North "
+          "America ...", flush=True)
     try:
-        if countries:
-            print(f"downloading Compustat Global for {len(countries)} countries since "
-                  f"{since} ...", flush=True)
-            print(f"downloaded: {wrds.download(server, cache, countries, since)}",
-                  flush=True)
-        if use_crsp:
-            print(f"downloading CRSP (US, every listing since {since}) and Compustat "
-                  "North America ...", flush=True)
-            try:
-                print(f"downloaded: {crsp.download(server, cache, since)}", flush=True)
-            except RuntimeError as exc:
-                print(f"  {exc}\n  continuing with the free US store.", flush=True)
-                use_crsp = False
-    finally:
-        server.close()
+        print(f"downloaded: {crsp.download(server, cache, since)}", flush=True)
+        return True
+    except RuntimeError as exc:
+        print(f"  {exc}\n  continuing with the free US store.", flush=True)
+        return False
+
+
+if not us_only and from_dir is None:
+    # CRSP may come through a second account (WRDS_CRSP_USERNAME) when the first
+    # university does not license it; then each account gets its own connection.
+    separate_crsp = use_crsp and bool(secret(wrds.KEY_CRSP_USER))
+    if countries or (use_crsp and not separate_crsp):
+        server = connect(wrds.KEY_USER, wrds.KEY_PASSWORD, "Compustat Global"
+                         if not use_crsp or separate_crsp else "Compustat Global and CRSP")
+        try:
+            if countries:
+                print(f"downloading Compustat Global for {len(countries)} countries since "
+                      f"{since} ...", flush=True)
+                print(f"downloaded: {wrds.download(server, cache, countries, since)}",
+                      flush=True)
+            if use_crsp and not separate_crsp:
+                use_crsp = download_crsp(server)
+        finally:
+            server.close()
+    if separate_crsp:
+        server = connect(wrds.KEY_CRSP_USER, wrds.KEY_CRSP_PASSWORD, "CRSP")
+        try:
+            use_crsp = download_crsp(server)
+        finally:
+            server.close()
 
 WORLD_DB.parent.mkdir(parents=True, exist_ok=True)
 con, work = open_market_for_rebuild(WORLD_DB)
 
-if not us_only and use_crsp and any((cache / "crsp_dsf").glob("*.parquet")):
+crsp_on_disk = any(any((cache / folder).glob("*.parquet"))
+                   for folder in ("crsp_dsf_v2", "crsp_dsf"))
+if not us_only and use_crsp and crsp_on_disk:
     counts = crsp.ingest(con, cache, MARKET_DB if MARKET_DB.exists() else None)
     print(f"CRSP: {counts}", flush=True)
     print(f"  {counts['ended']:,} US listings ended before {counts['crsp_end']} — the "

@@ -796,6 +796,18 @@ für die USA, die Phase 7 gemessen hat (0 von 20):
   Compustat Global dagegen ist lesbar: 9.020 Firmen in DEU/JPN, 8,8 Mio. Tageskurse.
   Abweichende Namen dort: Jahresüberschuss `nicon`, Aktien `cshoi`, kein `gp`, im
   Quartal `ibq` statt `niq`, kein `rdq` — alle über Ausweichnamen abgefangen.
+* **CRSP im aktuellen Format (CIZ)**: CRSP hat das Legacy-Format mit Dezember 2024
+  eingestellt; ein aktuelles Abo hat vermutlich nur `crsp.dsf_v2` und
+  `crsp.stksecurityinfohist`. Der Download nimmt CIZ, wenn lesbar, sonst Legacy. Das
+  Einlesen übersetzt CIZ in die Legacy-Form: Aktienfilter wie Tidy Finance
+  (`sharetype 'NS'`, `securitytype 'EQTY'`, `securitysubtype 'COM'`, US-Firma, NYSE/
+  AMEX/Nasdaq); die Split-Basis wird aus der Kursrendite ohne Dividenden (`dlyretx`)
+  rückgerechnet, weil CIZ keinen kumulierten Faktor führt; die Delisting-Rendite steht
+  in CIZ in einer eigenen Zeile (`dlydelflg = 'Y'`) und wird von dort gelesen. Test:
+  dieselben Testdaten in beiden Formaten ergeben denselben Bestand. Spaltennamen aus
+  dem `tidyfinance`-Paket (PyPI) abgeglichen, das dieselben WRDS-Abfragen stellt.
+* **Zweiter WRDS-Account für CRSP** (`WRDS_CRSP_USERNAME`/`_PASSWORD`), weil die FU
+  CRSP nicht lizenziert; der Nutzer beantragt einen USYD-Account.
 * Nebenbei behoben: `research.peers` gab bei fehlender Branche eine Tabelle ohne Spalten
   zurück, der Comps-Bereich stürzte ab.
 

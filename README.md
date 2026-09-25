@@ -171,7 +171,14 @@ CRSP ends where the subscription ends (often the previous December); the lines s
 trading continue with the free store's daily prices from there, spliced so nothing
 jumps. Fundamentals stay the SEC filings (dated by the SEC, kept for companies that no
 longer exist); Compustat North America fills only the years before a company's first
-XBRL filing. `--us=free` skips CRSP; `--countries=none` builds the US only.
+XBRL filing. `--us=free` skips CRSP; `--countries=none` builds the US only. Both
+CRSP formats are read: the current one (CIZ, `dsf_v2`) and the legacy one, which ends
+with December 2024. If CRSP comes through another university's WRDS account than
+Compustat Global, add that account as well — the build then connects twice:
+```
+WRDS_CRSP_USERNAME=...
+WRDS_CRSP_PASSWORD=...
+```
 
 **Untested against the real service**, like the paid source: the translation is tested
 on hand-made files in the Compustat Global and CRSP layouts. Check the counts the first
