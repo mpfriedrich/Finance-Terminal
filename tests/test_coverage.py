@@ -65,11 +65,7 @@ def test_without_a_measurement_nothing_is_claimed(con):
 
 def test_every_mapped_input_is_a_field_the_ingest_measures():
     """A typo in the mapping would silently mean 'never thin'."""
-    from portfolio_lab.data.sec import measure_coverage  # noqa: F401
-    known = {
-        "book_value", "net_income", "revenue", "operating_cash_flow", "capex", "cash",
-        "total_assets", "total_liabilities", "current_assets", "current_liabilities",
-        "long_term_debt", "current_debt", "shares_outstanding",
-    }
+    from portfolio_lab.data.sec import TAG_MAP
+    known = set(TAG_MAP)          # every metric the ingest reads, and so measures
     used = {f for fields in cov.INPUTS.values() for f in fields}
     assert used <= known, f"unknown fields in the mapping: {sorted(used - known)}"

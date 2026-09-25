@@ -38,7 +38,7 @@ if not st.runtime.exists():
     )
 
 from portfolio_lab import charts, ui
-from portfolio_lab.config import CACHE_DIR, USER_DB, CostModel, Settings, secret
+from portfolio_lab.config import ALERTS_STATE, CACHE_DIR, USER_DB, CostModel, Settings, secret
 from portfolio_lab.data import history as hist, industry
 from portfolio_lab.data.paid import MissingKey
 from portfolio_lab.data.schema import open_user
@@ -72,7 +72,8 @@ from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
-from portfolio_lab import paper
+from portfolio_lab import alerts, comps, deals, export, fred, fts, insiders, paper, risk, world
+from portfolio_lab import wacc as W
 from portfolio_lab import summary as ai_summary
 
 st.set_page_config(page_title="Portfolio Lab", page_icon="◫", layout="wide")
@@ -114,6 +115,25 @@ def _market_source():
 @st.cache_resource
 def _store():
     return Store(open_user(USER_DB))
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _insider_trades(cik: int) -> pd.DataFrame | None:
+    """Form 4 trades from EDGAR; None when the SEC cannot be reached."""
+    try:
+        return insiders.fetch(int(cik))
+    except Exception:                                                # noqa: BLE001
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _yahoo_bars(symbol: str) -> pd.DataFrame:
+    """Five years of daily bars for any Yahoo ticker, held in memory, never stored:
+    a name typed into the research box is not part of the screen's universe."""
+    try:
+        return world.fetch_history(symbol)
+    except Exception:                                                # noqa: BLE001
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=600)
@@ -312,6 +332,19 @@ def _lab_price_chart(con, ticker: str, result, rule) -> None:
         [ticker, result.dates[0], result.dates[-1]],
     ).fetch_df()
     if px_rule.empty:
+        # A Yahoo ticker outside the store: the same bars the rule ran on, on the same
+        # adjusted basis, so the markers sit on the line.
+        yb = _yahoo_bars(ticker)
+        if not yb.empty:
+            factor = yb["close_adj"] / yb["close"].where(yb["close"] != 0)
+            px_rule = pd.DataFrame({
+                "date": yb["date"], "open": yb["open"] * factor,
+                "high": yb["high"] * factor, "low": yb["low"] * factor,
+                "close": yb["close_adj"], "volume": yb["volume"]})
+            px_rule = px_rule[(pd.to_datetime(px_rule.date) >= pd.Timestamp(result.dates[0]))
+                              & (pd.to_datetime(px_rule.date)
+                                 <= pd.Timestamp(result.dates[-1]))]
+    if px_rule.empty:
         return
     bands = rule.signal.startswith("bollinger")
     if bands:
@@ -364,6 +397,59 @@ def _paper_table(valued: list[dict]) -> pd.DataFrame:
     return frame
 
 
+def _risk_block(positions: pd.DataFrame, key: str) -> None:
+    """Risk of a set of positions at their weights: historical, three years (risk.py)."""
+    import plotly.graph_objects as go
+
+    st.markdown("**Risk at these weights**")
+    m = risk.measures(src.con, positions, asof)
+    if not m or m.get("error"):
+        st.caption(m.get("error", "No price history for these names.") if m else
+                   "No price history for these names.")
+        return
+    st.markdown(ui.stats([
+        ("VOLATILITY", f"{m['volatility']:.1%}", ""),
+        ("BETA", ui.num(m.get("beta")), ""),
+        ("VAR 95% (1 DAY)", f"{m['var_95']:.2%}", "down"),
+        ("CVAR 95%", f"{m['cvar_95']:.2%}", "down"),
+        ("MAX DRAWDOWN", f"{m['max_drawdown']:.1%}", "down"),
+        ("LARGEST", f"{m['largest_weight']:.0%}", ""),
+        ("EFFECTIVE NAMES", f"{m['effective_names']:.1f}", ""),
+    ]), unsafe_allow_html=True)
+    st.caption(
+        f"{m['days']} trading days, {m['from']} to {m['to']}, at today's weights. VaR: "
+        "the daily loss exceeded on one day in twenty; CVaR: the average loss on those "
+        "days. Effective names: how many equal positions the concentration equals.")
+    r1, r2 = st.columns(2)
+    with r1:
+        ex = risk.exposure(src.con, positions)
+        st.markdown(ui.grid(pd.DataFrame({
+            "industry": ex["sector"].astype(str).str.slice(0, 34),
+            "weight": ex["weight"].map(lambda w: f"{w:.0%}")}),
+            numeric={"weight"}, ticker_col="industry"), unsafe_allow_html=True)
+    with r2:
+        sx = risk.stress(src.con, positions)
+        st.markdown(ui.grid(pd.DataFrame({
+            "crisis": sx["scenario"],
+            "portfolio": sx["portfolio"].map(lambda v: ui.pct(v, 1)),
+            "S&P 500 TR": sx["index"].map(lambda v: ui.pct(v, 1)),
+            "covered": sx["coverage"].map(lambda v: f"{v:.0%}"),
+        }), signed={"portfolio", "S&P 500 TR"}, numeric={"covered"},
+            ticker_col="crisis"), unsafe_allow_html=True)
+        st.caption("Return over each crisis, peak to trough of the S&P 500, had these "
+                   "weights been held; 'covered' is the weight that had prices then.")
+    corr = m["correlation"]
+    if corr.shape[0] > 1:
+        heat = go.Figure(go.Heatmap(z=corr.values, x=list(corr.columns),
+                                    y=list(corr.index), zmin=-1, zmax=1,
+                                    colorscale=[[0, ui.CYAN], [0.5, ui.BG], [1, ui.AMBER]]))
+        heat.update_layout(height=min(120 + 26 * len(corr), 520),
+                           margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor=ui.BG,
+                           plot_bgcolor=ui.BG,
+                           font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10))
+        st.plotly_chart(heat, use_container_width=True, key=f"corr_{key}")
+
+
 def _paper_section(origin: str, key: str, opener, default_name: str,
                    what: str, amount_label: str | None = "Amount ($)") -> None:
     """A closed-off paper-money area for one tab: buy, and see this tab's books.
@@ -395,10 +481,10 @@ def _paper_section(origin: str, key: str, opener, default_name: str,
                         unsafe_allow_html=True)
 
 
-(tab_screen, tab_research, tab_options, tab_strategy, tab_lab, tab_books, tab_macro,
- tab_commodities, tab_calendar, tab_news) = st.tabs(
-    ["SCREEN", "RESEARCH", "OPTIONS", "STRATEGY", "LAB", "BOOKS", "MACRO", "COMMODITIES",
-     "CALENDAR", "NEWS"]
+(tab_screen, tab_monitor, tab_research, tab_options, tab_strategy, tab_lab, tab_books,
+ tab_deals, tab_macro, tab_commodities, tab_calendar, tab_news) = st.tabs(
+    ["SCREEN", "MONITOR", "RESEARCH", "OPTIONS", "STRATEGY", "LAB", "BOOKS", "DEALS",
+     "MACRO", "COMMODITIES", "CALENDAR", "NEWS"]
 )
 
 with tab_screen:
@@ -625,6 +711,19 @@ with tab_screen:
             )
         else:
             st.caption("Nothing ticked. Tick a row, or use the buttons above.")
+        st.download_button(
+            "Export screen to Excel",
+            data=export.workbook(
+                {"Passed": res.ranked, "Held": picks,
+                 "Excluded": pd.DataFrame(
+                     [{"reason": k, "names": v} for k, v in res.exclusions.items()]),
+                 "Filters": pd.DataFrame([{"metric": f.metric, "op": f.op,
+                                           "value": str(f.value)} for f in spec.filters])},
+                title="Screen: " + "; ".join(spec.describe()),
+                source="SEC XBRL as first filed, daily closes; USD", as_of=asof),
+            file_name=export.filename("screen", asof),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="export_screen")
     else:
         st.info("Nothing passed. The breakdown below names the binding rule.")
 
@@ -1101,10 +1200,51 @@ with tab_research:
                     "days": sens_np.days.astype(str),
                 }).head(6), numeric={"days"}, signed={"correlation", "beta"},
                     ticker_col="series"), unsafe_allow_html=True)
+        elif matches.empty and not (ybars := _yahoo_bars(query.strip().upper())).empty:
+            # Any Yahoo ticker outside the US universe: BHP.AX, SAP.DE, 7203.T. Price
+            # and volume only — there are no SEC filings behind it (world.py, stage 2).
+            ysym = query.strip().upper()
+            yquote = rs.live_quote(ysym) or {}
+            ycur = yquote.get("currency") or "the listing's currency"
+            st.markdown(ui.kv([
+                ("Symbol", ysym, False),
+                ("Currency", ycur, False),
+                ("History", f"{ybars.date.iloc[0]} to {ybars.date.iloc[-1]} "
+                            f"({len(ybars):,} days, from Yahoo)", False),
+            ]), unsafe_allow_html=True)
+            if yquote.get("price"):
+                tone = "up" if (yquote.get("change") or 0) >= 0 else "down"
+                cells = [("LAST", ui.num(yquote["price"]), tone)]
+                if yquote.get("change") is not None:
+                    cells.append(("CHANGE", ui.pct(yquote["change"]), tone))
+                st.markdown(ui.stats(cells), unsafe_allow_html=True)
+            st.info(
+                f"**{ysym} is outside the US universe**, so there are no SEC filings "
+                "behind it: no fundamentals, no screen, no point-in-time backtest. What "
+                f"works: the chart and risk figures below, in {ycur}, and a buy/sell "
+                "rule on it in LAB → Single stock."
+            )
+            yspan = st.selectbox("Range", ["6M", "1Y", "5Y"], index=1,
+                                 label_visibility="collapsed", key=f"yspan_{ysym}")
+            yview = ybars.join(rs.bollinger(ybars)).tail(
+                {"6M": 126, "1Y": 252, "5Y": 1260}[yspan])
+            ybands = st.toggle("Bollinger 20d", value=False, key=f"ybands_{ysym}")
+            st.plotly_chart(charts.price_figure(yview, ysym, bands=ybands),
+                            use_container_width=True, key=f"ychart_{ysym}")
+            ystats = world.stats(ybars)
+            cells = [(k, ui.pct(ystats[k], 1), "up" if ystats[k] >= 0 else "down")
+                     for k in ("1M", "3M", "6M", "1Y") if ystats.get(k) is not None]
+            if ystats.get("volatility"):
+                cells.append(("VOLATILITY", f"{ystats['volatility']:.0%}", ""))
+            if ystats.get("max_drawdown") is not None:
+                cells.append(("MAX DD 1Y", ui.pct(ystats["max_drawdown"], 1), "down"))
+            st.markdown(ui.stats(cells), unsafe_allow_html=True)
         elif matches.empty:
             st.warning(
-                f"Nothing matches '{query}'. It may be delisted, a fund, or outside the "
-                "US listings this app carries."
+                f"Nothing matches '{query}'. It is not a US listing in this app, and "
+                "Yahoo returned no prices for it — either it has none under that symbol "
+                "or it could not be reached. Other exchanges need Yahoo's suffix, e.g. "
+                "BHP.AX (ASX), SAP.DE (Xetra), 7203.T (Tokyo)."
             )
             if not non_equity.empty:
                 st.caption(
@@ -1336,6 +1476,12 @@ with tab_research:
             # -------------------------------------------------------------- financials
             with sections[1]:
                 hist = rs.annual_history(src.con, cik)
+                filed_in = rs.reporting_currency(src.con, cik)
+                if filed_in != "USD":
+                    st.caption(
+                        f"Figures below are in {filed_in}, as filed. The screen and the "
+                        "valuation convert them to USD at the exchange rate of their date."
+                    )
                 if hist.empty:
                     st.info("No annual XBRL figures for this filer.")
                 else:
@@ -1495,23 +1641,197 @@ with tab_research:
                     }), numeric={"price", "mkt cap", "p/e", "p/b", "p/s"},
                         ticker_col="year"), unsafe_allow_html=True)
 
-                peer_set = rs.peers(enriched, ticker)
-                if not peer_set.empty:
-                    st.markdown("#### Comparable companies")
-                    st.markdown(ui.grid(pd.DataFrame({
-                        "ticker": peer_set.ticker,
-                        "name": peer_set.name.astype(str).str.slice(0, 24),
-                        "mkt cap": peer_set.market_cap.map(ui.money),
-                        "p/e": peer_set.price_to_earnings.map(ui.num),
-                        "p/b": peer_set.price_to_book.map(ui.num),
-                        "p/s": peer_set.price_to_sales.map(ui.num),
-                        "margin": peer_set.net_margin.map(lambda v: ui.pct(v, 1)),
-                        "d/e": peer_set.debt_to_equity.map(ui.num),
-                    }), numeric={"mkt cap", "p/e", "p/b", "p/s", "d/e"},
-                        signed={"margin"}), unsafe_allow_html=True)
+                # --------------------------------------------------- trading comps
+                st.markdown("#### Trading comps")
+                suggested = rs.peers(enriched, ticker).ticker.astype(str).tolist()[:8]
+                chosen_peers = st.multiselect(
+                    "Peers", options=sorted(enriched.ticker.astype(str).unique()),
+                    default=suggested, key=f"peers_{ticker}",
+                    help="Suggested: same SEC industry, closest in size. Add or remove "
+                         "names — a comps set is a judgement, not a formula.")
+                sheet = comps.sheet(enriched, ticker, chosen_peers) if chosen_peers else {}
+                if not sheet:
+                    st.info("Pick at least one peer.")
+                else:
+                    labels = {c: l for c, l, _ in comps.COLUMNS}
+                    pct_cols = {"ebitda_margin", "return_on_invested_capital",
+                                "revenue_growth"}
+
+                    def _fmt(col, v):
+                        if v is None or pd.isna(v):
+                            return "—"
+                        return ui.pct(v, 1) if col in pct_cols else f"{v:,.1f}x"
+
+                    def _vs(col, v):
+                        if v is None or pd.isna(v):
+                            return "—"
+                        if col in pct_cols:
+                            return f"{v * 100:+.1f} pp"
+                        if col == "net_debt_to_ebitda":
+                            return f"{v:+.1f}x"
+                        return ui.pct(v, 0)
+
+                    shown = [c for c, _, _ in comps.COLUMNS if c in sheet["rows"].columns]
+                    body = pd.DataFrame({
+                        "company": sheet["rows"].ticker.astype(str),
+                        "mkt cap": sheet["rows"].market_cap.map(ui.money),
+                        "EV": sheet["rows"].enterprise_value.map(ui.money),
+                        **{labels[c]: [_fmt(c, v) for v in sheet["rows"][c]] for c in shown},
+                    })
+                    summary = pd.DataFrame({
+                        "company": ["peer median", "peer mean", "peer high", "peer low",
+                                    f"{ticker} vs median"],
+                        "mkt cap": [""] * 5, "EV": [""] * 5,
+                        **{labels[c]: [_fmt(c, sheet["stats"].at[k, c])
+                                       for k in ("median", "mean", "high", "low")]
+                           + [_vs(c, sheet["vs_median"].get(c))] for c in shown},
+                    })
+                    st.markdown(ui.grid(pd.concat([body, summary], ignore_index=True),
+                                        numeric=set(labels.values()) | {"mkt cap", "EV"},
+                                        ticker_col="company"), unsafe_allow_html=True)
                     st.caption(
-                        "Same SEC industry, closest in size. Size is part of it: a small "
-                        "miner and a large one do not trade on the same multiples.")
+                        f"First row is {ticker}; statistics are over the peers only. "
+                        "Point-in-time figures in USD as of the screen date.")
+
+                    implied_v = comps.implied(enriched, ticker, sheet["stats"])
+                    if not implied_v.empty:
+                        st.markdown("#### What the peer multiples imply")
+                        st.markdown(ui.grid(pd.DataFrame({
+                            "multiple": implied_v["multiple"],
+                            "peer median": implied_v["peer median"].map(
+                                lambda v: f"{v:,.1f}x"),
+                            "applied to": implied_v["applied to"].str.replace("_ttm", " TTM")
+                                .str.replace("_", " "),
+                            "implied equity": implied_v["implied equity value"].map(ui.money),
+                            "per share": implied_v["implied price"].map(ui.num),
+                            "vs price": implied_v["vs price"],
+                        }).assign(**{"vs price": lambda d: d["vs price"].map(
+                            lambda v: ui.pct(v, 0))}),
+                            numeric={"peer median", "implied equity", "per share"},
+                            signed={"vs price"}, ticker_col="multiple"),
+                            unsafe_allow_html=True)
+                        st.caption(
+                            "Median multiple × the company's own figure. EV multiples are "
+                            "taken to equity by subtracting net debt; equity multiples are "
+                            "not. A multiple is skipped where the company's figure is not "
+                            "positive. The spread between rows is the honest answer: "
+                            "comps give a range, not a price.")
+
+                if me is not None:
+                    zs = comps.against_history(val, me)
+                    if not zs.empty:
+                        st.markdown("#### Against its own history")
+                        st.markdown(ui.grid(pd.DataFrame({
+                            "multiple": zs["multiple"],
+                            "now": zs["now"].map(lambda v: f"{v:,.1f}x"),
+                            "own average": zs["own average"].map(lambda v: f"{v:,.1f}x"),
+                            "years": zs["years"].astype(str),
+                            "z-score": zs["z-score"].map(lambda v: f"{v:+.1f}"),
+                        }), numeric={"now", "own average", "years"}, signed={"z-score"},
+                            ticker_col="multiple"), unsafe_allow_html=True)
+                        st.caption("How many standard deviations today's multiple sits "
+                                   "from the company's own yearly average. Past years "
+                                   "use the price and figures of their own date.")
+
+                # ------------------------------------------ cost of capital and DCF
+                if me is not None:
+                    st.markdown("#### Cost of capital and DCF")
+                    tnx = src.con.execute(
+                        "SELECT close, date FROM prices WHERE ticker = '^TNX' "
+                        "AND close IS NOT NULL ORDER BY date DESC LIMIT 1").fetchone()
+                    rf_default = (tnx[0] / 100.0) if tnx else mx.current_risk_free(
+                        src.con, settings.risk_free_fallback)[0]
+                    beta_raw = (rs.price_stats(src.con, ticker) or {}).get("beta")
+                    w1, w2, w3, w4 = st.columns(4)
+                    rf_in = w1.number_input(
+                        "Risk-free %", 0.0, 15.0, round(rf_default * 100, 2), 0.05,
+                        key=f"rf_{ticker}",
+                        help=f"US 10-year yield{' of ' + str(tnx[1]) if tnx else ''}.")
+                    beta_in = w2.number_input(
+                        "Beta (raw)", -1.0, 4.0, round(float(beta_raw or 1.0), 2), 0.05,
+                        key=f"beta_{ticker}",
+                        help="Daily returns against the S&P 500 total return over the "
+                             "stored history." if beta_raw else "No beta measured; 1.0.")
+                    erp_in = w3.number_input("Equity risk premium %", 2.0, 9.0,
+                                             W.DEFAULT_ERP * 100, 0.25, key=f"erp_{ticker}")
+                    blume = w4.toggle("Blume-adjusted beta", value=True, key=f"blume_{ticker}")
+                    g1, g2, g3 = st.columns(3)
+                    growth_in = g1.number_input("FCFF growth %/yr", -10.0, 30.0, 3.0, 0.5,
+                                                key=f"g_{ticker}")
+                    years_in = g2.number_input("Years", 1, 15, 5, 1, key=f"yrs_{ticker}")
+                    tg_in = g3.number_input("Growth forever %", -2.0, 5.0, 2.0, 0.25,
+                                            key=f"tg_{ticker}")
+                    w_inputs = W.Inputs(risk_free=rf_in / 100, beta=beta_in,
+                                        equity_risk_premium=erp_in / 100, adjust_beta=blume,
+                                        growth=growth_in / 100, years=int(years_in),
+                                        terminal_growth=tg_in / 100)
+                    b = W.build(me, w_inputs)
+                    st.markdown(ui.grid(pd.DataFrame({
+                        "component": ["Cost of equity (CAPM)", "Cost of debt, pre-tax",
+                                      "Tax rate", "Weight of equity", "Weight of debt",
+                                      "WACC"],
+                        "value": [f"{b['cost_of_equity']:.2%}",
+                                  f"{b['cost_of_debt_pre_tax']:.2%}",
+                                  f"{b['tax_rate']:.1%}", f"{b['weight_equity']:.1%}",
+                                  f"{b['weight_debt']:.1%}", f"{b['wacc']:.2%}"],
+                        "from": [f"{rf_in:.2f}% + {b['beta']:.2f} × {erp_in:.2f}%",
+                                 b["cost_of_debt_source"], str(b["tax_rate_source"]),
+                                 f"market cap {ui.money(b['equity_value'])}",
+                                 f"book debt {ui.money(b['debt_value'])}", ""],
+                    }), numeric={"value"}, ticker_col="component"),
+                        unsafe_allow_html=True)
+                    out_dcf = W.dcf(me, b["wacc"], w_inputs)
+                    if "error" in out_dcf:
+                        st.info(f"No DCF: {out_dcf['error']}.")
+                    else:
+                        tone = "up" if out_dcf["vs_price"] >= 0 else "down"
+                        st.markdown(ui.stats([
+                            ("FCFF TTM", ui.money(out_dcf["fcff"]), ""),
+                            ("ENTERPRISE VALUE", ui.money(out_dcf["enterprise_value"]), ""),
+                            ("EQUITY VALUE", ui.money(out_dcf["equity_value"]), ""),
+                            ("PER SHARE", ui.num(out_dcf["per_share"]), tone),
+                            ("VS PRICE", ui.pct(out_dcf["vs_price"], 0), tone),
+                            ("TERMINAL SHARE", f"{out_dcf['terminal_share']:.0%}", ""),
+                        ]), unsafe_allow_html=True)
+                        grid = W.sensitivity(me, b["wacc"], w_inputs)
+                        st.markdown("Per share — WACC down the side, growth forever across")
+                        st.markdown(ui.grid(
+                            grid.map(ui.num).reset_index().rename(columns={"index": "WACC"}),
+                            numeric=set(grid.columns), ticker_col="WACC"),
+                            unsafe_allow_html=True)
+                        st.caption(
+                            "FCFF = operating cash flow − capex + interest × (1 − tax), "
+                            "grown for the stated years, then forever; discounted at the "
+                            "WACC, less net debt, per listed share. Debt is weighted at "
+                            "book value. When the terminal share is high, the answer is "
+                            "mostly the growth-forever guess — which is what the grid shows.")
+
+                st.download_button(
+                    f"Export {ticker} to Excel",
+                    data=export.workbook(
+                        {"Annual as filed": rs.annual_history(src.con, cik),
+                         "Quarterly": rs.quarterly_trend(src.con, cik),
+                         "Valuation history": val,
+                         "Comps": (sheet or {}).get("rows", pd.DataFrame()),
+                         "Comps stats": (sheet or {}).get("stats", pd.DataFrame())
+                             .reset_index(names="statistic")
+                             if (sheet or {}).get("stats") is not None else pd.DataFrame(),
+                         "Implied by peers": locals().get("implied_v", pd.DataFrame()),
+                         "WACC": pd.DataFrame([locals().get("b") or {}]),
+                         "DCF": pd.DataFrame([{k: v for k, v in
+                                               (locals().get("out_dcf") or {}).items()}]),
+                         "DCF sensitivity": (locals().get("grid", pd.DataFrame())
+                                             .reset_index(names="wacc")
+                                             if isinstance(locals().get("grid"),
+                                                           pd.DataFrame) else pd.DataFrame())},
+                        title=f"{ticker} — research",
+                        source=f"SEC XBRL as first filed (history in "
+                               f"{rs.reporting_currency(src.con, cik)}); screen figures "
+                               "in USD; daily closes",
+                        as_of=asof),
+                    file_name=export.filename(f"{ticker}_research", asof),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"export_{ticker}")
 
             # ----------------------------------------------------------------- options
             with sections[4]:
@@ -1770,6 +2090,44 @@ with tab_research:
 
             # --------------------------------------------------------------- ownership
             with sections[7]:
+                st.markdown("#### Insider transactions (Form 4)")
+                if st.button("Load insider trades from the SEC", key=f"ins_{ticker}"):
+                    st.session_state[f"ins_loaded_{ticker}"] = True
+                if st.session_state.get(f"ins_loaded_{ticker}"):
+                    with st.spinner("Reading the latest Form 4 filings…"):
+                        trades = _insider_trades(cik)
+                    if trades is None:
+                        st.warning("The SEC could not be reached.")
+                    elif trades.empty:
+                        st.info("No Form 4 filings with share transactions.")
+                    else:
+                        ins = insiders.summary(trades, asof)
+                        st.markdown(ui.stats([
+                            ("BOUGHT (12M)", f"{ins['bought_trades']} by "
+                             f"{ins['bought_insiders']}", "up" if ins["bought_trades"] else ""),
+                            ("BOUGHT VALUE", ui.money(ins["bought_value"]), ""),
+                            ("SOLD (12M)", f"{ins['sold_trades']} by "
+                             f"{ins['sold_insiders']}", "down" if ins["sold_trades"] else ""),
+                            ("SOLD VALUE", ui.money(ins["sold_value"]), ""),
+                        ]), unsafe_allow_html=True)
+                        st.markdown(ui.grid(pd.DataFrame({
+                            "date": trades["date"].astype(str),
+                            "insider": trades["insider"].astype(str).str.slice(0, 26),
+                            "role": trades["role"].astype(str).str.slice(0, 30),
+                            "what": trades["what"],
+                            "shares": trades["shares"].map(
+                                lambda v: f"{v:,.0f}" if pd.notna(v) else "—"),
+                            "price": trades["price"].map(ui.num),
+                            "value": trades["value"].map(ui.money),
+                        }).head(40), numeric={"shares", "price", "value"},
+                            ticker_col="date"), unsafe_allow_html=True)
+                        st.caption(
+                            "The counts above are open-market purchases and sales only — "
+                            "an insider spending their own money at the market price. "
+                            "Grants, option exercises, tax withholding and gifts are "
+                            "listed but not counted: they are pay, not decisions. From "
+                            "the last 30 Form 4 filings.")
+                st.markdown("#### Institutions")
                 hold = rs.holders(ticker)
                 if hold.empty:
                     st.info("No institutional holdings reported for this ticker.")
@@ -2207,6 +2565,151 @@ def _watched() -> list[str]:
     return seen
 
 
+with tab_monitor:
+    boards = world.monitor(src.con)
+    stored = sum(int(t["last"].notna().sum()) for t in boards.values() if "last" in t)
+    if not stored:
+        st.info(
+            "The monitor's series are not stored yet. Run once: "
+            "`uv run python scripts/build_world.py` — build_prices.py keeps them "
+            "current after that."
+        )
+    else:
+        def _move(v, symbol):
+            if v is None or pd.isna(v):
+                return "—"
+            if symbol in world.YIELD_SYMBOLS:
+                bp = round(v)
+                return "0 bp" if bp == 0 else f"{bp:+.0f} bp"
+            return ui.pct(v, 2)
+
+        def _board(group: str, frame: pd.DataFrame) -> None:
+            st.markdown(f"#### {group}")
+            rows = pd.DataFrame({
+                "market": frame["label"],
+                "last": [("—" if pd.isna(v) else
+                          f"{v:,.4f}" if ("=X" in sym and v < 20) else f"{v:,.2f}")
+                         for v, sym in zip(frame.get("last", pd.Series(dtype=float)),
+                                           frame["symbol"])],
+                **{h: [_move(v, sym) for v, sym in zip(frame.get(h, [None] * len(frame)),
+                                                        frame["symbol"])]
+                   for h in ("1D", "1W", "1M", "YTD", "1Y")},
+            })
+            st.markdown(ui.grid(rows, numeric={"last"},
+                                signed={"1D", "1W", "1M", "YTD", "1Y"},
+                                ticker_col="market"), unsafe_allow_html=True)
+
+        groups = list(boards.items())
+        left, right = st.columns(2)
+        for i, (group, frame) in enumerate(groups):
+            with (left if i % 2 == 0 else right):
+                _board(group, frame)
+        newest = max((d for t in boards.values() for d in t.get("as_of", pd.Series())
+                      if isinstance(d, dt.date)), default=None)
+        st.caption(
+            f"Daily closes, newest {newest}. Each move compares with the last close on or "
+            "before the start of its window; yields move in basis points. Indices are "
+            "in their own currency and without dividends."
+        )
+
+        st.markdown("#### Side by side")
+        labels = {s: l for g in world.MONITOR.values() for s, l in g}
+        c1, c2 = st.columns([3, 1])
+        picked = c1.multiselect(
+            "Markets", options=list(labels), format_func=lambda s: labels[s],
+            default=["^GSPC", "^AXJO", "^GDAXI", "^N225"], key="monitor_pick",
+            label_visibility="collapsed")
+        span = c2.selectbox("Since", ["1Y", "3Y", "5Y", "10Y"], index=0,
+                            label_visibility="collapsed", key="monitor_span")
+        if picked:
+            since = dt.date.today() - dt.timedelta(days=365 * int(span[:-1]))
+            curves = world.rebased(src.con, picked, since)
+            if curves.empty:
+                st.info("No stored history for these yet.")
+            else:
+                import plotly.graph_objects as go
+
+                cmp_fig = go.Figure()
+                palette = [ui.AMBER, ui.CYAN, ui.UP, "#C792EA", "#F78C6C", "#FFCB6B",
+                           "#89DDFF", ui.DOWN]
+                for i, sym in enumerate(curves.columns):
+                    cmp_fig.add_trace(go.Scatter(
+                        x=curves.index, y=curves[sym], name=labels.get(sym, sym),
+                        line=dict(color=palette[i % len(palette)], width=1.5)))
+                cmp_fig.add_hline(y=100, line=dict(color=ui.MUTED, width=1, dash="dot"))
+                cmp_fig.update_layout(
+                    height=340, margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor=ui.BG,
+                    plot_bgcolor=ui.BG, hovermode="x unified",
+                    font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
+                    legend=dict(orientation="h", y=-0.15),
+                    xaxis=dict(gridcolor=ui.RULE),
+                    yaxis=dict(gridcolor=ui.RULE, side="right"))
+                st.plotly_chart(cmp_fig, use_container_width=True, key="monitor_cmp")
+                st.caption("Each line starts at 100 on its first close in the window, so "
+                           "an index, a currency and gold can share one scale. Price "
+                           "only, in each market's own currency.")
+
+
+    st.markdown("#### Compare anything")
+    k1, k2 = st.columns([3, 1])
+    cmp_syms = k1.text_input(
+        "Symbols", value="AAPL, MSFT, ^GSPC, GC=F", key="cmp_syms",
+        help="Any stored series: US shares, the monitor's indices, currencies, "
+             "commodities, crypto. Comma-separated.")
+    cmp_span = k2.selectbox("Since", ["1Y", "3Y", "5Y", "10Y"], index=1, key="cmp_span",
+                            label_visibility="visible")
+    cmp = world.compare(src.con, cmp_syms.split(","),
+                        dt.date.today() - dt.timedelta(days=365 * int(cmp_span[:-1])))
+    if not cmp:
+        st.info("None of these has stored prices in that window.")
+    else:
+        import plotly.graph_objects as go
+
+        if cmp["missing"]:
+            st.caption("No stored prices for: " + ", ".join(cmp["missing"]))
+        cfig = go.Figure()
+        cpal = [ui.AMBER, ui.CYAN, ui.UP, "#C792EA", "#F78C6C", "#FFCB6B", "#89DDFF",
+                ui.DOWN]
+        for i_c, sym in enumerate(cmp["curves"].columns):
+            cfig.add_trace(go.Scatter(x=cmp["curves"].index, y=cmp["curves"][sym],
+                                      name=sym, line=dict(color=cpal[i_c % len(cpal)],
+                                                          width=1.5)))
+        cfig.add_hline(y=100, line=dict(color=ui.MUTED, width=1, dash="dot"))
+        cfig.update_layout(height=320, margin=dict(l=0, r=0, t=6, b=0),
+                           paper_bgcolor=ui.BG, plot_bgcolor=ui.BG, hovermode="x unified",
+                           font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
+                           legend=dict(orientation="h", y=-0.15),
+                           xaxis=dict(gridcolor=ui.RULE),
+                           yaxis=dict(gridcolor=ui.RULE, side="right"))
+        st.plotly_chart(cfig, use_container_width=True, key="cmp_chart")
+        cs = cmp["stats"]
+        st.markdown(ui.grid(pd.DataFrame({
+            "symbol": cs["symbol"],
+            "return": cs["return"].map(lambda v: ui.pct(v, 1)),
+            "p.a.": cs["annualised"].map(lambda v: ui.pct(v, 1)),
+            "volatility": cs["volatility"].map(
+                lambda v: f"{v:.1%}" if v is not None and pd.notna(v) else "—"),
+            "max drawdown": cs["max_drawdown"].map(lambda v: ui.pct(v, 1)),
+            "beta": cs.get("beta", pd.Series([None] * len(cs))).map(ui.num),
+        }), numeric={"volatility", "beta"}, signed={"return", "p.a.", "max drawdown"},
+            ticker_col="symbol"), unsafe_allow_html=True)
+        corr_c = cmp["correlation"]
+        if not corr_c.empty and corr_c.shape[0] > 1:
+            hm = go.Figure(go.Heatmap(
+                z=corr_c.values, x=list(corr_c.columns), y=list(corr_c.index),
+                zmin=-1, zmax=1, text=corr_c.round(2).values, texttemplate="%{text}",
+                colorscale=[[0, ui.CYAN], [0.5, ui.BG], [1, ui.AMBER]]))
+            hm.update_layout(height=min(140 + 34 * len(corr_c), 520),
+                             margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor=ui.BG,
+                             plot_bgcolor=ui.BG,
+                             font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10))
+            st.plotly_chart(hm, use_container_width=True, key="cmp_corr")
+        st.caption(
+            f"Correlation of daily returns over the {cmp['shared_days']} days all of them "
+            "traded. Beta against the S&P 500 total return. Each series in its own "
+            "currency; indices and commodities without dividends.")
+
+
 with tab_books:
     st.markdown("#### Paper books — every simulated purchase, side by side")
     st.caption(
@@ -2275,6 +2778,25 @@ with tab_books:
 
         st.markdown(ui.grid(_paper_table(valued), ticker_col="book"),
                     unsafe_allow_html=True)
+        daily = pd.DataFrame({
+            f"{v['book']['name']} ({v['book']['origin']})": v["value"]
+            for v in valued if not v.get("empty")})
+        st.download_button(
+            "Export books to Excel",
+            data=export.workbook(
+                {"Books": pd.DataFrame([{
+                    "book": v["book"]["name"], "from": v["book"]["origin"],
+                    "kind": v["book"]["kind"], "since": str(v["book"]["started_on"]),
+                    "money_in": v.get("invested_now"), "value": v.get("value_now"),
+                    "gain": v.get("gain"), "return": v.get("return"),
+                    "sp500tr_return": v.get("benchmark_return")} for v in valued]),
+                 "Daily value": daily.reset_index(names="date") if not daily.empty
+                 else pd.DataFrame()},
+                title="Paper books", source="Stored daily closes; values in USD",
+                as_of=asof),
+            file_name=export.filename("paper_books", asof),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="export_books")
 
         for v in valued:
             b = v["book"]
@@ -2314,13 +2836,205 @@ with tab_books:
                                    f"{pd.Timestamp(fills.iloc[-1]['date']).date()}.")
                     for note in v.get("notes", []):
                         st.caption(note)
+                if b["kind"] == "hold" and not v.get("empty"):
+                    held_pos = (store.holdings(str(b["id"])[6:])
+                                if str(b["id"]).startswith("track-")
+                                else paper.positions(store.con, b["id"]))
+                    if len(held_pos):
+                        _risk_block(held_pos, key=str(b["id"]))
                 if not str(b["id"]).startswith("track-") and st.button(
                         "Close this book", key=f"close_{b['id']}"):
                     paper.close_book(store.con, b["id"])
                     st.rerun()
 
 
+with tab_deals:
+    st.markdown("#### Precedent transactions — what acquirers paid")
+    st.caption(
+        "Enter the deal terms from the press release; every multiple is computed from "
+        "the target's SEC filings as they stood on the announcement date, so no figure "
+        "published after the deal enters it. A delisted target can be given by CIK."
+    )
+    with st.expander("Add a deal", expanded=deals.listing(store.con).empty):
+        d1, d2, d3 = st.columns(3)
+        d_target = d1.text_input("Target (ticker or CIK)", key="deal_target")
+        d_acq = d2.text_input("Acquirer", key="deal_acquirer")
+        d_date = d3.date_input("Announced", value=asof or dt.date.today(),
+                               max_value=dt.date.today(), key="deal_date")
+        d4, d5, d6 = st.columns(3)
+        d_offer = d4.number_input("Offer per share ($, 0 = not given)", min_value=0.0,
+                                  value=0.0, step=0.5, key="deal_offer")
+        d_equity = d5.number_input("Equity value ($m, 0 = offer × shares)", min_value=0.0,
+                                   value=0.0, step=100.0, key="deal_equity")
+        d_unaff = d6.number_input("Unaffected price ($, 0 = last close before)",
+                                  min_value=0.0, value=0.0, step=0.5, key="deal_unaff")
+        d_cons = st.selectbox("Consideration", ["cash", "stock", "cash and stock", "other"],
+                              key="deal_cons")
+        d_note = st.text_input("Note (source, conditions)", key="deal_note")
+        if st.button("Add deal", key="deal_add"):
+            try:
+                deals.add(store.con, d_target, d_date, d_acq,
+                          equity_value=d_equity * 1e6 or None,
+                          offer_price=d_offer or None,
+                          unaffected_price=d_unaff or None,
+                          consideration=d_cons, note=d_note)
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+    deal_rows, deal_stats = deals.table(src.con, store.con)
+    if deal_rows.empty:
+        st.info("No deals yet.")
+    else:
+        def _x(v):
+            return "—" if v is None or pd.isna(v) else f"{v:,.1f}x"
+
+        mult_labels = {"ev_to_revenue": "EV/Sales", "ev_to_ebitda": "EV/EBITDA",
+                       "ev_to_ebit": "EV/EBIT", "price_to_earnings": "P/E",
+                       "price_to_book": "P/B", "premium": "premium"}
+        for col in list(mult_labels) + ["equity_value", "enterprise_value", "error"]:
+            if col not in deal_rows.columns:
+                deal_rows[col] = None
+        shown_deals = pd.DataFrame({
+            "target": deal_rows["target"].astype(str),
+            "acquirer": deal_rows["acquirer"].astype(str),
+            "announced": deal_rows["announced"].astype(str),
+            "equity": deal_rows["equity_value"].map(
+                lambda v: "—" if v is None or pd.isna(v) else ui.money(v)),
+            "EV": deal_rows["enterprise_value"].map(
+                lambda v: "—" if v is None or pd.isna(v) else ui.money(v)),
+            **{mult_labels[c]: deal_rows[c].map(_x) for c in mult_labels if c != "premium"},
+            "premium": deal_rows["premium"].map(
+                lambda v: "—" if v is None or pd.isna(v) else ui.pct(v, 0)),
+        })
+        if not deal_stats.empty:
+            summary_rows = pd.DataFrame({
+                "target": ["median", "mean", "high", "low"],
+                "acquirer": [""] * 4, "announced": [""] * 4, "equity": [""] * 4,
+                "EV": [f"n = {int(deal_stats.at['n', 'ev_to_ebitda'])}"
+                       if "ev_to_ebitda" in deal_stats.columns else ""] + [""] * 3,
+                **{mult_labels[c]: [
+                    (ui.pct(deal_stats.at[k, c], 0) if c == "premium"
+                     and not pd.isna(deal_stats.at[k, c]) else
+                     "—" if pd.isna(deal_stats.at[k, c]) else _x(deal_stats.at[k, c]))
+                    for k in ("median", "mean", "high", "low")]
+                   for c in mult_labels if c in deal_stats.columns},
+            })
+            shown_deals = pd.concat([shown_deals, summary_rows], ignore_index=True)
+        st.markdown(ui.grid(shown_deals, numeric={"equity", "EV", *mult_labels.values()},
+                            signed={"premium"}, ticker_col="target"),
+                    unsafe_allow_html=True)
+        for r in deal_rows.itertuples():
+            if isinstance(r.error, str) and r.error:
+                st.caption(f"{r.target} ({r.announced}): {r.error}")
+        st.caption(
+            "EV = equity value + the target's net debt (debt − cash) on file at the "
+            "announcement. TTM figures are the four quarters filed by then. Premium is "
+            "the offer over the unaffected price — the last close before the "
+            "announcement unless one was entered; a leak before that date hides part "
+            "of it."
+        )
+
+        subj_opts = sorted(_frame(asof).ticker.astype(str).unique()) if asof else []
+        subject = st.selectbox("Apply the precedent medians to", [""] + subj_opts,
+                               key="deal_subject")
+        if subject:
+            enriched_d = derive_metrics(_frame(asof))
+            srow = enriched_d[enriched_d.ticker.astype(str) == subject]
+            implied_d = (deals.apply_to(deal_stats, srow.iloc[0]) if len(srow)
+                         else pd.DataFrame())
+            if implied_d.empty:
+                st.info("None of the median multiples can be applied — the company's "
+                        "figures are missing or not positive.")
+            else:
+                st.markdown(ui.grid(pd.DataFrame({
+                    "multiple": implied_d["multiple"].map(mult_labels),
+                    "precedent median": implied_d["precedent median"].map(_x),
+                    "implied equity": implied_d["implied equity value"].map(ui.money),
+                    "per share": implied_d["implied price"].map(ui.num),
+                    "vs price": implied_d["vs price"].map(lambda v: ui.pct(v, 0)),
+                }), numeric={"precedent median", "implied equity", "per share"},
+                    signed={"vs price"}, ticker_col="multiple"), unsafe_allow_html=True)
+                st.caption(
+                    "A takeover value: it includes the control premium buyers paid, so "
+                    "it sits above what the trading comps imply for the same company.")
+
+        st.download_button(
+            "Export deals to Excel",
+            data=export.workbook(
+                {"Deals": deal_rows.drop(columns=["id"], errors="ignore"),
+                 "Statistics": deal_stats.reset_index(names="statistic")
+                 if not deal_stats.empty else pd.DataFrame()},
+                title="Precedent transactions",
+                source="Deal terms entered by hand; target figures from SEC filings "
+                       "as of each announcement",
+                as_of=asof),
+            file_name=export.filename("precedent_deals", asof),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="export_deals")
+
+        with st.expander("Remove a deal"):
+            gone = st.selectbox(
+                "Deal", deal_rows["id"].tolist(), key="deal_remove_pick",
+                format_func=lambda i: " · ".join(
+                    str(x) for x in deal_rows.loc[deal_rows.id == i,
+                                                  ["target", "acquirer", "announced"]]
+                    .iloc[0]))
+            if st.button("Remove", key="deal_remove"):
+                deals.remove(store.con, gone)
+                st.rerun()
+
+
 with tab_macro:
+    st.markdown("#### The economy")
+    board = fred.dashboard(src.con)
+    if board["latest"].notna().sum() == 0:
+        st.info("No macro series stored yet. Run once: `uv run python scripts/build_fred.py` "
+                "— FRED needs no key, and build_prices.py keeps the series current.")
+    else:
+        def _reading(v, unit):
+            if v is None or pd.isna(v):
+                return "—"
+            if unit == "%":
+                return f"{v:.1f}%"
+            if unit == "k jobs":
+                return f"{v:+,.0f}k"
+            return f"{v:,.1f} {unit}" if unit not in ("claims",) else f"{v:,.0f}"
+
+        mcols = st.columns(2)
+        for i, (group, g) in enumerate(board.groupby("group", sort=False)):
+            with mcols[i % 2]:
+                st.markdown(f"**{group}**")
+                st.markdown(ui.grid(pd.DataFrame({
+                    "series": g["series"],
+                    "latest": [_reading(v, u) for v, u in zip(g["latest"], g["unit"])],
+                    "previous": [_reading(v, u) for v, u in zip(g["previous"], g["unit"])],
+                    "period": [pd.Timestamp(p).strftime("%Y-%m")
+                               if p is not None and not pd.isna(p) else "—"
+                               for p in g["period"]],
+                }), numeric={"latest", "previous"}, ticker_col="series"),
+                    unsafe_allow_html=True)
+        st.caption(
+            "From FRED (St. Louis Fed). Inflation, prices, output and wages as the change "
+            "on a year earlier; GDP as the annualised change on the previous quarter; "
+            "payrolls as the monthly change. `period` is the month or quarter the figure "
+            "describes — it is published weeks later. Consensus forecasts and surprises "
+            "are a paid dataset and are not shown.")
+        m1, m2 = st.columns([3, 1])
+        macro_pick = m1.multiselect(
+            "Series", options=list(fred.SERIES),
+            format_func=lambda sid: fred.SERIES[sid][0],
+            default=["CPIAUCSL", "CPILFESL", "FEDFUNDS"], key="macro_pick",
+            label_visibility="collapsed")
+        macro_since = m2.selectbox("Since", ["5Y", "10Y", "20Y"], key="macro_since",
+                                   label_visibility="collapsed")
+        if macro_pick:
+            start_m = dt.date.today() - dt.timedelta(days=365 * int(macro_since[:-1]))
+            lines = pd.concat([fred.history(src.con, sid, start_m) for sid in macro_pick],
+                              axis=1)
+            if not lines.empty:
+                st.line_chart(lines, height=300)
+
     st.markdown("#### The curve, and what it prices")
     snap = mc.rate_snapshot(src.con)
     if snap.empty:
@@ -2666,6 +3380,12 @@ with tab_lab:
                 """,
                 [list(held_now), lab_start, asof],
             ).fetch_df()
+            if bars.empty and lab_single:
+                # Not in the store: any Yahoo ticker (BHP.AX, SAP.DE), fetched on demand.
+                yb = _yahoo_bars(lab_ticker)
+                if not yb.empty:
+                    yb = yb[pd.to_datetime(yb.date) >= pd.Timestamp(lab_start)]
+                    bars = yb[["ticker", "date", "open_adj", "close_adj"]].dropna()
             bench = src.con.execute(
                 "SELECT date, close_adj FROM prices WHERE ticker = ? "
                 "AND date BETWEEN ? AND ? ORDER BY date",
@@ -2768,6 +3488,14 @@ with tab_lab:
             )
 
         def _open_rule_book(name, amount):
+            stored = src.con.execute(
+                "SELECT COUNT(DISTINCT ticker) FROM prices WHERE ticker IN "
+                "(SELECT UNNEST(?))", [list(held_now)]).fetchone()[0]
+            if stored < len(held_now):
+                raise ValueError(
+                    "A paper book is valued from the stored prices, and this ticker is "
+                    "not in the store (it came from Yahoo on demand). Only US-listed "
+                    "names can be followed as paper books for now.")
             caps_now = _frame(asof).set_index("ticker").reindex(list(held_now))
             cap_now = float(pd.to_numeric(
                 caps_now.get("shares_outstanding", pd.Series(dtype=float)),
@@ -2786,6 +3514,90 @@ with tab_lab:
 
 
 with tab_news:
+    with st.expander("Alerts", expanded=False):
+        rules_now = alerts.rules(store.con)
+        with st.form("alert_form", clear_on_submit=True):
+            a1, a2, a3, a4 = st.columns([1, 2, 1, 1])
+            a_ticker = a1.text_input("Ticker", placeholder="AAPL")
+            a_kind = a2.selectbox("When", list(alerts.KINDS),
+                                  format_func=lambda k: alerts.KINDS[k])
+            a_x = a3.number_input("Level / %", min_value=0.0, value=0.0, step=1.0)
+            a4.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
+            if a4.form_submit_button("Add", use_container_width=True) and a_ticker.strip():
+                try:
+                    alerts.add(store.con, a_ticker, a_kind,
+                               None if a_kind == "new_filing" else a_x)
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+        if rules_now.empty:
+            st.caption("No alerts yet.")
+        else:
+            for rule in rules_now.itertuples():
+                r1, r2 = st.columns([5, 1])
+                level = "" if rule.kind == "new_filing" else f" {rule.threshold:g}"
+                r1.markdown(f"`{rule.ticker}` — {alerts.KINDS[rule.kind]}{level}")
+                if r2.button("×", key=f"rm_alert_{rule.id}"):
+                    alerts.remove(store.con, rule.id)
+                    st.rerun()
+            if st.button("Check now against the stored closes", key="alerts_now"):
+                fired, state_now = alerts.run(store.con, src.con,
+                                              alerts.load_state(ALERTS_STATE))
+                alerts.save_state(ALERTS_STATE, state_now)
+                st.success("; ".join(e["message"] for e in fired) if fired
+                           else "Nothing new fired.")
+        history_log = alerts.load_state(ALERTS_STATE).get("log", [])[-10:][::-1]
+        if history_log:
+            st.markdown(ui.grid(pd.DataFrame({
+                "bar": [e["on"] for e in history_log],
+                "alert": [e["message"] for e in history_log]}),
+                ticker_col="bar"), unsafe_allow_html=True)
+        st.caption(
+            "Checked on end-of-day closes: every morning run (after the price refresh, "
+            "with a Mac notification) and with the button above. A level alert fires "
+            "when the close crosses the level, once. New-filing alerts need the morning "
+            "run or scripts/check_alerts.py, which ask EDGAR.")
+
+    with st.expander("Search every SEC filing (full text, 2001 onwards)", expanded=False):
+        with st.form("fts_form"):
+            f1, f2 = st.columns([3, 1])
+            fts_q = f1.text_input("Words", placeholder='"pricing pressure" tariff',
+                                  help='Phrases in double quotes. Every word must appear.')
+            fts_ticker = f2.text_input("Only this ticker", placeholder="optional")
+            f3, f4, f5 = st.columns([2, 1, 1])
+            fts_forms = f3.multiselect(
+                "Forms", ["10-K", "10-Q", "8-K", "20-F", "6-K", "S-1", "DEF 14A", "SC 13D"],
+                default=["10-K", "10-Q", "8-K"])
+            fts_from = f4.date_input("From", value=dt.date.today() - dt.timedelta(days=730))
+            fts_to = f5.date_input("To", value=dt.date.today())
+            go_fts = st.form_submit_button("Search", use_container_width=True)
+        if go_fts and fts_q.strip():
+            fts_cik = None
+            if fts_ticker.strip():
+                hit_cik = src.con.execute(
+                    "SELECT cik FROM securities WHERE upper(ticker) = upper(?) LIMIT 1",
+                    [fts_ticker.strip()]).fetchone()
+                fts_cik = hit_cik[0] if hit_cik else None
+                if fts_cik is None:
+                    st.warning(f"{fts_ticker} is not a US listing in the store; "
+                               "searching all companies.")
+            fts_failed = False
+            try:
+                found, total = fts.search(fts_q, fts_forms, fts_from, fts_to, fts_cik,
+                                          pages=2)
+            except Exception as exc:                                  # noqa: BLE001
+                found, total, fts_failed = pd.DataFrame(), 0, True
+                st.error(f"The SEC search could not be reached ({type(exc).__name__}).")
+            if not found.empty:
+                st.caption(f"{total:,} filings contain it; the latest {len(found)} shown. "
+                           "A hit means the words appear, not that they matter — "
+                           "risk-factor boilerplate matches too.")
+                st.dataframe(found, hide_index=True, use_container_width=True,
+                             column_config={"url": st.column_config.LinkColumn(
+                                 "filing", display_text="open")})
+            elif not fts_failed:
+                st.info("No filing contains that.")
+
     st.markdown("#### Daily briefing")
     followed = store.everything_followed()
     if not followed:

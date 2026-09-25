@@ -112,6 +112,10 @@ def weighted(frame: pd.DataFrame, weighting: str) -> pd.DataFrame:
     return out
 
 
+# Used for after-tax returns when a filer reports no usable effective rate.
+STATUTORY_TAX_RATE = 0.21
+
+
 def derive_metrics(frame: pd.DataFrame) -> pd.DataFrame:
     """Build valuation ratios from raw inputs.
 
@@ -176,6 +180,50 @@ def derive_metrics(frame: pd.DataFrame) -> pd.DataFrame:
     out["net_margin"] = np.where(revenue > 0, net_income / revenue, np.nan)
     out["operating_margin_proxy"] = np.where(revenue > 0, ocf / revenue, np.nan)
     out["return_on_equity"] = np.where(equity > 0, net_income / equity, np.nan)
+
+    # --- enterprise value and what it is compared with (added 2026-09-24) -------------
+    # EV = market cap + debt - cash. Unknown debt stays unknown rather than zero: a
+    # filer that tags no borrowings may have none, or may tag them under a name we do not
+    # read, and a flattering EV is worse than a missing one.
+    cash = col("cash")
+    ebit = col("operating_income_ttm")
+    ebitda = ebit + col("depreciation_amortization_ttm")
+    out["ebitda_ttm"] = ebitda
+    out["net_debt"] = total_debt - cash
+    ev = out["market_cap"] + total_debt - cash
+    out["enterprise_value"] = ev
+    positive_ev = ev.where(ev > 0)       # a negative EV makes every EV multiple meaningless
+
+    def ev_ratio(denom: pd.Series) -> np.ndarray:
+        return np.where(denom > 0, positive_ev / denom, np.nan)
+
+    out["ev_to_ebitda"] = ev_ratio(ebitda)
+    out["ev_to_ebit"] = ev_ratio(ebit)
+    out["ev_to_sales"] = ev_ratio(revenue)
+    # Signed on purpose: net cash gives a negative figure, which is a real and good fact.
+    out["net_debt_to_ebitda"] = np.where(ebitda > 0, out["net_debt"] / ebitda, np.nan)
+    out["interest_coverage"] = np.where(col("interest_expense_ttm") > 0,
+                                        ebit / col("interest_expense_ttm"), np.nan)
+
+    out["gross_margin"] = np.where(revenue > 0, col("gross_profit_ttm") / revenue, np.nan)
+    out["operating_margin"] = np.where(revenue > 0, ebit / revenue, np.nan)
+    out["ebitda_margin"] = np.where(revenue > 0, ebitda / revenue, np.nan)
+    out["return_on_assets"] = ratio(net_income, "total_assets")
+
+    # ROIC = EBIT after tax / (equity + debt - cash). The effective rate where the filer
+    # reports one between 0 and 50%; otherwise the US federal rate, 21% — a stated
+    # assumption, recorded per row in `tax_rate_source`.
+    pretax, tax = col("pretax_income_ttm"), col("income_tax_ttm")
+    effective = (tax / pretax).where((pretax > 0) & (tax >= 0))
+    effective = effective.where(effective <= 0.5)
+    out["tax_rate"] = effective.fillna(STATUTORY_TAX_RATE)
+    out["tax_rate_source"] = np.where(effective.notna(), "effective", "statutory 21%")
+    invested = equity + total_debt - cash
+    out["return_on_invested_capital"] = np.where(
+        invested > 0, ebit * (1 - out["tax_rate"]) / invested, np.nan)
+
+    prior = col("revenue_ttm_prior")
+    out["revenue_growth"] = np.where(prior > 0, revenue / prior - 1.0, np.nan)
     return out
 
 
@@ -251,6 +299,16 @@ def run_screen(
 
     max_age = spec.max_filing_age_months * 31
     drop(data["price"].notna(), "no current price")
+    # Foreign filers (added 2026-09-24): an amount in a currency with no exchange rate on
+    # the screen date cannot be compared with a dollar price, and a US listing whose
+    # ADR ratio is unknown has no honest market cap. Each is its own reason, so the
+    # screen says why a name is missing instead of pricing it wrong.
+    if "fx_missing" in data.columns:
+        drop(~data["fx_missing"].fillna(False).astype(bool),
+             "no exchange rate for the reporting currency")
+    if "listing_ratio_unknown" in data.columns:
+        drop(~data["listing_ratio_unknown"].fillna(False).astype(bool),
+             "foreign listing: ADR ratio not measured")
     # The column can be absent entirely on a date before anything was filed, which is a
     # universe where nothing is eligible — not an error, and not a crash.
     if "shares_outstanding" not in data.columns:

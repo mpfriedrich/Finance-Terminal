@@ -31,6 +31,11 @@ FILTERABLE: tuple[str, ...] = (
     "price_to_cash_flow",
     "price_to_free_cash_flow",
     "price_to_cash",
+    # enterprise-value multiples — lower is cheaper
+    "ev_to_ebitda",
+    "ev_to_ebit",
+    "ev_to_sales",
+    "enterprise_value",
     # model-based value — see screen/valuation.py; these depend on assumptions
     "price_to_intrinsic",
     "price_to_graham",
@@ -41,10 +46,21 @@ FILTERABLE: tuple[str, ...] = (
     "debt_to_equity",
     "liabilities_to_equity",
     "current_ratio",
+    "net_debt_to_ebitda",
+    "interest_coverage",
+    "net_debt",
+    # returns and margins
+    "return_on_invested_capital",
+    "return_on_assets",
+    "gross_margin",
+    "operating_margin",
+    "ebitda_margin",
+    "revenue_growth",
     # raw magnitudes
     "book_value",
     "net_income_ttm",
     "revenue_ttm",
+    "ebitda_ttm",
     "operating_cash_flow_ttm",
     "free_cash_flow_ttm",
     "cash",
@@ -68,6 +84,10 @@ LOWER_IS_BETTER = {
     "price_to_cash",
     "price_to_intrinsic",
     "price_to_graham",
+    "ev_to_ebitda",
+    "ev_to_ebit",
+    "ev_to_sales",
+    "net_debt_to_ebitda",
 }
 
 

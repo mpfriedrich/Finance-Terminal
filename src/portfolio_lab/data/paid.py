@@ -49,6 +49,13 @@ DURATION = {
     # Sharadar reports capex as a negative cash flow; the SEC tag stores the payment as a
     # positive number. Stored positive so both sources mean the same thing.
     "capex": "capex",
+    # For EV multiples, returns on capital and the cost of debt, as in sec.py.
+    "operating_income": "opinc",
+    "depreciation_amortization": "depamor",
+    "interest_expense": "intexp",
+    "income_tax": "taxexp",
+    "pretax_income": "ebt",
+    "gross_profit": "gp",
 }
 INSTANT = {
     "book_value": "equity",
@@ -159,7 +166,12 @@ def ingest(con: duckdb.DuckDBPyConnection, tickers_csv: Path, sf1_csv: Path,
             FROM _sf1 f JOIN securities s ON s.ticker = upper(f.ticker)
             WHERE f.dimension IN ('ARQ', 'ARY') AND TRY_CAST(f.datekey AS DATE) IS NOT NULL
         """
+        # A column the export does not carry (older layouts, narrower subscriptions) is
+        # skipped rather than failing the whole build; the metric is then simply absent.
+        present = {r[0].lower() for r in con.execute("DESCRIBE _sf1").fetchall()}
         for metric, column in DURATION.items():
+            if column not in present:
+                continue
             sign = "-" if metric == "capex" else ""
             con.execute(
                 f"""
@@ -177,6 +189,8 @@ def ingest(con: duckdb.DuckDBPyConnection, tickers_csv: Path, sf1_csv: Path,
                 """
             )
         for metric, column in INSTANT.items():
+            if column not in present:
+                continue
             con.execute(
                 f"""
                 INSERT INTO fundamentals (cik, metric, value, period_start, period_end,

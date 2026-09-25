@@ -18,6 +18,8 @@ MARKET_DB = DATA_DIR / "market.duckdb"
 PAID_DB = DATA_DIR / "paid.duckdb"
 USER_DB = DATA_DIR / "user.duckdb"
 CACHE_DIR = DATA_DIR / "cache"
+# What alerts have fired, kept by the checker (alerts.py) outside the portfolio store.
+ALERTS_STATE = DATA_DIR / "alerts_state.json"
 
 
 def load_env(path: Path | None = None) -> None:

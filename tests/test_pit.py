@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as dt
 
 import duckdb
+import pandas as pd
 import pytest
 
 from portfolio_lab.data import pit
@@ -240,3 +241,57 @@ def test_an_amendment_does_not_become_the_first_filing_once_the_original_ages_ou
     after = D(2025, 6, 1)
     assert pit.instant_values(c, after).empty, "the amendment stood in for an aged-out original"
     assert pit.share_counts(c, after).empty, "the amended share count stood in"
+
+
+# --- foreign currencies (24.09.2026) ---------------------------------------------------
+
+@pytest.fixture()
+def fx_store():
+    """CIK 20 reports in euros, CIK 21 in a currency with no stored rate, CIK 22 in USD.
+    EURUSD is 1.10 up to 1 March 2024 and 2.00 afterwards."""
+    c = duckdb.connect(":memory:")
+    _apply(c, MARKET_MIGRATIONS)
+    rows = [
+        (20, "book_value", 1_000.0, None, D(2023, 12, 31), D(2024, 2, 15), "x", "Equity", 0, "EUR"),
+        (20, "shares_outstanding", 100_000_000.0, None, D(2023, 12, 31), D(2024, 2, 15), "x",
+         "EntityCommonStockSharesOutstanding", 0, None),
+        (21, "book_value", 1_000.0, None, D(2023, 12, 31), D(2024, 2, 15), "y", "Equity", 0, "XYZ"),
+        (22, "book_value", 1_000.0, None, D(2023, 12, 31), D(2024, 2, 15), "z",
+         "StockholdersEquity", 0, "USD"),
+    ]
+    c.executemany(
+        "INSERT INTO fundamentals (cik, metric, value, period_start, period_end, filed, "
+        "accession, xbrl_tag, tag_rank, currency) VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+    fx = [("EURUSD=X", d, 1.10 if d <= D(2024, 3, 1) else 2.00)
+          for d in pd.bdate_range("2024-01-02", "2024-06-28").date]
+    c.executemany("INSERT INTO prices (ticker, date, open, close, close_adj, volume) "
+                  "VALUES (?, ?, ?, ?, ?, 0)", [(t, d, r, r, r) for t, d, r in fx])
+    return c
+
+
+def test_euro_amounts_are_converted_at_the_rate_of_the_screen_date(fx_store):
+    wide = pit.fundamentals_wide(fx_store, D(2024, 2, 20)).set_index("cik")
+    assert wide.at[20, "book_value"] == pytest.approx(1_100.0)
+    assert wide.at[20, "reporting_currency"] == "EUR"
+    assert wide.at[22, "book_value"] == pytest.approx(1_000.0)
+    assert wide.at[20, "shares_outstanding"] == 100_000_000.0, "shares are not money"
+
+
+def test_a_later_exchange_rate_never_reaches_an_earlier_screen(fx_store):
+    before = pit.fundamentals_wide(fx_store, D(2024, 3, 1)).set_index("cik")
+    after = pit.fundamentals_wide(fx_store, D(2024, 3, 15)).set_index("cik")
+    assert before.at[20, "book_value"] == pytest.approx(1_100.0)
+    assert after.at[20, "book_value"] == pytest.approx(2_000.0)
+
+
+def test_a_currency_without_a_rate_is_flagged_and_keeps_no_amounts(fx_store):
+    wide = pit.fundamentals_wide(fx_store, D(2024, 2, 20)).set_index("cik")
+    assert bool(wide.at[21, "fx_missing"]) and pd.isna(wide.at[21, "book_value"])
+    assert not bool(wide.at[20, "fx_missing"])
+
+
+def test_a_stale_rate_is_not_todays_rate(fx_store):
+    """The stored rates end on 28 June; a screen in late July has no current rate."""
+    wide = pit.fundamentals_wide(fx_store, D(2024, 7, 25)).set_index("cik")
+    if 20 in wide.index:
+        assert bool(wide.at[20, "fx_missing"])

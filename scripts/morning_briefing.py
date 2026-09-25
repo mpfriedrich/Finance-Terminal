@@ -154,6 +154,12 @@ def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     today = dt.date.today()
     price_note = refresh_prices()
+    # Alerts on the fresh closes, before the briefing: they notify on their own.
+    try:
+        subprocess.run([sys.executable, str(Path(__file__).resolve().parent /
+                                            "check_alerts.py")], timeout=600)
+    except Exception as exc:                                        # noqa: BLE001
+        print(f"alerts not checked: {exc}")
 
     market = open_market(MARKET_DB, read_only=True)
     # Read a COPY of the portfolio store. DuckDB's write lock excludes readers as well,

@@ -45,6 +45,22 @@ INPUTS: dict[str, tuple[str, ...]] = {
     "cash": ("cash",),
     "total_assets": ("total_assets",),
     "total_liabilities": ("total_liabilities",),
+    "ev_to_ebitda": ("shares_outstanding", "operating_income", "depreciation_amortization",
+                     "long_term_debt", "cash"),
+    "ev_to_ebit": ("shares_outstanding", "operating_income", "long_term_debt", "cash"),
+    "ev_to_sales": ("shares_outstanding", "revenue", "long_term_debt", "cash"),
+    "enterprise_value": ("shares_outstanding", "long_term_debt", "cash"),
+    "net_debt": ("long_term_debt", "cash"),
+    "net_debt_to_ebitda": ("long_term_debt", "cash", "operating_income",
+                           "depreciation_amortization"),
+    "interest_coverage": ("operating_income", "interest_expense"),
+    "return_on_invested_capital": ("operating_income", "book_value", "long_term_debt"),
+    "return_on_assets": ("net_income", "total_assets"),
+    "gross_margin": ("gross_profit", "revenue"),
+    "operating_margin": ("operating_income", "revenue"),
+    "ebitda_margin": ("operating_income", "depreciation_amortization", "revenue"),
+    "ebitda_ttm": ("operating_income", "depreciation_amortization"),
+    "revenue_growth": ("revenue",),
 }
 
 
