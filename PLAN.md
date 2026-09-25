@@ -788,6 +788,14 @@ für die USA, die Phase 7 gemessen hat (0 von 20):
   meldet der Build klar, dass `crsp.dsf` fehlt, und dieser Teil muss angepasst werden),
   und wie viele noch gehandelte Linien im freien Bestand keinen Anschluss finden (der
   Build zählt sie).
+* **Gemessen am 25.09.2026 (erster echter Lauf):** Der WRDS-Account der FU darf CRSP
+  nicht lesen („permission denied for schema crsp_a_stock“) — die Tabellen sind
+  sichtbar, die Zeilen nicht. Der Build prüft das jetzt vorab (eine Zeile lesen) und
+  fällt mit klarer Meldung auf den freien US-Bestand zurück. Der US-Teil bleibt damit
+  vorerst überlebendenbasiert; der Code liegt bereit, falls die Lizenz kommt.
+  Compustat Global dagegen ist lesbar: 9.020 Firmen in DEU/JPN, 8,8 Mio. Tageskurse.
+  Abweichende Namen dort: Jahresüberschuss `nicon`, Aktien `cshoi`, kein `gp`, im
+  Quartal `ibq` statt `niq`, kein `rdq` — alle über Ausweichnamen abgefangen.
 * Nebenbei behoben: `research.peers` gab bei fehlender Branche eine Tabelle ohne Spalten
   zurück, der Comps-Bereich stürzte ab.
 

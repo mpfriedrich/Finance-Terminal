@@ -146,9 +146,9 @@ def test_download_fetches_each_year_once_and_says_when_crsp_is_not_licensed(tmp_
     assert len(list((tmp_path / "crsp_dsf").glob("dsf_*.parquet"))) == 2
     server.queries.clear()
     crsp.download(server, tmp_path, since, log=lambda _: None)
-    years = [p[1].year for q, p in server.queries if "FROM crsp.dsf " in q]
+    years = [p[1].year for q, p in server.queries if "FROM crsp.dsf " in q and p]
     assert years == [dt.date.today().year]
-    fundq = next(q for q, _ in server.queries if "FROM comp.fundq" in q)
+    fundq = next(q for q, _ in server.queries if "FROM comp.fundq" in q and "LIMIT 1" not in q)
     assert "popsrc = 'D'" in fundq
 
     no_crsp = _FakeServer({t: c for t, c in columns.items() if t not in ("dsf", "dsenames")})
@@ -158,3 +158,24 @@ def test_download_fetches_each_year_once_and_says_when_crsp_is_not_licensed(tmp_
 
 def test_with_crsp_the_world_source_reports_itself_survivorship_free(world):
     assert world[0].survivorship_free is True
+
+
+def test_a_crsp_table_the_account_may_see_but_not_read_ends_in_a_clear_message(tmp_path):
+    """First real run: WRDS listed crsp.dsf's columns, then refused the rows."""
+    from tests.test_wrds import _FakeCursor, _FakeServer
+
+    class InsufficientPrivilege(Exception):
+        pass
+
+    class Refusing(_FakeCursor):
+        def execute(self, sql, params=()):
+            if "FROM crsp." in sql and "information_schema" not in sql:
+                raise InsufficientPrivilege("permission denied for schema crsp_a_stock")
+            super().execute(sql, params)
+
+    columns = {table: list(cols) for (schema, table), cols in crsp.WANTED.items()}
+    server = _FakeServer(columns)
+    server.cursor = lambda name=None: Refusing(server)
+    server.rollback = lambda: None
+    with pytest.raises(RuntimeError, match="subscription does not include CRSP"):
+        crsp.download(server, tmp_path, dt.date(2024, 1, 1), log=lambda _: None)

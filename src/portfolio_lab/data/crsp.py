@@ -95,6 +95,26 @@ def _folder(schema: str, table: str) -> str:
 
 # -- download ----------------------------------------------------------------------------
 
+def readable(con, schema: str, table: str) -> bool:
+    """Whether this account may read rows of the table, not just see it listed."""
+    try:
+        with con.cursor() as cur:
+            cur.execute(f"SELECT 1 FROM {schema}.{table} LIMIT 1")
+            cur.fetchall()
+        return True
+    except Exception as exc:                                        # noqa: BLE001
+        denied = (type(exc).__name__ == "InsufficientPrivilege"
+                  or "permission denied" in str(exc).lower())
+        if not denied:
+            raise
+        # A failed statement leaves the PostgreSQL transaction unusable until rolled back.
+        try:
+            con.rollback()
+        except Exception:                                           # noqa: BLE001
+            pass
+        return False
+
+
 def download(con, dest: Path, since: dt.date, log=print) -> dict[str, int]:
     """Fetch CRSP daily prices, names, delistings, the CRSP–Compustat link and Compustat
     North America fundamentals into parquet under `dest`. Closed years of daily prices
@@ -107,9 +127,22 @@ def download(con, dest: Path, since: dt.date, log=print) -> dict[str, int]:
             "CRSP's daily stock file (crsp.dsf) is not available to this WRDS account. "
             "Check the subscription on the WRDS website, or build without it: "
             "--us=free.")
+    # WRDS lists every table's columns to every account, licensed or not; only reading
+    # a row shows whether the subscription covers it (first real run: "permission
+    # denied for schema crsp_a_stock"). So read one row of each before anything else.
+    for schema, table in (("crsp", "dsf"), ("crsp", "dsenames")):
+        if not readable(con, schema, table):
+            raise RuntimeError(
+                f"The WRDS account can see {schema}.{table} but may not read it: the "
+                "university's subscription does not include CRSP. The US half stays the "
+                "free store (SEC + Yahoo), which still lacks most companies that "
+                "stopped trading.")
+    for key in [k for k in cols if cols[k] and not readable(con, *k)]:
+        log(f"  {key[0]}.{key[1]}: not licensed for this account, skipped")
+        cols[key] = []
     for key, wanted in WANTED.items():
         missing = set(wanted) - set(cols[key])
-        if missing:
+        if missing and cols[key]:
             log(f"  {key[0]}.{key[1]}: not in WRDS, skipped: {', '.join(sorted(missing))}")
 
     common = ("SELECT DISTINCT permno FROM crsp.dsenames WHERE shrcd IN %s "
