@@ -345,3 +345,18 @@ def universe_verdict(recovery: dict | None) -> str:
         "stored. Companies that went bankrupt or were taken over are therefore missing "
         "from every backward-looking figure, which moves all of them upward."
     )
+
+
+def delisting_returns(con: duckdb.DuckDBPyConnection, tickers) -> dict[str, float]:
+    """What holders of these tickers actually received when the listing ended (CRSP's
+    delisting return), where the store knows it. A ticker without a row falls back to
+    the assumed loss (R18). Empty for a store without the table."""
+    tickers = sorted({str(t) for t in tickers})
+    if not tickers:
+        return {}
+    try:
+        rows = con.execute("SELECT ticker, ret FROM delisting_returns "
+                           "WHERE ticker IN (SELECT UNNEST(?))", [tickers]).fetchall()
+    except duckdb.Error:
+        return {}
+    return {str(t): float(r) for t, r in rows if r is not None}

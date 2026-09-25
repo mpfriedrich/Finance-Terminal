@@ -760,6 +760,37 @@ eines bezahlten Anbieters.
   (angenommen: Stück, nicht Millionen) und ob `datafmt = 'HIST_STD'` in `g_funda`
   befüllt ist. Die Länderzählung am Ende des ersten Builds zeigt es.
 
+**Nachtrag 25.09.2026 — US-Teil aus CRSP** (`data/crsp.py`), auf Wunsch des Nutzers,
+nachdem die erste Anmeldung bei WRDS funktioniert hat. Behebt die Überlebensverzerrung
+für die USA, die Phase 7 gemessen hat (0 von 20):
+
+* **Kurse** aus der CRSP-Tagesdatei (Legacy-Format `crsp.dsf`, `dsenames`, `dsedelist`):
+  Stammaktien (Share Code 10/11) an NYSE, NYSE American, Nasdaq. Gehandelter Kurs
+  `|prc|` (negativ = Geld-Brief-Mitte), Split-bereinigt über `cfacpr`, Gesamtrendite aus
+  CRSPs `ret` aufgezinst.
+* **Nach dem CRSP-Ende** (Abo-Stand, oft Dezember des Vorjahres) laufen die noch
+  gehandelten Linien mit den Tageskursen des freien Bestands weiter, am letzten CRSP-Tag
+  auf CRSPs Basis umgerechnet (`extend`, täglich über `build_prices.py`). Ticker einer
+  noch gehandelten Linie = der heutige des freien Bestands (META, nicht FB); beendete
+  Linien behalten den letzten CRSP-Ticker, bei Kollision mit Permno-Suffix.
+* **Schlüssel = SEC-CIK** über die CRSP-Compustat-Verknüpfung (`ccmxpf_lnkhist`) und
+  `comp.company.cik`, damit die SEC-Fundamentaldaten mit echtem Meldedatum gelten —
+  auch für verschwundene Firmen, die die SEC weiter führt. Ohne CIK: 2 Mrd. + Permno.
+  **Compustat NA** nur für Perioden vor der ersten XBRL-Meldung (`prune_compustat`),
+  datiert über `rdq`, sonst Frist (10-Q 45, 10-K 90 Tage).
+* **Delisting-Rendite**: neue Tabelle `delisting_returns`; Stufe A und B nehmen sie statt
+  der angenommenen −30 %, wo CRSP sie hat, und sagen im Bericht, welche Werte echt
+  waren. Fehlt sie (häufig bei Delistings wegen schlechter Lage), bleibt die Annahme.
+* `WorldSource.survivorship_free` misst: wahr, sobald beendete CRSP-Linien im Bestand
+  sind; die Oberfläche sagt dann, wie viele beendete Notierungen enthalten sind.
+* **Ungetestet gegen den echten Dienst**; unsicher vor allem: ob das Abo das
+  Legacy-Format `dsf` noch führt (CRSP stellt auf das CIZ-Format `dsf_v2` um — dann
+  meldet der Build klar, dass `crsp.dsf` fehlt, und dieser Teil muss angepasst werden),
+  und wie viele noch gehandelte Linien im freien Bestand keinen Anschluss finden (der
+  Build zählt sie).
+* Nebenbei behoben: `research.peers` gab bei fehlender Branche eine Tabelle ohne Spalten
+  zurück, der Comps-Bereich stürzte ab.
+
 **Nebenbei:** MONITOR hat einen Umschalter Dollar ↔ Gold. Indizes und Aktien in Unzen,
 Währungen in Milligramm Gold je Einheit, fremde Indizes erst zum Tageskurs in Dollar;
 Renditen, Dollar-Index und Kreuzkurse bleiben (keine Währung). Die dafür nötigen

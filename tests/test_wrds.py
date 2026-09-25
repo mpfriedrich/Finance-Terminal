@@ -137,7 +137,7 @@ def test_world_with_a_store_opens_the_world_source(tmp_path):
     source, path = sources.open_selected(Settings(data_source="world"),
                                          world_db=tmp_path / "world.duckdb")
     assert isinstance(source, wrds.WorldSource) and path.name == "world.duckdb"
-    assert source.survivorship_free is False
+    assert source.survivorship_free is False              # no CRSP: US half is free
 
 
 def test_the_us_half_is_copied_in_and_replaced_without_touching_compustat(tmp_path):
@@ -182,9 +182,10 @@ class _FakeCursor:
     def execute(self, sql, params=()):
         self.server.queries.append((sql, params))
         if "information_schema" in sql:
-            self._rows = [(c,) for c in self.server.columns.get(params[0], [])]
+            self._rows = [(c,) for c in self.server.columns.get(params[-1], [])]
             return
-        table = sql.split("FROM comp.")[1].split()[0]
+        import re
+        table = re.search(r"FROM (\w+)\.(\w+)", sql).group(2)
         cols = [c.strip().split(".")[-1] for c in
                 sql.split("SELECT ", 1)[1].split(" FROM ")[0].split(",")]
         self.description = [(c,) for c in cols]

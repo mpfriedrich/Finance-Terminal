@@ -89,3 +89,14 @@ def test_peers_share_the_industry_and_exclude_the_company_itself():
     ])
     p = rs.peers(frame, "AAA", limit=1)
     assert p.ticker.tolist() == ["BBB"]      # same industry, closest in size
+
+
+def test_no_peers_is_an_empty_table_with_its_columns():
+    import pandas as pd
+
+    from portfolio_lab import research as rs
+
+    frame = pd.DataFrame({"ticker": ["A", "B"], "sector": [None, "X"],
+                          "market_cap": [1e9, 2e9]})
+    assert list(rs.peers(frame, "A").ticker) == []
+    assert list(rs.peers(frame, "ZZZ").ticker) == []

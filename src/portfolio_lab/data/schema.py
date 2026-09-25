@@ -183,6 +183,37 @@ MARKET_MIGRATIONS: list[str] = [
     DROP TABLE ticker_history;
     ALTER TABLE ticker_history_v2 RENAME TO ticker_history;
     """,
+    # 021 — what a shareholder actually received when a listing ended (CRSP's delisting
+    # return). Where a row exists the backtests use it instead of the assumed loss (R18).
+    """
+    CREATE TABLE IF NOT EXISTS delisting_returns (
+        ticker  VARCHAR PRIMARY KEY,
+        date    DATE    NOT NULL,
+        ret     DOUBLE  NOT NULL,
+        code    VARCHAR,
+        source  VARCHAR NOT NULL
+    );
+    """,
+    # 022 — the last date a licensed source covers (CRSP ends where the subscription
+    # ends; the free prices continue its active names after that date).
+    """
+    CREATE TABLE IF NOT EXISTS source_windows (
+        source     VARCHAR PRIMARY KEY,
+        last_date  DATE NOT NULL
+    );
+    """,
+    # 023 — which securities came from CRSP, under which key and ticker, and whether the
+    # line was still trading when CRSP ends. The free store's daily prices are appended
+    # to exactly these lines.
+    """
+    CREATE TABLE IF NOT EXISTS crsp_link (
+        permno     BIGINT PRIMARY KEY,
+        cik        BIGINT  NOT NULL,
+        ticker     VARCHAR NOT NULL,
+        last_date  DATE,
+        active     BOOLEAN NOT NULL
+    );
+    """,
 ]
 
 USER_MIGRATIONS: list[str] = [

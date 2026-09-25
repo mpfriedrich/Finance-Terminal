@@ -228,6 +228,10 @@ def run(
     window_end = sessions[-1]
     gone_after = {t: d for t, d in last_bar.items()
                   if d is not None and (window_end - d).days > 10}
+    # Where the source knows what holders actually received (CRSP), that replaces the
+    # assumption; everywhere else the stated loss stands.
+    known_exit = (source.delisting_returns(list(gone_after))
+                  if hasattr(source, "delisting_returns") else {})
 
     holdings: dict[str, float] = {}       # ticker -> shares (in adjusted terms)
     cash = 1.0                            # everything starts in cash, value 1.0
@@ -247,7 +251,8 @@ def run(
     for session in sessions:
         # 1. Names that have just gone dark are realised at the stated delisting return.
         for ticker in [t for t in holdings if t in gone_after and session > gone_after[t]]:
-            final = closes.at[gone_after[ticker], ticker] * (1.0 + delisting_return)
+            exit_return = known_exit.get(ticker, delisting_return)
+            final = closes.at[gone_after[ticker], ticker] * (1.0 + exit_return)
             cash += holdings.pop(ticker) * final
             delisted.append(ticker)
 
@@ -320,11 +325,20 @@ def run(
             })
 
     if delisted:
+        actual = sorted({t for t in delisted if t in known_exit})
+        assumed = sorted({t for t in delisted if t not in known_exit})
+        parts = []
+        if assumed:
+            parts.append(f"{len(assumed)} realised at {delisting_return:.0%} from the last "
+                         "close rather than held at it (R18; the assumption is a setting "
+                         "and it moves the result)")
+        if actual:
+            parts.append(f"{len(actual)} at the delisting return CRSP records for them ("
+                         + ", ".join(f"{t} {known_exit[t]:+.0%}" for t in actual[:6])
+                         + ")")
         notes.append(
             f"{len(delisted)} position(s) stopped trading during the run "
-            f"({', '.join(sorted(set(delisted))[:8])}). Each was realised at "
-            f"{delisting_return:.0%} from its last close rather than held at it (R18); "
-            "the assumption is a setting and it moves the result."
+            f"({', '.join(sorted(set(delisted))[:8])}): " + "; ".join(parts) + "."
         )
     # R19 asks for both numbers in every report, zero included: a missing sentence reads
     # as "nothing to see", which is not the same as "counted, and it was nothing". The
@@ -334,10 +348,12 @@ def run(
     # which the universe construction makes zero by definition — third review.)
     listed = f" ({', '.join(sorted(departed)[:8])})" if departed else ""
     exits = sorted(set(delisted))
+    how = (f"the assumed {delisting_return:.0%} or, where CRSP records one, the actual "
+           "delisting return" if known_exit else f"the assumed {delisting_return:.0%}")
     notes.append(
         f"{len(departed)} name(s) left the universe between rebalance dates{listed}; "
-        f"{len(exits)} position(s) had no price left to sell at and were closed at the "
-        f"assumed {delisting_return:.0%} (R18/R19). Companies that vanished without a "
+        f"{len(exits)} position(s) had no price left to sell at and were closed at "
+        f"{how} (R18/R19). Companies that vanished without a "
         "symbol never entered the universe at all and cannot be counted here — the "
         "universe verdict says how many of those the data is missing."
     )

@@ -315,12 +315,15 @@ def peers(frame: pd.DataFrame, ticker: str, limit: int = 12) -> pd.DataFrame:
     Size matters as much as industry: a $400m miner and a $90bn miner do not trade on
     comparable multiples, and lining them up side by side invites a wrong conclusion.
     """
+    # An empty answer keeps the frame's columns: callers read `.ticker` off it, and a
+    # frame without columns turned "no peers" into a crash in the comps section.
+    none = frame.iloc[0:0]
     row = frame[frame.ticker.astype(str).str.upper() == ticker.upper()]
     if row.empty:
-        return pd.DataFrame()
+        return none
     row = row.iloc[0]
     if pd.isna(row.get("sector")):
-        return pd.DataFrame()
+        return none
     same = frame[
         (frame.sector == row.sector)
         & (frame.ticker.astype(str).str.upper() != ticker.upper())

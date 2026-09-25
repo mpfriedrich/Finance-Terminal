@@ -144,8 +144,18 @@ def _frame(asof: dt.date) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def _universe_verdict() -> str:
-    """What the historical universe actually is, from the last measurement (Phase 7)."""
-    return hist.universe_verdict(hist.stored_recovery(_market_source().con))
+    """What the historical universe actually is, from the last measurement (Phase 7) —
+    or, on a source that holds ended listings (Sharadar, CRSP), that it holds them."""
+    source = _market_source()
+    if getattr(source, "survivorship_free", False):
+        ended = source.con.execute(
+            "SELECT COUNT(*) FROM securities WHERE last_seen < "
+            "(SELECT MAX(date) FROM prices) - INTERVAL 30 DAY").fetchone()[0]
+        return (f"The historical universe includes {ended:,} listings that stopped "
+                "trading, with their prices to the last day, so backtests are not run on "
+                "survivors only; where the data records what holders received at the end "
+                "(CRSP), that return is used instead of the assumed loss.")
+    return hist.universe_verdict(hist.stored_recovery(source.con))
 
 
 @st.cache_data(ttl=3600)

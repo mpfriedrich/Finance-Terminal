@@ -106,6 +106,10 @@ class FreeSource:
     def survivorship_free(self) -> bool:
         return False
 
+    def delisting_returns(self, tickers) -> dict[str, float]:
+        """Known returns at the end of a listing (CRSP); empty on the free data."""
+        return history.delisting_returns(self.con, tickers)
+
     # -- convenience for the screener -------------------------------------------------
     def screening_frame(self, asof: dt.date) -> pd.DataFrame:
         """One row per security with everything a screen needs."""

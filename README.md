@@ -163,9 +163,19 @@ so it counts as published at the legal deadline (period end + 4 months; interim 
 half current; rerun `build_wrds.py` weekly for the rest. Check the licence terms of your
 WRDS access before using the data outside your studies.
 
+**The US without survivorship bias (CRSP).** If the WRDS account includes CRSP, the same
+build replaces the free US prices with CRSP's: every US common stock since `--since`,
+including the ones that went bankrupt or were taken over, and the delisting return
+holders actually received, which the backtests then use instead of the assumed -30%.
+CRSP ends where the subscription ends (often the previous December); the lines still
+trading continue with the free store's daily prices from there, spliced so nothing
+jumps. Fundamentals stay the SEC filings (dated by the SEC, kept for companies that no
+longer exist); Compustat North America fills only the years before a company's first
+XBRL filing. `--us=free` skips CRSP; `--countries=none` builds the US only.
+
 **Untested against the real service**, like the paid source: the translation is tested
-on hand-made files in the Compustat Global layout. Check the per-country counts the
-first build prints.
+on hand-made files in the Compustat Global and CRSP layouts. Check the counts the first
+build prints — per country, and the number of US listings that ended.
 
 ## Tests
 

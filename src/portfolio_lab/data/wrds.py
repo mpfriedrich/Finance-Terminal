@@ -52,6 +52,9 @@ PORT = 9737
 DBNAME = "wrds"
 
 GVKEY_OFFSET = 1_000_000_000
+# The Compustat Global range ends here; CRSP lines without an SEC CIK live above it
+# (data/crsp.py), and a Global rebuild must not touch them.
+GLOBAL_LAST = 2 * GVKEY_OFFSET - 1
 
 # Developed markets outside North America (Compustat Global has no US or Canadian
 # companies; those are in Compustat North America). ISO-3 codes of the headquarters.
@@ -210,14 +213,15 @@ def connect(user: str, password: str | None):
         raise RuntimeError(f"WRDS connection failed: {first}{hint}") from None
 
 
-def available_columns(con, table: str) -> list[str]:
+def available_columns(con, table: str, wanted=None, schema: str = "comp") -> list[str]:
     """Which of the wanted columns the WRDS table really has. Asking first means a
-    column Compustat does not carry (or renamed) costs that one field, not the build."""
+    column Compustat does not carry (or renamed) costs that one field, not the build.
+    Empty when the table does not exist or the subscription does not include it."""
     with con.cursor() as cur:
         cur.execute("SELECT column_name FROM information_schema.columns "
-                    "WHERE table_schema = 'comp' AND table_name = %s", (table,))
+                    "WHERE table_schema = %s AND table_name = %s", (schema, table))
         have = {r[0].lower() for r in cur.fetchall()}
-    return [c for c in WANTED[table] if c in have]
+    return [c for c in (wanted or WANTED[table]) if c in have]
 
 
 def _fetch(con, sql: str, params: tuple, dest: Path, chunk: int = 250_000) -> int:
@@ -347,9 +351,9 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path) -> dict[str, int]:
     con.execute("BEGIN")
     try:
         con.execute("DELETE FROM prices WHERE ticker IN "
-                    "(SELECT ticker FROM securities WHERE cik >= ?)", [GVKEY_OFFSET])
-        con.execute("DELETE FROM securities WHERE cik >= ?", [GVKEY_OFFSET])
-        con.execute("DELETE FROM fundamentals WHERE cik >= ?", [GVKEY_OFFSET])
+                    "(SELECT ticker FROM securities WHERE cik BETWEEN ? AND ?)", [GVKEY_OFFSET, GLOBAL_LAST])
+        con.execute("DELETE FROM securities WHERE cik BETWEEN ? AND ?", [GVKEY_OFFSET, GLOBAL_LAST])
+        con.execute("DELETE FROM fundamentals WHERE cik BETWEEN ? AND ?", [GVKEY_OFFSET, GLOBAL_LAST])
 
         # Dollars per unit of every currency, per day: the rates are quoted as units per
         # pound, so USD per X = (USD per GBP) / (X per GBP).
@@ -463,15 +467,15 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path) -> dict[str, int]:
             """
         )
         # The coarse industry group stands in for the SEC's industry wording.
-        sics = con.execute("SELECT DISTINCT sic FROM securities WHERE cik >= ?",
-                           [GVKEY_OFFSET]).fetchall()
+        sics = con.execute("SELECT DISTINCT sic FROM securities WHERE cik BETWEEN ? AND ?",
+                           [GVKEY_OFFSET, GLOBAL_LAST]).fetchall()
         groups = pd.DataFrame({"sic": [s[0] for s in sics],
                                "grp": [industry.group_for(s[0]) for s in sics]})
         if not groups.empty:
             con.register("_groups", groups)
             con.execute("UPDATE securities SET sector = g.grp FROM _groups g "
-                        "WHERE securities.sic = g.sic AND securities.cik >= ?",
-                        [GVKEY_OFFSET])
+                        "WHERE securities.sic = g.sic AND securities.cik BETWEEN ? AND ?",
+                        [GVKEY_OFFSET, GLOBAL_LAST])
             con.unregister("_groups")
 
         # The dollar rates go into the price table under the names pit.to_usd reads, so
@@ -495,15 +499,15 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path) -> dict[str, int]:
         raise
 
     counts = {
-        "companies": con.execute("SELECT COUNT(*) FROM securities WHERE cik >= ?",
-                                 [GVKEY_OFFSET]).fetchone()[0],
+        "companies": con.execute("SELECT COUNT(*) FROM securities WHERE cik BETWEEN ? AND ?",
+                                 [GVKEY_OFFSET, GLOBAL_LAST]).fetchone()[0],
         "price_rows": con.execute("SELECT COUNT(*) FROM _bars_usd").fetchone()[0],
         "price_rows_without_rate": int(no_fx),
-        "facts": con.execute("SELECT COUNT(*) FROM fundamentals WHERE cik >= ?",
-                             [GVKEY_OFFSET]).fetchone()[0],
+        "facts": con.execute("SELECT COUNT(*) FROM fundamentals WHERE cik BETWEEN ? AND ?",
+                             [GVKEY_OFFSET, GLOBAL_LAST]).fetchone()[0],
         "facts_on_estimated_date": con.execute(
-            "SELECT COUNT(*) FROM fundamentals WHERE cik >= ? AND fp = 'est'",
-            [GVKEY_OFFSET]).fetchone()[0],
+            "SELECT COUNT(*) FROM fundamentals WHERE cik BETWEEN ? AND ? AND fp = 'est'",
+            [GVKEY_OFFSET, GLOBAL_LAST]).fetchone()[0],
     }
     return counts
 
@@ -608,32 +612,59 @@ def _fundamentals(con, cols: dict[str, set[str]]) -> None:
 # -- the US half -------------------------------------------------------------------------
 
 # Tables copied whole from the free store. Company tables are keyed by CIK, which the
-# Compustat rows never share (GVKEY_OFFSET), so the two halves can be replaced separately.
-US_BY_CIK = ("securities", "fundamentals", "ticker_history", "shares_outstanding")
+# Compustat Global rows never share (GVKEY_OFFSET), so the halves can be replaced
+# separately. When CRSP supplies the US prices (data/crsp.py), the companies it covers
+# keep their CRSP lines and take only their SEC fundamentals from the free store.
+US_BY_CIK = ("ticker_history", "shares_outstanding")
 US_WHOLE = ("listing_ratios", "macro_series")
 
 
 def copy_us(con: duckdb.DuckDBPyConnection, market_db: Path) -> dict[str, int]:
-    """Replace the US half of the world store with the current free store.
+    """Replace the free-store part of the world store with the current free store.
 
-    Prices go across for every symbol that is not a Compustat line: US shares, indices,
-    futures, Yahoo exchange rates. The free store is refreshed daily by build_prices.py;
-    this is what brings that refresh into the world store.
+    Without CRSP: every US company, its prices and filings, plus the indices, futures and
+    exchange rates. With CRSP: the same series, the SEC filings of every company, the
+    free store's own lines only for companies CRSP does not cover (listed after CRSP
+    ends), and CRSP's still-trading lines continued with today's prices (`crsp.extend`).
+    The free store is refreshed daily by build_prices.py; this brings that in.
     """
+    from . import crsp
+
     con.execute(f"ATTACH '{market_db}' AS us (READ_ONLY)")
     try:
         con.execute("BEGIN")
         try:
-            con.execute("DELETE FROM prices WHERE ticker NOT IN "
-                        "(SELECT ticker FROM securities WHERE cik >= ?)", [GVKEY_OFFSET])
-            con.execute("INSERT INTO prices BY NAME SELECT * FROM us.prices")
+            owned_ciks = f"""(SELECT cik FROM crsp_link UNION ALL
+                              SELECT cik FROM securities WHERE cik >= {GVKEY_OFFSET})"""
+            owned_tickers = f"(SELECT ticker FROM securities WHERE cik IN {owned_ciks})"
+            con.execute(f"DELETE FROM prices WHERE ticker NOT IN {owned_tickers}")
+            con.execute(
+                f"""INSERT INTO prices BY NAME SELECT * FROM us.prices
+                    WHERE ticker NOT IN {owned_tickers}
+                      AND ticker NOT IN (SELECT ticker FROM us.securities
+                                         WHERE cik IN (SELECT cik FROM crsp_link))""")
+            con.execute(f"DELETE FROM securities WHERE cik < ? AND cik NOT IN {owned_ciks}",
+                        [GVKEY_OFFSET])
+            con.execute(
+                f"""INSERT INTO securities BY NAME SELECT * FROM us.securities
+                    WHERE cik < ? AND cik NOT IN {owned_ciks}
+                      AND ticker NOT IN {owned_tickers}""", [GVKEY_OFFSET])
+            # SEC filings for every US company, CRSP-covered ones included: they are dated
+            # by the SEC, which is the point. CRSP's own facts are kept.
+            con.execute(
+                "DELETE FROM fundamentals WHERE cik < ? AND xbrl_tag NOT LIKE 'crsp:%' "
+                "AND xbrl_tag NOT LIKE 'compustat-na:%'", [GVKEY_OFFSET])
+            con.execute("INSERT INTO fundamentals BY NAME SELECT * FROM us.fundamentals "
+                        "WHERE cik < ?", [GVKEY_OFFSET])
             for table in US_BY_CIK:
                 con.execute(f"DELETE FROM {table} WHERE cik < ?", [GVKEY_OFFSET])
                 con.execute(f"INSERT INTO {table} BY NAME SELECT * FROM us.{table} "
-                            "WHERE cik < ?", [GVKEY_OFFSET])
+                            f"WHERE cik < ? AND cik NOT IN {owned_ciks}", [GVKEY_OFFSET])
             for table in US_WHOLE:
                 con.execute(f"DELETE FROM {table}")
                 con.execute(f"INSERT INTO {table} BY NAME SELECT * FROM us.{table}")
+            spliced = crsp.extend(con, "us")
+            pruned = crsp.prune_compustat(con)
             history.refresh_price_windows(con, own_transaction=False)
             con.execute("COMMIT")
         except Exception:
@@ -641,8 +672,14 @@ def copy_us(con: duckdb.DuckDBPyConnection, market_db: Path) -> dict[str, int]:
             raise
     finally:
         con.execute("DETACH us")
-    return {"us_companies": con.execute("SELECT COUNT(*) FROM securities WHERE cik < ?",
-                                        [GVKEY_OFFSET]).fetchone()[0]}
+    out = {"us_companies": con.execute(
+        "SELECT COUNT(DISTINCT cik) FROM securities WHERE cik < ?",
+        [GVKEY_OFFSET]).fetchone()[0]}
+    if crsp.crsp_end(con) is not None:
+        out.update({"crsp_lines_continued": spliced["extended"],
+                    "crsp_lines_without_current_prices": spliced["not_found"],
+                    "compustat_na_facts_replaced_by_sec": pruned})
+    return out
 
 
 # -- the source --------------------------------------------------------------------------
@@ -662,9 +699,16 @@ class WorldSource(FreeSource):
 
     @property
     def survivorship_free(self) -> bool:
-        # The Compustat half keeps companies that stopped trading; the US half is the
-        # free store and does not. Mixed, so it does not claim the correction.
-        return False
+        """True when the US half comes from CRSP and really holds listings that ended —
+        measured, like the paid source. Compustat Global keeps its ended companies; the
+        free US store does not, so without CRSP the store does not claim the correction.
+        """
+        try:
+            row = self.con.execute(
+                "SELECT COUNT(*) FROM crsp_link WHERE NOT active").fetchone()
+        except duckdb.Error:
+            return False
+        return bool(row and row[0])
 
 
 def country_counts(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
@@ -674,8 +718,8 @@ def country_counts(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
         """
         SELECT exchange AS country, COUNT(*) AS companies,
                COUNT(*) FILTER (WHERE last_seen >= (SELECT MAX(last_seen) FROM securities
-                                                    WHERE cik >= ?) - 30) AS trading
-        FROM securities WHERE cik >= ? GROUP BY 1 ORDER BY 2 DESC
+                                                    WHERE cik BETWEEN ? AND ?) - 30) AS trading
+        FROM securities WHERE cik BETWEEN ? AND ? GROUP BY 1 ORDER BY 2 DESC
         """,
-        [GVKEY_OFFSET, GVKEY_OFFSET],
+        [GVKEY_OFFSET, GLOBAL_LAST, GVKEY_OFFSET, GLOBAL_LAST],
     ).fetch_df()
