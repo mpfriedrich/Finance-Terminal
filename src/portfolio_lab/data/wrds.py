@@ -132,9 +132,25 @@ WANTED = {
 # A name can be wanted for two reasons (sales is revenue and half of gross profit);
 # asked for twice, the query would return the column twice.
 WANTED = {t: tuple(dict.fromkeys(cols)) for t, cols in WANTED.items()}
-# An alternative name that is absent is expected, not a problem worth printing.
-ALTERNATIVES = ({c for cands in (*DURATION.values(), *INSTANT.values()) for c in cands[1:]}
-                | set(SHARES[1:]) | {"cogs"})
+def item_report(present: set[str], quarterly: bool) -> list[str]:
+    """One line per metric that is read from an alternative item or not at all — what
+    the build prints, so a missing figure is named rather than silently absent."""
+    lines = []
+    for metric in {**DURATION, **INSTANT}:
+        if quarterly and metric in QUARTERLY_SKIP:
+            continue
+        preferred = ({**DURATION, **INSTANT}[metric][0] + ("q" if quarterly else ""))
+        found = item_expression(present, metric, quarterly)
+        if found is None:
+            lines.append(f"{metric}: not available")
+        elif found[1] != preferred:
+            lines.append(f"{metric}: from {found[1]} (no {preferred})")
+    shares = pick(present, SHARES_Q if quarterly else SHARES)
+    lines.append(f"shares_outstanding: from {shares}" if shares else
+                 "shares_outstanding: not in the report (the daily file's count is used)")
+    if quarterly and "rdq" not in present:
+        lines.append("report date (rdq) absent: every quarter dated by the legal deadline")
+    return lines
 
 
 def pick(present: set[str], candidates: tuple[str, ...]) -> str | None:
@@ -238,8 +254,11 @@ def download(con, dest: Path, countries=DEFAULT_COUNTRIES, since: dt.date = DEFA
     countries = tuple(sorted({c.upper() for c in countries}))
     cols = {t: available_columns(con, t) for t in TABLES}
     for t in TABLES:
-        missing = {c for c in set(WANTED[t]) - set(cols[t])
-                   if c.removesuffix("q") not in ALTERNATIVES and c not in ALTERNATIVES}
+        if t in ("g_funda", "g_fundq"):
+            for line in item_report(set(cols[t]), quarterly=t == "g_fundq"):
+                log(f"  {t}: {line}")
+            continue
+        missing = set(WANTED[t]) - set(cols[t])
         if missing:
             log(f"  {t}: not in WRDS, skipped: {', '.join(sorted(missing))}")
     firms = "SELECT gvkey FROM comp.g_company WHERE loc IN %s"

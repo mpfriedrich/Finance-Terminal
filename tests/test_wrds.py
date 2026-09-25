@@ -201,11 +201,13 @@ class _FakeCursor:
 def test_download_asks_only_for_columns_wrds_has_and_caches_closed_years(tmp_path):
     columns = {t: list(cols) for t, cols in wrds.WANTED.items()}
     columns["g_secd"].remove("qunit")                   # a column WRDS does not carry
+    columns["g_funda"].remove("ni")                     # Global's net income is NICON
     server = _FakeServer(columns)
     logged = []
     since = dt.date(dt.date.today().year - 1, 1, 1)
     wrds.download(server, tmp_path, ("DEU",), since, log=logged.append)
     assert any("qunit" in line for line in logged)
+    assert any("net_income: from nicon (no ni)" in line for line in logged)
     secd_sql = [q for q, _ in server.queries if "comp.g_secd" in q]
     assert secd_sql and all("qunit" not in q for q in secd_sql)
     assert len(list((tmp_path / "g_secd").glob("DEU_*.parquet"))) == 2
