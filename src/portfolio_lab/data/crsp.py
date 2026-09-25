@@ -44,7 +44,7 @@ import duckdb
 import pandas as pd
 
 from . import industry
-from .wrds import GVKEY_OFFSET, _fetch, available_columns, untyped_as_text
+from .wrds import GVKEY_OFFSET, _fetch, available_columns, limit_memory, load_parquet
 
 CRSP_OFFSET = 2_000_000_000
 # Share codes 10 and 11: ordinary common shares of US companies. Exchange codes 1, 2, 3:
@@ -241,15 +241,10 @@ def download(con, dest: Path, since: dt.date, log=print) -> dict[str, int]:
 # -- translation -------------------------------------------------------------------------
 
 def _load(con, source: Path, schema: str, table: str) -> set[str]:
-    files = sorted((source / _folder(schema, table)).glob("*.parquet"))
-    name = f"_{schema}_{table}"
-    if not files:
-        con.execute(f"CREATE OR REPLACE TEMP TABLE {name} AS SELECT NULL AS permno LIMIT 0")
-        return set()
-    con.execute(f"CREATE OR REPLACE TEMP TABLE {name} AS SELECT * FROM "
-                "read_parquet(?, union_by_name = true)", [[str(f) for f in files]])
-    untyped_as_text(con, name)
-    return {r[0].lower() for r in con.execute(f"DESCRIBE {name}").fetchall()}
+    # The daily files are streamed from disk (a view), everything else is small.
+    return load_parquet(con, f"_{schema}_{table}",
+                        sorted((source / _folder(schema, table)).glob("*.parquet")),
+                        view=table in ("dsf", "dsf_v2"))
 
 
 def ingest(con: duckdb.DuckDBPyConnection, source: Path,
@@ -261,6 +256,7 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path,
     CRSP now covers. One transaction.
     """
     log("reading the CRSP files")
+    limit_memory(con)
     have = {key: _load(con, source, *key) for key in WANTED}
     if have[("crsp", "dsf_v2")]:
         _ciz_as_legacy(con, have)
@@ -392,7 +388,7 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path,
         has_hl = {"askhi", "bidlo"} <= have[("crsp", "dsf")]
         con.execute(
             f"""
-            CREATE OR REPLACE TEMP TABLE _bars AS
+            CREATE OR REPLACE TEMP VIEW _bars AS
             WITH d AS (
                 SELECT CAST(d.permno AS BIGINT) AS permno, CAST(d.date AS DATE) AS date,
                        abs(CAST(d.prc AS DOUBLE)) AS px,
@@ -538,8 +534,10 @@ def _ciz_as_legacy(con, have) -> None:
     retx = f"COALESCE(CAST({col(v, 'dlyretx')} AS DOUBLE), 0)"
     shares = (f"COALESCE(CAST({col(v, 'shrout')} AS DOUBLE), "
               f"CAST({col(v, 'dlycap')} AS DOUBLE) / NULLIF({price}, 0))")
+    # The empty legacy placeholder is a table; the CIZ version is a view.
+    con.execute("DROP TABLE IF EXISTS _crsp_dsf")
     con.execute(
-        f"""CREATE OR REPLACE TEMP TABLE _crsp_dsf AS
+        f"""CREATE OR REPLACE TEMP VIEW _crsp_dsf AS
             WITH d AS (
                 SELECT CAST(d.permno AS BIGINT) AS permno, CAST(d.dlycaldt AS DATE) AS date,
                        {price} AS prc, CAST({col(v, 'dlyret')} AS DOUBLE) AS ret,

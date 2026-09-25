@@ -337,16 +337,44 @@ def download(con, dest: Path, countries=DEFAULT_COUNTRIES, since: dt.date = DEFA
 
 # -- translation -------------------------------------------------------------------------
 
-def _load(con, table: str, source: Path) -> set[str]:
-    """Read one table's parquet parts into a temp table; returns its columns."""
-    files = sorted((source / table).glob("*.parquet"))
+def load_parquet(con, name: str, files: list[Path], view: bool = False) -> set[str]:
+    """Make the parquet parts available as `name`; returns its columns.
+
+    Small tables are copied into a temp table. The daily price files are only put
+    behind a VIEW, so they are streamed from disk each time they are read: held in
+    memory, 8.8 million rows for two countries filled a 16 GB laptop (first real run).
+    """
     if not files:
-        con.execute(f"CREATE OR REPLACE TEMP TABLE _{table} AS SELECT NULL AS gvkey LIMIT 0")
+        con.execute(f"CREATE OR REPLACE TEMP TABLE {name} AS SELECT NULL AS gvkey LIMIT 0")
         return set()
-    con.execute(f"CREATE OR REPLACE TEMP TABLE _{table} AS SELECT * FROM "
-                "read_parquet(?, union_by_name = true)", [[str(f) for f in files]])
-    untyped_as_text(con, f"_{table}")
-    return {r[0].lower() for r in con.execute(f"DESCRIBE _{table}").fetchall()}
+    if view:
+        listed = ", ".join("'" + str(f).replace("'", "''") + "'" for f in files)
+        con.execute(f"CREATE OR REPLACE TEMP VIEW {name} AS SELECT * FROM "
+                    f"read_parquet([{listed}], union_by_name = true)")
+    else:
+        con.execute(f"CREATE OR REPLACE TEMP TABLE {name} AS SELECT * FROM "
+                    "read_parquet(?, union_by_name = true)", [[str(f) for f in files]])
+        untyped_as_text(con, name)
+    return {r[0].lower() for r in con.execute(f"DESCRIBE {name}").fetchall()}
+
+
+def _load(con, table: str, source: Path) -> set[str]:
+    return load_parquet(con, f"_{table}", sorted((source / table).glob("*.parquet")),
+                        view=table == "g_secd")
+
+
+def limit_memory(con) -> None:
+    """Settings for a build over tens of millions of rows on a laptop: no promise of
+    insertion order (lets DuckDB stream and spill) and a memory ceiling below the
+    machine's, so a large step spills to disk instead of failing."""
+    con.execute("SET preserve_insertion_order = false")
+    try:
+        import os
+
+        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        con.execute(f"SET memory_limit = '{max(int(total * 0.5 / 2**30), 2)}GB'")
+    except (ValueError, OSError, AttributeError):
+        pass
 
 
 def untyped_as_text(con, table: str) -> None:
@@ -376,6 +404,7 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path, log=_quiet) -> dict[str
     Compustat rows. One transaction: an interrupted build keeps the previous contents.
     """
     log("reading the Compustat Global files")
+    limit_memory(con)
     cols = {t: _load(con, t, source) for t in TABLES}
     con.execute("BEGIN")
     try:
@@ -447,11 +476,13 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path, log=_quiet) -> dict[str
         div_cases = " ".join(f"WHEN '{k}' THEN {v[1]}" for k, v in SUBUNITS.items())
         con.execute(
             f"""
-            CREATE OR REPLACE TEMP TABLE _bars AS
+            CREATE OR REPLACE TEMP VIEW _bars AS
             SELECT i.ticker, CAST(d.datadate AS DATE) AS date,
-                   CASE upper(d.curcdd) {sub_cases} ELSE upper(d.curcdd) END AS cur,
+                   CASE upper(CAST(d.curcdd AS VARCHAR)) {sub_cases}
+                        ELSE upper(CAST(d.curcdd AS VARCHAR)) END AS cur,
                    CAST(d.prccd AS DOUBLE) / {qunit}
-                       / CASE upper(d.curcdd) {div_cases} ELSE 1 END AS px_local,
+                       / CASE upper(CAST(d.curcdd AS VARCHAR)) {div_cases} ELSE 1 END
+                       AS px_local,
                    CAST(d.prcod AS DOUBLE) / NULLIF(CAST(d.prccd AS DOUBLE), 0) AS open_rel,
                    CAST(d.prchd AS DOUBLE) / NULLIF(CAST(d.prccd AS DOUBLE), 0) AS high_rel,
                    CAST(d.prcld AS DOUBLE) / NULLIF(CAST(d.prccd AS DOUBLE), 0) AS low_rel,
@@ -462,19 +493,20 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path, log=_quiet) -> dict[str
             FROM _g_secd d JOIN _issue i
               ON CAST(i.gvkey AS VARCHAR) = CAST(d.gvkey AS VARCHAR)
              AND CAST(i.iid AS VARCHAR) = CAST(d.iid AS VARCHAR)
-            WHERE d.prccd > 0
+            WHERE CAST(d.prccd AS DOUBLE) > 0
             """
         )
         con.execute(
             f"""
-            CREATE OR REPLACE TEMP TABLE _bars_usd AS
+            CREATE OR REPLACE TEMP VIEW _bars_usd AS
             SELECT b.*, f.usd_per_unit
             FROM _bars b ASOF JOIN _fx f ON f.cur = b.cur AND b.date >= f.date
             WHERE b.date - f.date <= {FX_MAX_AGE_DAYS}
             """
         )
-        no_fx = con.execute("SELECT COUNT(*) FROM _bars").fetchone()[0] - \
-            con.execute("SELECT COUNT(*) FROM _bars_usd").fetchone()[0]
+        all_bars = con.execute("SELECT COUNT(*) FROM _bars").fetchone()[0]
+        priced = con.execute("SELECT COUNT(*) FROM _bars_usd").fetchone()[0]
+        no_fx = all_bars - priced
 
         # The total-return series is anchored to the split-adjusted close where the factor
         # exists; without it, adjusted = split-adjusted (dividends then missing, as the
@@ -499,7 +531,8 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path, log=_quiet) -> dict[str
             INSERT INTO securities (cik, ticker, name, sector, sic, exchange,
                                     first_seen, last_seen)
             SELECT i.cik, i.ticker, i.name, NULL, i.sic, i.exchange, p.lo, p.hi
-            FROM _issue i JOIN (SELECT ticker, MIN(date) lo, MAX(date) hi FROM _bars_usd
+            FROM _issue i JOIN (SELECT ticker, MIN(date) lo, MAX(date) hi FROM prices
+                                WHERE ticker IN (SELECT ticker FROM _issue)
                                 GROUP BY 1) p USING (ticker)
             """
         )
@@ -540,7 +573,7 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path, log=_quiet) -> dict[str
     counts = {
         "companies": con.execute("SELECT COUNT(*) FROM securities WHERE cik BETWEEN ? AND ?",
                                  [GVKEY_OFFSET, GLOBAL_LAST]).fetchone()[0],
-        "price_rows": con.execute("SELECT COUNT(*) FROM _bars_usd").fetchone()[0],
+        "price_rows": int(priced),
         "price_rows_without_rate": int(no_fx),
         "facts": con.execute("SELECT COUNT(*) FROM fundamentals WHERE cik BETWEEN ? AND ?",
                              [GVKEY_OFFSET, GLOBAL_LAST]).fetchone()[0],
