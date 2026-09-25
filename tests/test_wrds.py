@@ -261,3 +261,12 @@ def test_global_names_are_used_when_the_north_american_ones_are_absent(tmp_path)
     assert rows["compustat:sale-cogs"] == pytest.approx(3000e6)
     assert rows["compustat:cshoi"] == pytest.approx(1000e6)
     assert len(set(wrds.WANTED["g_funda"])) == len(wrds.WANTED["g_funda"])
+
+
+def test_the_user_name_is_sent_in_lower_case(monkeypatch):
+    import psycopg2
+
+    seen = {}
+    monkeypatch.setattr(psycopg2, "connect", lambda **kw: seen.update(kw) or "conn")
+    assert wrds.connect(" MPFriedrich ", "x") == "conn"
+    assert seen["user"] == "mpfriedrich"

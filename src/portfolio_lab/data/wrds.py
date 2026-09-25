@@ -176,6 +176,9 @@ def connect(user: str, password: str | None):
     account, WRDS sends a Duo push to the phone at this moment — approve it."""
     import psycopg2
 
+    # WRDS user names are lower case, and the database compares them exactly: typed as
+    # "MPFriedrich" the login fails with a bare "PAM authentication failed".
+    user = user.strip().lower()
     try:
         return psycopg2.connect(host=HOST, port=PORT, dbname=DBNAME, user=user,
                                 password=password, sslmode="require", connect_timeout=60)
@@ -183,7 +186,12 @@ def connect(user: str, password: str | None):
         # The message can echo connection parameters; keep only its first line, which
         # says what went wrong ("password authentication failed", "timeout expired").
         first = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
-        raise RuntimeError(f"WRDS connection failed: {first}") from None
+        hint = ""
+        if "authentication failed" in first:
+            hint = (" — check WRDS_USERNAME and WRDS_PASSWORD in .env.local (the WRDS "
+                    "login, not the university one), and approve the Duo push within a "
+                    "minute; a declined or expired push fails the same way.")
+        raise RuntimeError(f"WRDS connection failed: {first}{hint}") from None
 
 
 def available_columns(con, table: str) -> list[str]:
