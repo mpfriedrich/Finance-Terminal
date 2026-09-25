@@ -100,3 +100,31 @@ def test_no_peers_is_an_empty_table_with_its_columns():
                           "market_cap": [1e9, 2e9]})
     assert list(rs.peers(frame, "A").ticker) == []
     assert list(rs.peers(frame, "ZZZ").ticker) == []
+
+
+def test_a_negative_oil_price_does_not_poison_the_commodity_betas():
+    """WTI settled at -$37.63 on 2020-04-20. The returns around it are infinite; they
+    must be left out, not turn every beta into NaN with a numpy warning per call."""
+    import math
+    import warnings
+
+    import duckdb
+    import pandas as pd
+
+    from portfolio_lab import research as rs
+    from portfolio_lab.data.schema import MARKET_MIGRATIONS, _apply
+
+    con = duckdb.connect(":memory:")
+    _apply(con, MARKET_MIGRATIONS)
+    days = pd.bdate_range("2019-06-03", periods=300).date
+    for i, d in enumerate(days):
+        wiggle = 1 + 0.01 * math.sin(i)
+        oil = -37.63 if i == 150 else (0.0 if i == 151 else 50 * wiggle)
+        con.execute("INSERT INTO prices (ticker, date, close, close_adj) VALUES "
+                    "('XOM', ?, ?, ?), ('CL=F', ?, ?, ?)",
+                    [d, 100 * wiggle, 100 * wiggle, d, oil, oil])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        table = rs.commodity_sensitivity(con, "XOM")
+    row = table.set_index("symbol").loc["CL=F"]
+    assert math.isfinite(row["beta"]) and math.isfinite(row["correlation"])

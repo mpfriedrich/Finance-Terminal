@@ -335,6 +335,13 @@ def peers(frame: pd.DataFrame, ticker: str, limit: int = 12) -> pd.DataFrame:
     return same.nsmallest(limit, "size_gap")
 
 
+def _finite(joined: pd.DataFrame) -> pd.DataFrame:
+    """Rows where both returns are real numbers. A price of zero or below (WTI traded at
+    -$37 in April 2020) turns the next return infinite, and one infinity makes every
+    covariance NaN — with a numpy warning per call in the terminal."""
+    return joined.replace([np.inf, -np.inf], np.nan).dropna()
+
+
 # --------------------------------------------------------------------------- live quote
 def live_quote(ticker: str) -> dict | None:
     """Fetch the current price for ONE company, on demand.
@@ -404,7 +411,7 @@ def price_stats(
     if len(bench) > 30:
         bench["date"] = pd.to_datetime(bench["date"])
         b = bench.set_index("date")["close_adj"].astype(float).pct_change().dropna()
-        joined = pd.concat([rets.rename("a"), b.rename("b")], axis=1).dropna()
+        joined = _finite(pd.concat([rets.rename("a"), b.rename("b")], axis=1))
         if len(joined) > 30 and joined.b.var() > 0:
             out["beta"] = float(joined.a.cov(joined.b) / joined.b.var())
             out["beta_days"] = len(joined)
@@ -725,7 +732,7 @@ def commodity_sensitivity(
             continue
         c["date"] = pd.to_datetime(c["date"])
         other = c.set_index("date")["close_adj"].astype(float).pct_change().dropna()
-        joined = pd.concat([stock.rename("a"), other.rename("b")], axis=1).dropna()
+        joined = _finite(pd.concat([stock.rename("a"), other.rename("b")], axis=1))
         if len(joined) < min_days or joined.b.var() == 0:
             continue
         rows.append({

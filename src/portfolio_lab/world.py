@@ -329,7 +329,8 @@ def compare(con: duckdb.DuckDBPyConnection, symbols: list[str],
                "volatility": float(r.std() * (252 ** 0.5)) if len(r) > 20 else None,
                "max_drawdown": float((series / series.cummax() - 1.0).min())}
         if benchmark in returns and s != benchmark:
-            both = pd.concat([r, returns[benchmark]], axis=1, sort=True).dropna()
+            both = (pd.concat([r, returns[benchmark]], axis=1, sort=True)
+                    .replace([float("inf"), float("-inf")], float("nan")).dropna())
             if len(both) > 20 and both.iloc[:, 1].var() > 0:
                 row["beta"] = float(both.iloc[:, 0].cov(both.iloc[:, 1])
                                     / both.iloc[:, 1].var())
