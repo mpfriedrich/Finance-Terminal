@@ -719,6 +719,53 @@ zeigt am Ende die Filer je Währung), `scripts/build_fx.py`,
   Yahoo-Zugang ergibt eine klare Meldung, keinen Absturz). Der echte Yahoo-Abruf ist
   in der Cloud-Sitzung gesperrt und daher nur mit nachgebautem Download getestet.
 
+## Weltmarkt, Stufe 3 — Compustat Global über WRDS (25.09.2026, Cloud-Sitzung)
+
+Entscheidung des Nutzers: WRDS über die Uni statt eigener ESEF/EDINET-Strecken oder
+eines bezahlten Anbieters.
+
+* **Download** (`data/wrds.py`, `scripts/build_wrds.py`): SQL direkt gegen den
+  WRDS-PostgreSQL-Server (`psycopg2`), nicht über das `wrds`-Paket — das verlangt
+  pandas < 2.3. Tabellen `g_company`, `g_security`, `g_secd`, `g_funda`, `g_fundq`,
+  `g_exrt_dly`; nur Spalten, die WRDS tatsächlich führt (vorher abgefragt). Ablage als
+  Parquet unter `data/cache/wrds/`; abgeschlossene Jahre der Tageskurse werden nicht
+  erneut geholt. Standard-Länder: entwickelte Märkte außerhalb Nordamerikas, ab 2010.
+* **Übersetzung** ins bestehende Schema, in eine eigene Datei `data/world.duckdb`, die
+  zusätzlich den US-Teil des freien Bestands trägt (`copy_us`, von `build_prices.py`
+  täglich nachgezogen). Eine Zeile je Firma: die Hauptnotiz im Heimatmarkt
+  (`prirow`), nur Stammaktien. Ticker = Compustat-Ticker + Land (`7203.JPN`).
+  CIK = 1.000.000.000 + gvkey, damit nie eine SEC-CIK getroffen wird.
+* **Alles in USD zum Tageskurs** (Kurse je Pfund aus `g_exrt_dly`, über den Dollar
+  gekreuzt; Pence/Cent/Agorot durch 100; `qunit`). Split-bereinigt über `ajexdi`,
+  Gesamtrendite über `trfd`. Fundamentaldaten behalten ihre Währung und laufen durch
+  `pit.to_usd`, die Kurse dafür stehen als `{CUR}USD=X` im Bestand.
+* **Meldedatum geschätzt**, weil Compustat Global es für Jahresabschlüsse nicht führt:
+  Periodenende + gesetzliche Frist (4 Monate Jahresbericht in EU/UK/Japan, 3 Monate
+  Zwischenbericht) — das späteste Datum, zu dem eine fristgerechte Firma veröffentlicht
+  haben muss, also nie vor der Wahrheit. Wo `g_fundq.rdq` existiert, gilt es. Rest-
+  Vorgriff: Firmen, die die Frist reißen. Der Build zählt, wie viele Fakten auf einer
+  Schätzung beruhen (`fundamentals.fp = 'est'`).
+* **Aktienzahl** aus der Tagesdatei (`cshoc`, je Monat der letzte Handelstag, am selben
+  Tag bekannt) vor der aus dem Bericht; bei zwei Aktiengattungen nur die Hauptlinie —
+  Börsenwert dann zu niedrig.
+* **Grenzen, bekannt:** Quartals-Cashflow wird nicht gelesen (in `g_fundq` kumuliert,
+  `oancfy`); die Floors ($5 Mindestkurs, $1m Umsatz) sind US-gedacht und schließen
+  britische Pennystocks und kleine europäische Werte aus; Research-Bereiche, die SEC-
+  Meldungen brauchen (Form 4, 10-K, Filings), sagen bei Compustat-Firmen, dass es sie
+  nicht gibt. Der US-Teil bleibt überlebendenbasiert, daher `survivorship_free = False`.
+* **Ungetestet gegen den echten Dienst** (aus der Cloud-Sitzung nicht erreichbar): die
+  Übersetzung ist mit handgebauten Dateien im Compustat-Global-Layout getestet
+  (`tests/wrds_fixture.py`, 17 Tests), der Download gegen einen nachgebauten Server.
+  Unsicher sind vor allem Spaltennamen (`qunit`, `rdq`, `gp`), die Einheit von `cshoc`
+  (angenommen: Stück, nicht Millionen) und ob `datafmt = 'HIST_STD'` in `g_funda`
+  befüllt ist. Die Länderzählung am Ende des ersten Builds zeigt es.
+
+**Nebenbei:** MONITOR hat einen Umschalter Dollar ↔ Gold. Indizes und Aktien in Unzen,
+Währungen in Milligramm Gold je Einheit, fremde Indizes erst zum Tageskurs in Dollar;
+Renditen, Dollar-Index und Kreuzkurse bleiben (keine Währung). Die dafür nötigen
+Dollarkurse (`CAD`, `BRL`, `CHF`, `JPY`, `HKD`, `CNY`, `KRW`, `INR`) speichert
+`build_world.py` mit.
+
 ## Nachtrag 24.09.2026 (Cloud-Sitzung) — Papierdepots, Einzeltitel-Regeln, Chart
 
 Auf Zuruf des Nutzers, außerhalb der Phasenliste:

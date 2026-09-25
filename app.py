@@ -43,6 +43,7 @@ from portfolio_lab.data import history as hist, industry
 from portfolio_lab.data.paid import MissingKey
 from portfolio_lab.data.schema import open_user
 from portfolio_lab.data.sources import SourceNotReady, open_selected
+from portfolio_lab.data.wrds import WorldSource, is_compustat
 from portfolio_lab.screen import translate as T
 from portfolio_lab.screen.engine import derive_metrics, merge_selection, run_screen
 from portfolio_lab.screen.valuation import add_valuation
@@ -244,10 +245,15 @@ with st.sidebar:
         st.error("No prices. Run the build scripts.")
     elif age > 7:
         st.warning(f"Prices {age} days old. Refresh before trading on them.")
+    world_note = (
+        "Plus every company Compustat Global lists in the chosen countries (tickers end "
+        "in the country, e.g. 7203.JPN), priced in dollars at each day's rate; their "
+        "report dates are estimated from the legal deadline. "
+        if isinstance(src, WorldSource) else "")
     st.caption(
         "US common stock on NYSE, Nasdaq and CBOE. Funds, commodity trusts and blank-"
         "cheque shells are excluded by the filer's own SEC industry code; REITs are kept. "
-        + _universe_verdict()
+        + world_note + _universe_verdict()
     )
     if not secret("ANTHROPIC_API_KEY"):
         st.error("ANTHROPIC_API_KEY missing from .env.local. Chat is off.")
@@ -1553,7 +1559,9 @@ with tab_research:
                     "here, however well known it is."
                 )
                 tenk = rs.filings(CACHE_DIR / "submissions.zip", cik, forms=["10-K"], limit=1)
-                if tenk.empty:
+                if tenk.empty and is_compustat(cik):
+                    st.info("A Compustat Global company has no SEC annual report to read.")
+                elif tenk.empty:
                     st.info(
                         "No 10-K in the local archive for this filer. Foreign issuers "
                         "file a 20-F instead, which this does not read yet."
@@ -2091,9 +2099,12 @@ with tab_research:
             # --------------------------------------------------------------- ownership
             with sections[7]:
                 st.markdown("#### Insider transactions (Form 4)")
-                if st.button("Load insider trades from the SEC", key=f"ins_{ticker}"):
+                if is_compustat(cik):
+                    st.info("A Compustat Global company files with its home regulator, "
+                            "not the SEC: there are no Form 4 filings to read.")
+                elif st.button("Load insider trades from the SEC", key=f"ins_{ticker}"):
                     st.session_state[f"ins_loaded_{ticker}"] = True
-                if st.session_state.get(f"ins_loaded_{ticker}"):
+                if not is_compustat(cik) and st.session_state.get(f"ins_loaded_{ticker}"):
                     with st.spinner("Reading the latest Form 4 filings…"):
                         trades = _insider_trades(cik)
                     if trades is None:
@@ -2179,7 +2190,10 @@ with tab_research:
             # ----------------------------------------------------------------- filings
             with sections[9]:
                 fl = rs.filings(CACHE_DIR / "submissions.zip", cik, limit=300)
-                if fl.empty:
+                if fl.empty and is_compustat(cik):
+                    st.info("A Compustat Global company files with its home regulator, "
+                            "not the SEC.")
+                elif fl.empty:
                     st.info("No filing history in the local SEC archive for this filer.")
                 else:
                     kinds = ["everything", "reports", "insider trades", "ownership stakes"]
@@ -2566,7 +2580,17 @@ def _watched() -> list[str]:
 
 
 with tab_monitor:
-    boards = world.monitor(src.con)
+    mon_unit = st.radio(
+        "Priced in", ["US dollars", "Gold"], horizontal=True, key="monitor_unit",
+        # Starts on whatever the sidebar's unit says; switched here, it changes the
+        # monitor only.
+        index=1 if unit == nm.GOLD else 0,
+        help="Gold: every price divided by the gold price of the same day (GC=F). "
+             "Foreign indices go to dollars first at that day's rate. Yields and cross "
+             "rates have no currency and stay as they are.")
+    in_gold = mon_unit == "Gold"
+    unit_key = "gold" if in_gold else "USD"
+    boards = world.monitor(src.con, unit=unit_key)
     stored = sum(int(t["last"].notna().sum()) for t in boards.values() if "last" in t)
     if not stored:
         st.info(
@@ -2585,12 +2609,25 @@ with tab_monitor:
 
         def _board(group: str, frame: pd.DataFrame) -> None:
             st.markdown(f"#### {group}")
+            def _last(v, sym, kind=None):
+                if kind == "unit":
+                    return "1 oz"
+                if kind == "no_rate":
+                    return "no rate"
+                if v is None or pd.isna(v):
+                    return "—"
+                if kind == "oz":
+                    return f"{v:,.4f} oz" if v < 10 else f"{v:,.2f} oz"
+                if kind == "mg":
+                    return f"{v:,.3f} mg" if v < 1 else f"{v:,.2f} mg"
+                return f"{v:,.4f}" if ("=X" in sym and v < 20) else f"{v:,.2f}"
+
+            kinds = frame["kind"] if "kind" in frame else [None] * len(frame)
             rows = pd.DataFrame({
                 "market": frame["label"],
-                "last": [("—" if pd.isna(v) else
-                          f"{v:,.4f}" if ("=X" in sym and v < 20) else f"{v:,.2f}")
-                         for v, sym in zip(frame.get("last", pd.Series(dtype=float)),
-                                           frame["symbol"])],
+                "last": [_last(v, sym, k) for v, sym, k in zip(
+                    frame.get("last", pd.Series([None] * len(frame))), frame["symbol"],
+                    kinds)],
                 **{h: [_move(v, sym) for v, sym in zip(frame.get(h, [None] * len(frame)),
                                                         frame["symbol"])]
                    for h in ("1D", "1W", "1M", "YTD", "1Y")},
@@ -2606,11 +2643,27 @@ with tab_monitor:
                 _board(group, frame)
         newest = max((d for t in boards.values() for d in t.get("as_of", pd.Series())
                       if isinstance(d, dt.date)), default=None)
-        st.caption(
-            f"Daily closes, newest {newest}. Each move compares with the last close on or "
-            "before the start of its window; yields move in basis points. Indices are "
-            "in their own currency and without dividends."
-        )
+        if in_gold:
+            no_rate = sorted({world.CURRENCY.get(sym, "USD") for t in boards.values()
+                              for sym, k in zip(t["symbol"], t.get("kind", []))
+                              if k == "no_rate"} - {"USD"})
+            st.caption(
+                f"Daily closes, newest {newest}, priced in gold: each value divided by the "
+                "gold price of the same day (GC=F, front-month futures). Indices and "
+                "shares in troy ounces; currencies in milligrams of gold per unit (the "
+                "currency named in the row). Foreign indices are converted to dollars "
+                "first at that day's rate. Yields, the dollar index and EUR/AUD have no "
+                "currency and are unchanged. A fall here can be gold rising, not the "
+                "market falling."
+                + (f" No dollar rate stored for {', '.join(no_rate)}: run "
+                   "`uv run python scripts/build_world.py` once." if no_rate else "")
+            )
+        else:
+            st.caption(
+                f"Daily closes, newest {newest}. Each move compares with the last close on "
+                "or before the start of its window; yields move in basis points. Indices "
+                "are in their own currency and without dividends."
+            )
 
         st.markdown("#### Side by side")
         labels = {s: l for g in world.MONITOR.values() for s, l in g}
@@ -2623,7 +2676,7 @@ with tab_monitor:
                             label_visibility="collapsed", key="monitor_span")
         if picked:
             since = dt.date.today() - dt.timedelta(days=365 * int(span[:-1]))
-            curves = world.rebased(src.con, picked, since)
+            curves = world.rebased(src.con, picked, since, unit=unit_key)
             if curves.empty:
                 st.info("No stored history for these yet.")
             else:
@@ -2647,7 +2700,9 @@ with tab_monitor:
                 st.plotly_chart(cmp_fig, use_container_width=True, key="monitor_cmp")
                 st.caption("Each line starts at 100 on its first close in the window, so "
                            "an index, a currency and gold can share one scale. Price "
-                           "only, in each market's own currency.")
+                           "only, " + ("measured in gold (gold itself is the unit and "
+                                       "has no line)." if in_gold
+                                       else "in each market's own currency."))
 
 
     st.markdown("#### Compare anything")
@@ -2659,14 +2714,17 @@ with tab_monitor:
     cmp_span = k2.selectbox("Since", ["1Y", "3Y", "5Y", "10Y"], index=1, key="cmp_span",
                             label_visibility="visible")
     cmp = world.compare(src.con, cmp_syms.split(","),
-                        dt.date.today() - dt.timedelta(days=365 * int(cmp_span[:-1])))
+                        dt.date.today() - dt.timedelta(days=365 * int(cmp_span[:-1])),
+                        unit=unit_key)
     if not cmp:
         st.info("None of these has stored prices in that window.")
     else:
         import plotly.graph_objects as go
 
         if cmp["missing"]:
-            st.caption("No stored prices for: " + ", ".join(cmp["missing"]))
+            st.caption(("Not shown (no stored prices, no exchange rate, or gold itself "
+                        "in the gold view): " if in_gold else "No stored prices for: ")
+                       + ", ".join(cmp["missing"]))
         cfig = go.Figure()
         cpal = [ui.AMBER, ui.CYAN, ui.UP, "#C792EA", "#F78C6C", "#FFCB6B", "#89DDFF",
                 ui.DOWN]
@@ -2706,8 +2764,10 @@ with tab_monitor:
             st.plotly_chart(hm, use_container_width=True, key="cmp_corr")
         st.caption(
             f"Correlation of daily returns over the {cmp['shared_days']} days all of them "
-            "traded. Beta against the S&P 500 total return. Each series in its own "
-            "currency; indices and commodities without dividends.")
+            "traded. Beta against the S&P 500 total return. "
+            + ("Everything, the S&P 500 too, measured in gold; gold itself is the unit "
+               "and has no line. " if in_gold else "Each series in its own currency. ")
+            + "Indices and commodities without dividends.")
 
 
 with tab_books:
@@ -3087,8 +3147,10 @@ with tab_macro:
             hist_rates["date"] = pd.to_datetime(hist_rates["date"])
             wide = hist_rates.pivot_table(index="date", columns="ticker", values="close")
             wide = wide.rename(columns={k: v[0] for k, v in mc.RATE_SERIES.items()})
+            # One colour per series actually stored: Streamlit refuses a colour list
+            # longer than the columns, and a store may hold only some of the four.
             st.line_chart(wide, height=250,
-                          color=[ui.AMBER, ui.CYAN, ui.UP, ui.MUTED])
+                          color=[ui.AMBER, ui.CYAN, ui.UP, ui.MUTED][:len(wide.columns)])
 
         st.markdown("#### What a company does when rates move")
         rate_tk = st.text_input("Ticker", value="AAPL", key="macro_ticker")
@@ -3191,11 +3253,14 @@ with tab_commodities:
         if chosen_c:
             syms = table.set_index("series").loc[chosen_c, "symbol"].tolist()
             hist_c = src.con.execute(
-                "SELECT date, ticker, close_adj FROM prices "
+                "SELECT date, ticker, COALESCE(close_adj, close) AS close_adj FROM prices "
                 "WHERE ticker IN (SELECT UNNEST(?)) ORDER BY date", [syms]
             ).fetch_df()
             hist_c["date"] = pd.to_datetime(hist_c["date"])
             wide_c = hist_c.pivot_table(index="date", columns="ticker", values="close_adj")
+        if chosen_c and wide_c.empty:
+            st.info("No stored history for these series.")
+        elif chosen_c:
             # Rebased, because a chart of oil in dollars next to copper in cents compares
             # nothing. Index both to 100 and the comparison is about movement.
             wide_c = 100 * wide_c / wide_c.bfill().iloc[0]

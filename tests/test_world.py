@@ -108,3 +108,77 @@ def test_compare_puts_any_stored_series_side_by_side():
     stats = out["stats"].set_index("symbol")
     assert stats.at["AAA", "beta"] == pytest.approx(1.0)
     assert (out["curves"].iloc[0] == 100.0).all()
+
+
+# --- the gold view ----------------------------------------------------------------------
+
+def _gold_store(rows):
+    con = duckdb.connect(":memory:")
+    _apply(con, MARKET_MIGRATIONS)
+    days = pd.bdate_range(dt.date.today() - dt.timedelta(days=40), dt.date.today()).date
+    for symbol, first, last in rows:
+        step = (last - first) / (len(days) - 1)
+        for i, d in enumerate(days):
+            con.execute("INSERT INTO prices (ticker, date, close) VALUES (?, ?, ?)",
+                        [symbol, d, first + i * step])
+    return con
+
+
+def test_in_gold_an_index_is_divided_by_the_gold_price():
+    con = _gold_store([("GC=F", 2000.0, 4000.0), ("^GSPC", 6000.0, 6000.0)])
+    row = world.monitor(con, unit="gold")["Americas"].set_index("symbol").loc["^GSPC"]
+    assert row["kind"] == "oz"
+    assert row["last"] == pytest.approx(1.5)                 # 6000 / 4000
+    assert row["1M"] < -0.3                                  # gold rose, so it fell
+
+
+def test_a_foreign_index_becomes_dollars_before_it_becomes_ounces():
+    con = _gold_store([("GC=F", 4000.0, 4000.0), ("^N225", 40000.0, 40000.0),
+                       ("JPY=X", 150.0, 150.0)])
+    row = world.monitor(con, unit="gold")["Asia-Pacific"].set_index("symbol").loc["^N225"]
+    assert row["last"] == pytest.approx(40000.0 / 150.0 / 4000.0)
+
+
+def test_an_index_whose_currency_has_no_rate_is_said_so_not_left_in_its_own_currency():
+    con = _gold_store([("GC=F", 4000.0, 4000.0), ("^BSESN", 80000.0, 80000.0)])
+    row = world.monitor(con, unit="gold")["Asia-Pacific"].set_index("symbol").loc["^BSESN"]
+    assert row["kind"] == "no_rate" and pd.isna(row.get("last"))
+
+
+def test_a_currency_in_gold_is_milligrams_per_unit_and_yields_are_untouched():
+    con = _gold_store([("GC=F", 3110.34768, 3110.34768), ("EURUSD=X", 1.0, 1.0),
+                       ("^TNX", 4.0, 4.5)])
+    boards = world.monitor(con, unit="gold")
+    eur = boards["Currencies"].set_index("symbol").loc["EURUSD=X"]
+    assert eur["kind"] == "mg" and eur["label"] == "EUR"
+    assert eur["last"] == pytest.approx(10.0)                # $1 at $3,110/oz = 10 mg
+    tnx = boards["US rates (yield, %)"].set_index("symbol").loc["^TNX"]
+    assert tnx["kind"] == "unitless" and tnx["last"] == pytest.approx(4.5)
+    gold = boards["Commodities"].set_index("symbol").loc["GC=F"]
+    assert gold["kind"] == "unit"
+
+
+def test_the_gold_view_needs_its_rates_stored():
+    assert set(world.FX_FOR_GOLD) <= set(world.stored_symbols())
+    assert all(c == "USD" or f"{c}USD=X" in world.stored_symbols()
+               or f"{c}=X" in world.stored_symbols() for c in world.CURRENCY.values())
+
+
+def test_compare_in_gold_measures_everything_in_ounces():
+    con = _gold_store([("GC=F", 2000.0, 4000.0), ("AAPL", 200.0, 200.0),
+                       ("^SP500TR", 10000.0, 10000.0)])
+    start = dt.date.today() - dt.timedelta(days=40)
+    usd = world.compare(con, ["AAPL"], start)
+    gold = world.compare(con, ["AAPL"], start, unit="gold")
+    assert usd["stats"].iloc[0]["return"] == pytest.approx(0.0)
+    assert gold["stats"].iloc[0]["return"] == pytest.approx(-0.5)   # gold doubled
+    assert world.rebased(con, ["GC=F"], start, unit="gold").empty    # gold is the unit
+
+
+def test_in_gold_a_series_not_stored_is_missing_not_short_of_a_rate():
+    con = _gold_store([("GC=F", 4000.0, 4000.0), ("JPY=X", 150.0, 150.0)])
+    boards = world.monitor(con, unit="gold")
+    assert boards["Commodities"].set_index("symbol").loc["SI=F", "kind"] == "missing"
+    jpy = boards["Currencies"].set_index("symbol").loc["JPY=X"]
+    assert jpy["label"] == "JPY"
+    assert jpy["last"] == pytest.approx(31_103.4768 / 150.0 / 4000.0)   # mg per yen

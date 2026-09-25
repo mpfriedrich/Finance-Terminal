@@ -16,6 +16,9 @@ MARKET_DB = DATA_DIR / "market.duckdb"
 # The paid source's store, built by scripts/build_paid.py. Separate from the free one so
 # switching back is a setting, not a rebuild (Phase 10).
 PAID_DB = DATA_DIR / "paid.duckdb"
+# World stage 3: the US store plus Compustat Global from WRDS, built by
+# scripts/build_wrds.py. Its own file for the same reason.
+WORLD_DB = DATA_DIR / "world.duckdb"
 USER_DB = DATA_DIR / "user.duckdb"
 CACHE_DIR = DATA_DIR / "cache"
 # What alerts have fired, kept by the checker (alerts.py) outside the portfolio store.
@@ -109,6 +112,7 @@ class Settings:
     holdout_years: int = 2
     rebalance: str = "quarterly"
     risk_free_fallback: float = 0.02
-    # "free" (SEC + yfinance) or "paid" (Sharadar). Set PORTFOLIO_LAB_SOURCE in
+    # "free" (SEC + yfinance), "paid" (Sharadar) or "world" (free US + Compustat Global
+    # via WRDS). Set PORTFOLIO_LAB_SOURCE in
     # .env.local; see data/sources.py for what happens when the paid one is not ready.
     data_source: str = field(default_factory=lambda: _setting("PORTFOLIO_LAB_SOURCE", "free"))

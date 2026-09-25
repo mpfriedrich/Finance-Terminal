@@ -13,7 +13,7 @@ from portfolio_lab.data.schema import finish_rebuild, open_market_for_rebuild
 con, work = open_market_for_rebuild(MARKET_DB)
 start, end = dt.date(2010, 1, 1), dt.date.today()
 missing = []
-for symbol in world.all_symbols():
+for symbol in world.stored_symbols():
     bars = px._download([symbol], start, end)
     if bars.empty:
         missing.append(symbol)

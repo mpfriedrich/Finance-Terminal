@@ -128,6 +128,45 @@ the published Sharadar layout (and the screener's test series runs unchanged aga
 it), but no subscription existed when it was written. Check the first build's output —
 the number of delisted companies with prices should be in the thousands, not zero.
 
+## Adding the rest of the world (Compustat Global via WRDS)
+
+With a WRDS account (many universities have one; students usually register through the
+library), the screen can cover listed companies outside North America as well: every
+company Compustat Global lists in the chosen countries, with prices, share counts and
+annual and quarterly fundamentals, including companies that stopped trading. The US
+half stays the free store; both live in one file, `data/world.duckdb`.
+
+1. Put the login in `.env.local` (never shown, never committed):
+   ```
+   WRDS_USERNAME=...
+   WRDS_PASSWORD=...
+   ```
+   The password can live in `~/.pgpass` instead. If the account uses two-factor
+   authentication, approve the Duo push on the phone when the build connects.
+2. Build the world store (first run: long — daily prices for ~20 countries since 2010;
+   later runs fetch only the current year):
+   ```bash
+   uv run python scripts/build_wrds.py
+   uv run python scripts/build_wrds.py --countries=DEU,GBR,JPN --since=2015-01-01
+   ```
+3. Choose it in `.env.local`, restart the app, warm the cache:
+   ```
+   PORTFOLIO_LAB_SOURCE=world
+   ```
+
+How it reads: tickers are the Compustat ticker plus the country (`7203.JPN`, `SAP.DEU`),
+every price is in dollars at that day's rate (so returns are what a dollar investor
+earned), fundamentals keep their currency and are converted at the screen date. **Report
+dates are estimated**: Compustat Global does not record when an annual report came out,
+so it counts as published at the legal deadline (period end + 4 months; interim reports
++ 3 months, or the report date where Compustat has one). `build_prices.py` keeps the US
+half current; rerun `build_wrds.py` weekly for the rest. Check the licence terms of your
+WRDS access before using the data outside your studies.
+
+**Untested against the real service**, like the paid source: the translation is tested
+on hand-made files in the Compustat Global layout. Check the per-country counts the
+first build prints.
+
 ## Tests
 
 ```bash
