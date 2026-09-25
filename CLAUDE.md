@@ -245,3 +245,8 @@ toggle in MONITOR, memory-safe ingest, and several fixes. Tests pass.
 - Phone access (Tailscale) hasn't been decided.
 - The morning briefing does not refresh the world store's non-US part; rerun
   `build_wrds.py` weekly.
+
+**Planned, not started (user decides when):** leverage with margin calls, short selling in
+LAB, leveraged-ETF simulation, option-strategy backtests (Black-Scholes approximation or
+OptionMetrics via WRDS), futures positions. The spec is in PLAN.md → "Geplant: Hebel und
+Derivate".

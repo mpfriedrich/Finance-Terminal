@@ -62,7 +62,7 @@ Lokal auf dem Mac laufende Web-Oberfläche: Chat → Filterspezifikation → Scr
 - **Nicht-US-Märkte** — „us markt" (user). Zweiter Markt wäre eine zusätzliche Quelle, kein Umbau.
 - **Zugriff vom iPhone/iPad** — v1 läuft lokal `[A3]`.
 - **Steuern, Währungsumrechnung, Depotgebühren** — nicht in der Backtest-Rechnung. Handelskosten dagegen schon.
-- **Intraday, Optionen, Leerverkäufe, Hebel** — nur Long auf Tagesschlusskursen.
+- **Intraday, Optionen, Leerverkäufe, Hebel** — nur Long auf Tagesschlusskursen. *Stand 25.09.2026: Hebel, Leerverkäufe und Options-Backtests sind als nächster Ausbau vorgemerkt, siehe „Geplant: Hebel und Derivate“ unten; Optionen gibt es bereits als Analyse (OPTIONS-Reiter).*
 - **Bezahlte Datenquelle** — Anschluss wird vorbereitet (Phase 10), nicht abonniert (user, Q5).
 - **Vollständige Beseitigung der Überlebensverzerrung** — mit kostenlosen Quellen nicht erreichbar. Wird beziffert und angezeigt, nicht behauptet. Beseitigung ist genau das, was die bezahlte Quelle später liefert.
 
@@ -897,6 +897,56 @@ unbereinigten Reihe, aus der die Kerzen gezeichnet werden.
 **Nebenbefund, der einen Ladefehler verhindert hat:** `open_market_for_rebuild()` hat die
 Migrationen übersprungen. Solange nie eine Spalte dazukam, fiel das nicht auf; der erste
 Aufbau auf einer Kopie hätte gegen die alte Tabelle geschrieben und wäre gescheitert.
+
+## Geplant: Hebel und Derivate (vorgemerkt am 25.09.2026, noch nicht begonnen)
+
+Auf Frage des Nutzers („gibt es die Option für Derivate und Leverage?“) nur in den Plan
+aufgenommen — **nichts davon ist gebaut**. Der Nutzer entscheidet, wann und was.
+
+**Ist-Stand:**
+* OPTIONS-Reiter: Mehrbein-Positionen aus Calls, Puts und Aktien (long/short, Vorlagen),
+  Auszahlung bei Fälligkeit, Wert heute, Greeks, implizite Volatilität (selbst per
+  Bisektion aus Black-Scholes), Fläche, erwartete Schwankung, Wahrscheinlichkeit über
+  einem Niveau; je Portfolio gespeichert. Nur Live-Kurse von Yahoo, kein Backtest.
+* Futures nur als Kursreihen (MONITOR, COMMODITIES), keine Positionen.
+* Backtests (Stufe A/B), Papierdepots und LAB: nur long, voll investiert, kein Kredit,
+  keine Leerverkäufe.
+
+**Vorgemerkt, in empfohlener Reihenfolge:**
+
+1. **Hebel in Stufe A/B, Papierdepots und LAB** (Vorschlag: zuerst).
+   Faktor einstellbar (z. B. 1,0–3,0×). Kreditzins auf den geliehenen Teil = kurzer
+   Zins (`^IRX`) + Aufschlag (Einstellung), täglich belastet. Wartungsmarge
+   (Einstellung, z. B. 25 %): fällt das Eigenkapital darunter, Zwangsverkauf zur
+   nächsten Eröffnung (R16-Logik), Kosten wie jeder Handel (R8); ein Tag unter null =
+   Totalverlust, ausgewiesen. Bericht nennt Zinskosten, Anzahl Margin Calls und den
+   schlechtesten Stand des Eigenkapitals. Prüfung: Hebel 1,0 = heutiges Ergebnis auf
+   den Cent; Hand-Rechnung einer Reihe mit bekanntem Einbruch, die genau einen Margin
+   Call auslöst.
+2. **Leerverkäufe in LAB** (Einzeltitel-Regeln): Verkaufssignal eröffnet eine
+   Short-Position statt nur auszusteigen. Leihgebühr p. a. (Einstellung, schwer
+   leihbare Titel sind in Wahrheit teurer — nicht messbar mit freien Daten, daher als
+   Annahme ausweisen), Dividenden werden dem Leerverkäufer belastet. Delisting einer
+   Short-Position: Gewinn nur bis zum letzten Kurs, keine Annahme zugunsten des Nutzers.
+3. **Gehebelte ETFs simulieren** (2×/3× mit täglicher Neugewichtung, Kosten p. a.):
+   zeigt den Volatilitätsverlust in Seitwärtsmärkten; Vergleich gegen echte Produkte
+   (z. B. `SSO`, `UPRO`) als Plausibilitätsprüfung, wo Yahoo sie führt.
+4. **Backtest von Optionsstrategien.** Zwei Wege, klar getrennt ausweisen:
+   * *Näherung:* Preise per Black-Scholes aus historischer Volatilität (bzw. VIX für
+     den Index) — deutlich als Schätzung etikettiert (R12), ohne Skew und ohne echte
+     Geld-Brief-Spannen, beides ist zu nennen.
+   * *Echt:* historische Optionsdaten aus **OptionMetrics (IvyDB) über WRDS**, falls FU
+     oder USYD es lizenzieren (auf der WRDS-Seite prüfen: blau = lizenziert). Dann
+     eigene Datenstrecke wie `data/crsp.py`, Point-in-Time-Regeln unverändert.
+5. **Futures-Positionen** (Rohstoffe, Index) mit Initial-/Wartungsmarge und Rollen der
+   Kontrakte — nur, wenn 1–4 stehen; fortlaufende Kontraktreihen mit Rollrendite
+   brauchen eine eigene Datenquelle, Yahoos `=F`-Reihen sind nur der Frontmonat.
+
+**Regeln, die dafür gelten müssen:** R16 (Ausführung zur nächsten Eröffnung, auch bei
+Zwangsverkauf), R8 (Kosten je Handel), R18 (Delisting), R12 (Etikett nennt jede Annahme:
+Zinsaufschlag, Leihgebühr, Modellpreise), R23 (keine Empfehlung — Hebel wird gezeigt,
+nicht angeraten). Die Oberfläche soll bei Hebel > 1 sichtbar machen, dass Verluste über
+den Einsatz hinaus möglich sind.
 
 ## Build Phases
 
