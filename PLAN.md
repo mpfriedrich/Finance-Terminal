@@ -852,6 +852,16 @@ wartet noch auf die Freischaltung der CRSP-Lizenz; danach
 eine fehlende Lizenz ab. Bis dahin bleibt der US-Teil überlebendenbasiert
 (`survivorship_free = False` für den Welt-Bestand).
 
+**Stufe B auf dem vollen Welt-Bestand, gemessen am 27.09.2026:** Der PIT-Zwischenspeicher
+wurde für den Welt-Bestand gewärmt (60 Stichtage neu gerechnet, ~64 s je Rahmen wegen der
+25 Mio. Fakten, gesamt 2:39 h; `warm_pit_cache.py` folgt jetzt der gewählten Quelle).
+Ein voller Lauf 2011-01-03 bis 2024-09-24 (Holdout-Regel greift, 55 von 63 Stichtagen)
+mit einem Value-Screen (KGV ≤ 5, KBV ≤ 2, 30 Titel, quartalsweise) brauchte **7 Sekunden,
+55/55 Cache-Treffer** — die 5-Minuten-Grenze aus Phase 8 ist auf dem vollen Bestand
+eingehalten; kalt wären es ~55 Minuten. Ergebnis zur Plausibilität: 5,7 % p. a. gegen
+13,8 % S&P 500 TR (−8,1 Prozentpunkte) — passt zur dokumentierten Deep-Value-Schwäche
+dieses Fensters; die Rechnung schmeichelt nicht.
+
 **Nebenbei:** MONITOR hat einen Umschalter Dollar ↔ Gold. Indizes und Aktien in Unzen,
 Währungen in Milligramm Gold je Einheit, fremde Indizes erst zum Tageskurs in Dollar;
 Renditen, Dollar-Index und Kreuzkurse bleiben (keine Währung). Die dafür nötigen

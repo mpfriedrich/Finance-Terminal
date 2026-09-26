@@ -244,7 +244,10 @@ data, and re-warming the pit cache for the world source.
 
 **Known gaps:**
 - CRSP and the Sharadar paid source are untested against the real services.
-- Stage B has not been timed against its 5-minute budget on the full store.
+- ~~Stage B has not been timed against its 5-minute budget on the full store.~~ Measured
+  27.09.2026 on the world store: 7 s with the warm cache (55/55 hits); cold it would be
+  ~55 min at ~64 s per frame — warming is mandatory there, the script now follows the
+  selected source.
 - US price floors ($5, $1m turnover) exclude many European and Japanese small caps.
 - Phone access (Tailscale) hasn't been decided.
 - The morning briefing does not refresh the world store's non-US part; rerun
