@@ -4,24 +4,32 @@ One frame costs 6-10 seconds against the live store, almost all of it the point-
 fundamentals assembly. A quarterly run from 2011 needs 63 of them. Computing them once
 here turns every later backtest — with any strategy — into seconds.
 
-Run: uv run python scripts/warm_pit_cache.py [start-year]
+Frames are cached per data source (the fingerprint is part of the cache key), so the
+script warms the source the app would run on: PORTFOLIO_LAB_SOURCE from .env.local,
+or the one named with --source=. The free store is the default, as before.
+
+Run: uv run python scripts/warm_pit_cache.py [start-year] [--source=free|paid|world]
 """
 import datetime as dt
 import sys
 
 from portfolio_lab import stage_b
-from portfolio_lab.config import CACHE_DIR, MARKET_DB
-from portfolio_lab.data.free import FreeSource
-from portfolio_lab.data.schema import open_market
+from portfolio_lab.config import CACHE_DIR, Settings
+from portfolio_lab.data.sources import open_selected
 from portfolio_lab.pit_cache import FrameCache
 
-start_year = int(sys.argv[1]) if len(sys.argv) > 1 else 2011
-src = FreeSource(open_market(MARKET_DB, read_only=True))
+args = sys.argv[1:]
+start_year = next((int(a) for a in args if a.isdigit()), 2011)
+source_name = next((a.split("=", 1)[1] for a in args if a.startswith("--source=")), None)
+settings = Settings(data_source=source_name) if source_name else Settings()
+
+src, store = open_selected(settings=settings)
 asof = src.latest_equity_date()
 dates = stage_b.rebalance_dates(dt.date(start_year, 1, 3), asof, "quarterly")
 
 cache = FrameCache(src, CACHE_DIR / "pit", src.snapshot().fingerprint())
 print(f"{len(dates)} rebalance dates, {dates[0]} .. {dates[-1]}", flush=True)
+print(f"source: {settings.data_source} ({store})", flush=True)
 print(f"cache: {cache.root}", flush=True)
 
 stats = cache.warm(dates, progress=lambda i, n, d: print(

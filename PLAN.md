@@ -819,6 +819,39 @@ für die USA, die Phase 7 gemessen hat (0 von 20):
 * Nebenbei behoben: `research.peers` gab bei fehlender Branche eine Tabelle ohne Spalten
   zurück, der Comps-Bereich stürzte ab.
 
+**Verifikation 25.09.2026 (lokale Sitzung):** Der Build aus dem Zwischenlager
+(`--from-dir=data/cache/wrds --us=free`) ist durchgelaufen; `data/world.duckdb` ist
+4,9 GB. Gezählt: 10.914 Linien = 5.364 US (aus dem freien Bestand kopiert) + 5.550
+Compustat Global + 0 CRSP (FU-Account ohne Lizenz, wie gemessen). Die Compustat-
+Abdeckung ist nur für **DEU (863 Firmen, 692 handelnd) und JPN (4.663 / 4.028)**
+vollständig — die anderen Standardländer kommen mit einstelligen Restzahlen (GBR 5,
+FRA 3, AUT 5, …) aus Firmen mit Doppelnotiz, weil das Zwischenlager nur die
+DEU/JPN-Testläufe ab 2020 enthält. Kurse laufen bis 2026-09-25 (die US-Fortschreibung
+aus dem freien Bestand greift), die FRED-Serien sind mitkopiert. Rauchtest
+`WorldSource.screening_frame(2026-06-30)`: 10.047 Zeilen (USA 5.305, JPN 4.031,
+DEU 695), Länderfeld befüllt. Testsuite als Grundlinie: 631 grün, 1 übersprungen.
+**Nächster Schritt:** voller Download aller 21 Standardländer ab 2010
+(`scripts/build_wrds.py`, Duo-Freigabe nötig); abgeschlossene DEU/JPN-Jahre im
+Zwischenlager werden übersprungen, 2010–2019 wird für sie nachgeholt.
+
+**Gemessen am 26.09.2026 (voller Download, lokale Sitzung):** Der erste Lauf brach
+nach ~12 Stunden bei Italien 2026 ab („SSL connection has been closed unexpectedly“
+— WRDS trennt lange Verbindungen); der Neustart setzte dank des Jahr-für-Jahr-
+Zwischenlagers nahtlos an der Bruchstelle auf. Ergebnis (`world.duckdb`, 10,5 GB):
+**22.139 Compustat-Global-Firmen** (JPN 5.337, AUS 2.997, GBR 2.724, HKG 1.752,
+DEU 1.574, …; dazu Doppelnotizen in KOR, ZAF, TWN u. a. in einstelliger Zahl),
+**58,9 Mio. Compustat-Tageskurse** (74,9 Mio. mit US-Anteil), **16,0 Mio. Fakten**,
+davon 13,3 Mio. (83 %) auf geschätztem Meldedatum — wie erwartet, Jahresabschlüsse
+haben kein echtes in Compustat Global. **Kein einziger Kurs ohne Wechselkurs**
+(`price_rows_without_rate = 0`). US-Teil: 5.364 Linien aus dem freien Bestand,
+Kurse bis 25.09.2026. Rauchtest `WorldSource.screening_frame(2026-06-30)`:
+18.900 Zeilen, alle 21 Länder vertreten, Länderfeld befüllt. Testsuite grün.
+**CRSP:** Der USYD-Account (Zugangsdaten in `.env.local` als `WRDS_CRSP_*`)
+wartet noch auf die Freischaltung der CRSP-Lizenz; danach
+`scripts/build_wrds.py --countries=none` — die Prüfung `crsp.readable()` fängt
+eine fehlende Lizenz ab. Bis dahin bleibt der US-Teil überlebendenbasiert
+(`survivorship_free = False` für den Welt-Bestand).
+
 **Nebenbei:** MONITOR hat einen Umschalter Dollar ↔ Gold. Indizes und Aktien in Unzen,
 Währungen in Milligramm Gold je Einheit, fremde Indizes erst zum Tageskurs in Dollar;
 Renditen, Dollar-Index und Kreuzkurse bleiben (keine Währung). Die dafür nötigen

@@ -217,7 +217,7 @@ ticker; ended lines use their last CRSP ticker, with `-permno` appended on a col
 - Don't `pkill -f` a pattern that also matches your own shell command. It kills the shell.
   Kill by PID.
 
-## 10. Status and open items (as of 25.09.2026)
+## 10. Status and open items (as of 26.09.2026)
 
 **Done and merged** (PRs #1–#4): phases 1–10, the Stage B reviews, world stages 1–2,
 analyst tools 1–12.
@@ -226,17 +226,21 @@ analyst tools 1–12.
 (Compustat Global), the CRSP US half, CIZ support, the second WRDS account, the gold
 toggle in MONITOR, memory-safe ingest, and several fixes. Tests pass.
 
+**World store: fully built 26.09.2026** (local session). All 21 default countries
+since 2010: 22,139 Compustat companies, 58.9M price rows (0 without an FX rate),
+16.0M facts (83% on estimated filing dates), plus the copied US half (5,364 lines);
+10.5 GB. Measurements in PLAN.md → „Gemessen am 26.09.2026“. The first download run
+died on a WRDS SSL drop after ~12 h; the restart resumed from the per-year cache.
+Not done yet: `PORTFOLIO_LAB_SOURCE=world` in `.env.local`, an app check on real
+data, and re-warming the pit cache for the world source.
+
 **Waiting on the user:**
-1. A world store build from the cached download:
-   `uv run python scripts/build_wrds.py --from-dir=data/cache/wrds --us=free`.
-   The first attempt ran out of memory before the fix. Then check the country table and
-   the counts.
-2. If that's fine: a full download of all default countries (long), then
-   `PORTFOLIO_LAB_SOURCE=world` and a check of the app on real data.
-3. His USYD WRDS account (pending approval). If CRSP shows **blue** there: set
-   `WRDS_CRSP_USERNAME/PASSWORD` and run `build_wrds.py`. Check the
-   `CRSP: {...}` line: ended listings should number in the thousands.
-4. Merging the branch once he's satisfied.
+1. His USYD WRDS account (credentials already in `.env.local` as `WRDS_CRSP_*`,
+   but the CRSP licence/activation is still pending — first attempt failed with
+   PAM authentication, no Duo push). Once CRSP shows **blue** on his WRDS page:
+   `uv run python scripts/build_wrds.py --countries=none`. Check the `CRSP: {...}`
+   line: ended listings should number in the thousands. Then re-warm the pit cache.
+2. Merging the branch once he's satisfied.
 
 **Known gaps:**
 - CRSP and the Sharadar paid source are untested against the real services.

@@ -93,7 +93,9 @@ uv run streamlit run app.py
 Optional, and worth it before using stage B: `uv run python scripts/warm_pit_cache.py`
 assembles the point-in-time universe for each rebalance date once, which turns a
 multi-minute backtest into a fast one. It changes speed and nothing else — there is a
-test for exactly that.
+test for exactly that. It warms the source the app would run on (the one in
+`PORTFOLIO_LAB_SOURCE`, free by default); `--source=world` or `--source=paid` picks
+another, because frames are cached per source.
 
 ## Switching to the paid data source
 
@@ -118,7 +120,8 @@ rules stay exactly as they are.
    ```
    PORTFOLIO_LAB_SOURCE=paid
    ```
-4. Warm the cache again (`scripts/warm_pit_cache.py`); frames are cached per source.
+4. Warm the cache again (`scripts/warm_pit_cache.py --source=paid`); frames are cached
+   per source.
 
 Back to the free data: `PORTFOLIO_LAB_SOURCE=free`, or delete the line. A missing key or
 an unbuilt store shows a message saying which step is missing, not a crash.
