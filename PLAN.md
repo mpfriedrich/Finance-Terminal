@@ -862,6 +862,21 @@ eingehalten; kalt wären es ~55 Minuten. Ergebnis zur Plausibilität: 5,7 % p. a
 13,8 % S&P 500 TR (−8,1 Prozentpunkte) — passt zur dokumentierten Deep-Value-Schwäche
 dieses Fensters; die Rechnung schmeichelt nicht.
 
+**Befund 01.10.2026 (lokale Sitzung) — das tägliche Update verwaist den PIT-Cache:**
+Der werktägliche Launchdienst (`com.moritzfriedrich.portfoliolab.briefing`, Mo–Fr 10:00)
+bringt die Kurse auf den Tagesstand. Der Cache-Schlüssel ist der Fingerabdruck des
+Snapshots (Quelle, neueste Kurszeile, Zeilenzahlen, `snapshot()` in `data/free.py`) —
+der ändert sich mit **jedem** Tagesupdate, also sind nach jeder Aktualisierung alle 63
+Rahmen verwaist und Stufe B läuft kalt. Gemessen: Build-Kennungen `2c79ada07b` (World,
+gewärmt 27.09.) und `9592b54c09` (Free, 25.09.) galten nicht mehr; die aktuellen waren
+`b9b5f92eb6` / `30e55a1712`. In der Nacht auf den 02.10. wurden beide Caches neu gewärmt
+(Free ~8 min, World ~2:40 h) — gültig bis zum nächsten 10-Uhr-Update.
+**Offene Entscheidung (Nutzer):** (1) Morgenjob wärmt Free täglich mit (+8 min CPU),
+World wöchentlich zusammen mit `build_wrds.py`; (2) World unter der Woche kalt lassen;
+(3) Cache-Schlüssel entschärfen (alte Rahmen über Tagesupdates behalten — ändern sich
+fast nie, Ausnahme: verspätete Nachmeldung alter Perioden; schwächt eine bewusst
+konservative Schutzregel, bräuchte Test und Doku). Empfehlung der Sitzung: 1 + 2.
+
 **Nebenbei:** MONITOR hat einen Umschalter Dollar ↔ Gold. Indizes und Aktien in Unzen,
 Währungen in Milligramm Gold je Einheit, fremde Indizes erst zum Tageskurs in Dollar;
 Renditen, Dollar-Index und Kreuzkurse bleiben (keine Währung). Die dafür nötigen

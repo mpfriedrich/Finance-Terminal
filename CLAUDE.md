@@ -231,8 +231,15 @@ since 2010: 22,139 Compustat companies, 58.9M price rows (0 without an FX rate),
 16.0M facts (83% on estimated filing dates), plus the copied US half (5,364 lines);
 10.5 GB. Measurements in PLAN.md → „Gemessen am 26.09.2026“. The first download run
 died on a WRDS SSL drop after ~12 h; the restart resumed from the per-year cache.
-Not done yet: `PORTFOLIO_LAB_SOURCE=world` in `.env.local`, an app check on real
-data, and re-warming the pit cache for the world source.
+The user has set `PORTFOLIO_LAB_SOURCE=world`; the app was checked on the real store
+(all tabs render, no exceptions). Stage B timed on the full store: 7 s with a warm
+cache (PLAN.md → „Stufe B auf dem vollen Welt-Bestand“).
+
+**Known gap found 01.10.2026 — the daily 10:00 price update orphans the pit cache**
+(snapshot fingerprint = newest bar + row counts, changes with every update), so
+stage B runs cold again after every weekday morning. Re-warmed in the night of
+02.10.; open decision (3 options, recommendation: warm free daily in the morning
+job, world weekly) in PLAN.md → „Befund 01.10.2026“.
 
 **Waiting on the user:**
 1. His USYD WRDS account (credentials already in `.env.local` as `WRDS_CRSP_*`,
