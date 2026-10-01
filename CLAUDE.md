@@ -237,9 +237,12 @@ cache (PLAN.md → „Stufe B auf dem vollen Welt-Bestand“).
 
 **Known gap found 01.10.2026 — the daily 10:00 price update orphans the pit cache**
 (snapshot fingerprint = newest bar + row counts, changes with every update), so
-stage B runs cold again after every weekday morning. Re-warmed in the night of
-02.10.; open decision (3 options, recommendation: warm free daily in the morning
-job, world weekly) in PLAN.md → „Befund 01.10.2026“.
+stage B runs cold again after every weekday morning. **Decided and done 02.10.2026:**
+the morning job re-warms the free cache after a good price update and prunes builds
+older than 7 days (`pit_cache.prune`). The world cache stays cold during the week:
+the daily update also refreshes the world store's US half, so a weekly world warm
+would only last until the next morning. Check `data/briefings/run.log` for the line
+„pit cache warmed …“ after the next weekday run. Details in PLAN.md → „Befund 01.10.2026“.
 
 **Waiting on the user:**
 1. His USYD WRDS account (credentials already in `.env.local` as `WRDS_CRSP_*`,

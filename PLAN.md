@@ -877,6 +877,29 @@ World wöchentlich zusammen mit `build_wrds.py`; (2) World unter der Woche kalt 
 fast nie, Ausnahme: verspätete Nachmeldung alter Perioden; schwächt eine bewusst
 konservative Schutzregel, bräuchte Test und Doku). Empfehlung der Sitzung: 1 + 2.
 
+**Entschieden 02.10.2026 (Nutzer): 1 + 2, umgesetzt (lokale Sitzung).**
+* `morning_briefing.py` wärmt nach einem erfolgreichen Kurs-Update den Free-Cache neu
+  (`warm_pit_cache.py --source=free --prune`, ~8 min). Nach dem Mailversand, damit das
+  Briefing nicht wartet; im `finally`, also auch wenn das Briefing scheitert oder nichts
+  verfolgt wird; im Vordergrund, weil launchd beim Jobende die ganze Prozessgruppe
+  beendet. Scheitert das Kurs-Update, wird nicht gewärmt — der Fingerabdruck ist dann
+  unverändert, die alten Rahmen gelten weiter.
+* **World wöchentlich wärmen lohnt nicht:** `build_prices.py` frischt täglich auch die
+  US-Hälfte des Welt-Bestands auf (`refresh_world_store`), also ändert sich auch dessen
+  Fingerabdruck jeden Werktag. Ein wöchentlicher Lauf (2:40 h) hielte nur bis zum
+  nächsten Morgen. World bleibt unter der Woche kalt (Option 2); wer dort viele
+  Stufe-B-Läufe plant, wärmt vorher von Hand.
+* **Aufräumen:** jeder verwaiste Free-Build wiegt ~39 MB, täglich gewärmt wären das
+  ~10 GB/Jahr. `pit_cache.prune()` löscht Builds, deren neueste Datei älter als 7 Tage
+  ist (nach Alter, nicht „alles außer dem aktuellen“, weil das Verzeichnis nicht weiß,
+  zu welcher Quelle ein Build gehört — ein zwei Tage alter World-Build kann noch gültig
+  sein), dazu alte `CACHE_VERSION`-Ordner. Löschen ändert nie ein Ergebnis.
+* Tests: `test_pit_cache.py` (Pruning: aktuell und jung bleibt, alt und alte Version
+  geht; leerer Cache harmlos), `test_morning_briefing.py` (Befehl, kein Wärmen nach
+  gescheitertem Update, Wärmen auch bei gescheitertem Briefing). Alle fünf scheitern
+  ohne die Änderung. **Ungetestet:** der echte launchd-Lauf — erster Beleg ist
+  `data/briefings/run.log` am nächsten Werktag (Zeile „pit cache warmed …“).
+
 **Nebenbei:** MONITOR hat einen Umschalter Dollar ↔ Gold. Indizes und Aktien in Unzen,
 Währungen in Milligramm Gold je Einheit, fremde Indizes erst zum Tageskurs in Dollar;
 Renditen, Dollar-Index und Kreuzkurse bleiben (keine Währung). Die dafür nötigen

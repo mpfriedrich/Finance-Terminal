@@ -6,6 +6,7 @@ step leaves evidence rather than silence:
 1. Refresh prices, so the briefing is about today and not last week.
 2. Gather the evidence and write the briefing.
 3. Save it to disk ALWAYS, then try to send it.
+4. Re-warm the free store's point-in-time cache, after the mail so it never delays it.
 
 Saving before sending is deliberate. Mail delivery is the part most likely to break — a
 changed password, an expired token, no network at 07:00 — and a briefing that exists on
@@ -57,6 +58,39 @@ def refresh_prices() -> str:
         return "ok" if res.returncode == 0 else f"failed: {res.stderr.strip()[:200]}"
     except Exception as exc:
         return f"failed: {exc}"
+
+
+def warm_command(price_note: str) -> list[str] | None:
+    """The pit-cache re-warm after a successful price update; None when prices failed.
+
+    The daily update changes the store's snapshot fingerprint, which orphans every
+    cached screening frame (measured 01.10.2026): without this, stage B runs cold
+    after every weekday morning. Re-warming the free store costs ~8 minutes, so it
+    happens here daily; the world store takes hours and is warmed weekly instead,
+    together with the WRDS refresh (PLAN.md → „Befund 01.10.2026“).
+    """
+    if price_note != "ok":
+        return None
+    return [sys.executable,
+            str(Path(__file__).resolve().parent / "warm_pit_cache.py"),
+            "--source=free", "--prune"]
+
+
+def warm_cache(price_note: str) -> None:
+    """Run the re-warm and wait for it. Failure is printed, never fatal: a cold cache
+    costs time, not correctness. It runs in the foreground on purpose — launchd ends a
+    job's whole process group when the job exits, so a detached child would be killed."""
+    command = warm_command(price_note)
+    if command is None:
+        print("pit cache not warmed: prices were not updated")
+        return
+    try:
+        res = subprocess.run(command, capture_output=True, text=True, timeout=3600,
+                             check=False)
+        last = (res.stdout.strip().splitlines() or [""])[-2:]
+        print(f"pit cache warmed (exit {res.returncode}): {' / '.join(last)}")
+    except Exception as exc:                                        # noqa: BLE001
+        print(f"pit cache not warmed: {exc}")
 
 
 def render_html(text: str, evidence: str, as_of: dt.date, price_note: str) -> str:
@@ -152,8 +186,16 @@ def send(subject: str, html_body: str, text_body: str) -> str:
 
 def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    today = dt.date.today()
     price_note = refresh_prices()
+    try:
+        return deliver(dt.date.today(), price_note)
+    finally:
+        # Also when nothing is followed or the briefing failed: the cache serves the
+        # STRATEGY tab, which has nothing to do with whether a briefing went out.
+        warm_cache(price_note)
+
+
+def deliver(today: dt.date, price_note: str) -> int:
     # Alerts on the fresh closes, before the briefing: they notify on their own.
     try:
         subprocess.run([sys.executable, str(Path(__file__).resolve().parent /

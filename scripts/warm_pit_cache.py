@@ -8,7 +8,10 @@ Frames are cached per data source (the fingerprint is part of the cache key), so
 script warms the source the app would run on: PORTFOLIO_LAB_SOURCE from .env.local,
 or the one named with --source=. The free store is the default, as before.
 
-Run: uv run python scripts/warm_pit_cache.py [start-year] [--source=free|paid|world]
+With --prune, cached builds whose newest frame is older than seven days are deleted
+afterwards (the morning job passes it: every daily update orphans the previous build).
+
+Run: uv run python scripts/warm_pit_cache.py [start-year] [--source=free|paid|world] [--prune]
 """
 import datetime as dt
 import sys
@@ -16,7 +19,7 @@ import sys
 from portfolio_lab import stage_b
 from portfolio_lab.config import CACHE_DIR, Settings
 from portfolio_lab.data.sources import open_selected
-from portfolio_lab.pit_cache import FrameCache
+from portfolio_lab.pit_cache import FrameCache, prune
 
 args = sys.argv[1:]
 start_year = next((int(a) for a in args if a.isdigit()), 2011)
@@ -35,3 +38,5 @@ print(f"cache: {cache.root}", flush=True)
 stats = cache.warm(dates, progress=lambda i, n, d: print(
     f"  {i:>3}/{n}  {d}", flush=True) if i % 5 == 0 or i == n else None)
 print(f"\n{stats}", flush=True)
+if "--prune" in args:
+    print(f"pruned {prune(CACHE_DIR / 'pit', cache.root)} orphaned build(s)", flush=True)
