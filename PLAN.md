@@ -1221,6 +1221,44 @@ OECD-Euro-Reihen auf FRED enden 2023; Eurostat führt die Eurozone seit 2026 als
 (mit Bulgarien), `EA20` gibt es dort nicht mehr. Stand August 2026: 6,4 %. Wächst die
 Eurozone wieder, bleibt der Code stehen — die Spalte `period` im MACRO-Tab zeigt das.
 
+### Ladung und Eigentümer (02.10.2026, lokale Sitzung)
+
+**Frage des Nutzers:** Ladung und Eigentümer der Schiffe und Flugzeuge anzeigen.
+**Was es kostenlos gibt — und was nicht:** AIS und ADS-B senden Position, Kennung und
+Typ, nie die Ladung. Die Ware je Schiff (Rohöl, Erz, Getreide) gibt es nur bei Kpler/
+Vortexa (kostenpflichtig), Frachtpapiere von Flugzeugen nirgends. Schiffseigentümer:
+Equasis ist kostenlos, verbietet aber automatisches Abfragen. Flugzeugeigentümer stehen
+in der OpenSky-Datenbank, bei Privatflugzeugen sind das aber **Personen** — bewusst nicht
+eingebaut (das wäre Personen-Tracking). Gebaut wurde, was als Menge messbar ist:
+
+- **Hafen-Umschlag** (`shipping.PORTS`, `port_board`, Tabelle `port_trade`): PortWatch
+  „Daily_Ports_Data“ schätzt je Hafen und Tag die geladenen (out) und gelöschten (in)
+  Tonnen nach Schiffstyp, aus Schiffsgröße und Tiefgang-Änderung. 26 feste Häfen, die
+  Märkte beobachten (Öl: Ras Tanura, Yanbu, Fujairah, Primorsk, Ust-Luga, Novorossiysk,
+  Houston, Corpus Christi; Erz/Kohle/Agrar: Port Hedland, Newcastle, Richards Bay,
+  Itaqui, Santos; Drehkreuze: Singapur, Shanghai, Ningbo, Qingdao, Busan, Kaohsiung,
+  Nhava Sheva, Tangier-Med, Rotterdam, Antwerpen, Hamburg, Jebel Ali, LA-Long Beach).
+  Kharg Island (Iran) bewusst nicht: 91 Schiffe insgesamt, die Flotte fährt dunkel.
+  „mostly“ = größter Fluss der letzten 30 Tage (z. B. „dry bulk out“). Kartenansicht
+  „port cargo“: Kreisfläche = Tonnen/Tag, Farbe = Veränderung zum Vorjahr.
+  Gemessen: erster Abruf 73.450 Zeilen in **~9 min** (PortWatch filtert langsam),
+  tägliches Update 806 Zeilen in **1,3 s**. Plausibel: Port Hedland 518 Mt im Jahr bis
+  09/2026 (passt zu den gemeldeten Erzexporten), 1,5 Mt/Tag verladen.
+- **Gegen die Wirklichkeit geprüft — und eine Lücke gefunden:** Yanbu (Saudi-Arabien,
+  Rotes Meer) stieg nach der Hormus-Sperre von 3,4 Mt (01/2026) auf 19,9 Mt (06/2026)
+  Export im Monat — die Umleitung über die Ost-West-Pipeline, wie berichtet. Ab August
+  2026 fast null (9, dann 4 Anläufe). Lloyd's List meldet aber nur ~−⅓ Tankerverkehr
+  seit der Huthi-Blockade (20.07.2026); saudische Tanker fahren dort seitdem mit
+  abgeschaltetem Transponder. **PortWatch zeigt dunkle Schiffe als fehlende Ladung.**
+  Der Hinweis steht in der App unter der Tabelle.
+- **Frachtflüge** (`aviation.CARGO_AIRLINES`, Tabelle `air_cargo`): erkannt am
+  ICAO-Code im Rufzeichen (FDX = FedEx, UPS, GTI = Atlas, CLX = Cargolux, DHL-Töchter
+  BCS/DHK/BOX, …; 22 Gesellschaften). Live am 02.10.2026 05:19 UTC: 228 von 6.168 in
+  der Luft (3,7 %), FedEx 68, UPS 48. Schalter „Freighters only“ auf der Karte, Tabelle
+  nach Gesellschaft, Anteil je gespeichertem Schnappschuss. **Nicht erfasst:** Beiladung
+  in Passagierflugzeugen (~die Hälfte der Luftfracht); manche Frachtgesellschaften
+  fliegen auch Charter.
+
 ## Geplant: Hebel und Derivate (vorgemerkt am 25.09.2026, noch nicht begonnen)
 
 Auf Frage des Nutzers („gibt es die Option für Derivate und Leverage?“) nur in den Plan

@@ -3349,8 +3349,17 @@ with tab_commodities:
 
     st.markdown("#### Ships and aircraft")
     ship_board = shipping.dashboard(src.con)
-    map_view = st.radio("Map", ["all ships", "tankers", "aircraft now"], horizontal=True,
-                        key="ship_map", label_visibility="collapsed")
+    port_now = shipping.port_board(src.con)
+    map_view = st.radio("Map", ["all ships", "tankers", "port cargo", "aircraft now"],
+                        horizontal=True, key="ship_map", label_visibility="collapsed")
+    if map_view == "port cargo":
+        if port_now.empty:
+            st.info("No port cargo stored yet. Run once: "
+                    "`uv run python scripts/build_shipping.py` (the first run takes "
+                    "about ten minutes; PortWatch answers port queries slowly).")
+        else:
+            st.plotly_chart(charts.port_map(port_now), width="stretch",
+                            key="port_map_fig")
     if map_view == "aircraft now":
         live = _aircraft_now()
         if live is None:
@@ -3359,8 +3368,15 @@ with tab_commodities:
         else:
             air_at, air = live
             regions_now = aviation.by_region(air)
-            st.plotly_chart(charts.aircraft_map(aviation.grid(air), air_at),
-                            use_container_width=True, key="air_map_fig")
+            freighters = aviation.cargo_flights(air)
+            only_cargo = st.toggle(
+                f"Freighters only ({len(freighters):,} of {len(air):,}, "
+                f"{len(freighters) / max(len(air), 1):.1%})", key="air_cargo_only")
+            st.plotly_chart(
+                charts.aircraft_map(aviation.grid(freighters), air_at, what="freighters",
+                                    colour=ui.AMBER) if only_cargo
+                else charts.aircraft_map(aviation.grid(air), air_at),
+                width="stretch", key="air_map_fig")
             air_hist = aviation.history(src.con)
             table_air = pd.DataFrame({"region": regions_now.index,
                                       "airborne now": regions_now.map("{:,}".format)})
@@ -3373,13 +3389,30 @@ with tab_commodities:
                                 ticker_col="region"), unsafe_allow_html=True)
             if len(air_hist) > 1:
                 st.line_chart(air_hist, height=240)
+            if not freighters.empty:
+                by_airline = freighters.airline.value_counts()
+                st.markdown(ui.grid(pd.DataFrame({
+                    "cargo airline": by_airline.index,
+                    "in the air now": by_airline.map("{:,}".format)}),
+                    numeric={"in the air now"}, ticker_col="cargo airline"),
+                    unsafe_allow_html=True)
+            cargo_hist = aviation.cargo_history(src.con)
+            if len(cargo_hist) > 1:
+                st.line_chart(cargo_hist[["share"]] * 100, height=200)
+                st.caption("Freighters as % of all aircraft in the air, per stored "
+                           "snapshot.")
             st.caption(
                 f"{len(air):,} aircraft airborne at {air_at:%d.%m.%Y %H:%M} UTC, each "
                 "circle the count in a 3° cell. Data: "
                 f"{aviation.ATTRIBUTION}. Coverage follows volunteer receivers: dense "
                 "over Europe and North America, thin over oceans, Africa, Russia and "
                 "China — a low count there can mean no receiver, not no aircraft. "
-                "Military and some private aircraft do not broadcast. The daily price "
+                "Military and some private aircraft do not broadcast. Freighters are "
+                "recognised by the cargo airline in their callsign (FedEx, UPS, DHL, "
+                "Cargolux, …); what they carry is never public, and passenger airlines' "
+                "belly cargo — about half of all air freight — is not counted. "
+                "Owners are not shown: for private aircraft they are people. The daily "
+                "price "
                 "build stores one count per region, at about the same time each weekday; "
                 "counts from different times of day do not compare.")
     if ship_board.empty:
@@ -3387,11 +3420,11 @@ with tab_commodities:
                 "`uv run python scripts/build_shipping.py` — IMF PortWatch needs no key, "
                 "and build_prices.py keeps it current.")
     else:
-        if map_view != "aircraft now":
+        if map_view in ("all ships", "tankers"):
             st.plotly_chart(
                 charts.chokepoint_map(shipping.on_map(ship_board),
                                       tankers=map_view == "tankers"),
-                use_container_width=True, key="ship_map_fig")
+                width="stretch", key="ship_map_fig")
         st.markdown("**Ships through the chokepoints**")
         key_only = st.toggle("Main chokepoints only", value=True, key="ship_key")
         shown = ship_board[ship_board.chokepoint.isin(shipping.KEY)] if key_only \
@@ -3434,6 +3467,52 @@ with tab_commodities:
             "their transponder are not counted — tankers carrying sanctioned oil often "
             "do, so tanker counts through Hormuz and the Black Sea read low. Recent days "
             "are revised by PortWatch.")
+
+    if not port_now.empty:
+        st.markdown("**Cargo through the ports**")
+        st.markdown(ui.grid(pd.DataFrame({
+            "port": port_now.port,
+            "known for": port_now.known_for,
+            "mostly (30d)": port_now.mostly.fillna("—"),
+            "out kt/day": port_now.export_t.map(lambda v: ui.num(v / 1e3, 0)),
+            "out vs year ago": port_now.export_vs_year_ago.map(lambda v: ui.pct(v, 0)),
+            "in kt/day": port_now.import_t.map(lambda v: ui.num(v / 1e3, 0)),
+            "in vs year ago": port_now.import_vs_year_ago.map(lambda v: ui.pct(v, 0)),
+        }), numeric={"out kt/day", "in kt/day"},
+            signed={"out vs year ago", "in vs year ago"}, ticker_col="port"),
+            unsafe_allow_html=True)
+        p1, p2, p3 = st.columns([3, 1, 1])
+        port_names = dict(zip(port_now.id, port_now.port))
+        port_pick = p1.multiselect(
+            "Ports", options=list(port_names), format_func=port_names.get,
+            default=[p for p in ("port955", "port1091", "port570") if p in port_names],
+            key="port_pick", label_visibility="collapsed")
+        port_field = p2.selectbox(
+            "Flow", ["export", "import", "export_tanker", "import_tanker",
+                     "export_dry_bulk", "import_dry_bulk", "export_container",
+                     "import_container"],
+            format_func=lambda f: f.replace("_", " ").replace("export", "out")
+            .replace("import", "in"),
+            key="port_field", label_visibility="collapsed")
+        port_since = p3.selectbox("Since", ["1Y", "3Y", "7Y"], key="port_since",
+                                  label_visibility="collapsed")
+        if port_pick:
+            port_lines = shipping.port_history(
+                src.con, port_pick, port_field,
+                dt.date.today() - dt.timedelta(days=365 * int(port_since[:-1])))
+            if not port_lines.empty:
+                st.line_chart(port_lines / 1e3, height=280, y_label="kt a day",
+                              color=[ui.AMBER, ui.CYAN, ui.UP, ui.DOWN,
+                                     ui.MUTED][:len(port_lines.columns)])
+        st.caption(
+            "IMF PortWatch estimates of the tonnes ships loaded (out) and unloaded (in) "
+            "each day, from each ship's size and the change in its draught; a "
+            "seven-day average in thousand tonnes, against the same week a year "
+            "earlier. Quantities and ship types, not commodities: tanker tonnes may be "
+            "crude or products, bulk tonnes ore or grain. Ships sailing dark are "
+            "missing — Saudi tankers at Yanbu have mostly switched off their "
+            "transponders since the Houthi blockade of July 2026, so Yanbu reads near "
+            "zero while Lloyd's List reports traffic down about a third.")
 
     if rows:
         st.markdown("#### Which of your holdings move with them")

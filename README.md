@@ -83,7 +83,7 @@ uv run python scripts/build_prices.py --since=2010-01-01
 uv run python scripts/add_benchmark.py        # S&P 500 TR, the price index, SPY
 uv run python scripts/build_ticker_history.py # and how little of it can be recovered
 uv run python scripts/build_fred.py           # macro, rail and airline series (no key)
-uv run python scripts/build_shipping.py       # ships through the chokepoints (no key)
+uv run python scripts/build_shipping.py       # ships and port cargo (no key; ~10 min first)
 uv run python scripts/build_air.py            # one count of aircraft in the air (no key)
 ```
 

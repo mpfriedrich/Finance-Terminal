@@ -178,3 +178,93 @@ def test_the_map_caps_the_colour_and_greys_a_missing_comparison():
     tank = charts.chokepoint_map(placed, tankers=True).data[0]
     assert "15 tankers/day" in tank.hovertext[1]
     assert "no year-earlier value" in tank.hovertext[2]
+
+
+# -- port cargo ---------------------------------------------------------------------------
+
+def _port_row(day, port="port955", export=1_500_000.0, imp=7_000.0,
+              export_dry_bulk=None, export_tanker=0.0, import_container=0.0):
+    return {"attributes": {
+        "date": day.isoformat(), "portid": port, "portname": "Port Hedland",
+        "portcalls": 9, "import": imp, "export": export,
+        "import_tanker": 0.0, "import_container": import_container,
+        "import_dry_bulk": imp - import_container,
+        "export_tanker": export_tanker, "export_container": 0.0,
+        "export_dry_bulk": export if export_dry_bulk is None else export_dry_bulk,
+        "ObjectId": 1}}
+
+
+def test_port_rows_keep_the_flows_by_ship_type():
+    frame = shipping.parse_ports({"features": [_port_row(dt.date(2026, 9, 25))]})
+    assert list(frame.columns) == shipping.PORT_COLUMNS
+    assert frame.port.iloc[0] == "port955"
+    assert frame.export_dry_bulk.iloc[0] == 1_500_000.0
+
+
+def test_port_download_asks_only_for_the_watched_ports():
+    asked = []
+
+    def getter(url):
+        asked.append(urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["where"][0])
+        return {"features": [_port_row(dt.date(2026, 9, 25))]}
+
+    shipping.download_ports(dt.date(2026, 9, 1), getter=getter)
+    assert asked[0].startswith("portid IN ('port1091', ")
+    assert "'port955'" in asked[0] and "'port2164'" not in asked[0]      # not Kharg
+    assert asked[0].endswith("AND date >= DATE '2026-09-01'")
+
+
+def test_the_port_board_reads_tonnes_against_a_year_earlier_and_the_main_cargo():
+    con = _store()
+    end = dt.date(2026, 9, 25)
+    rows = []
+    for back in range(380):
+        recent = back < 7
+        rows.append(_port_row(end - dt.timedelta(days=back),
+                              export=1_200_000.0 if recent else 1_000_000.0,
+                              imp=5_000.0 if recent else 10_000.0))
+    shipping.store_ports(con, shipping.parse_ports({"features": rows}))
+    row = shipping.port_board(con).set_index("id").loc["port955"]
+    assert row.port == "Port Hedland" and row.as_of == end
+    assert row.export_t == pytest.approx(1_200_000.0)
+    assert row.export_vs_year_ago == pytest.approx(0.20)
+    assert row.import_vs_year_ago == pytest.approx(-0.50)
+    assert row.total_vs_year_ago == pytest.approx(1_205_000 / 1_010_000 - 1)
+    assert row.mostly == "dry bulk out"
+
+
+def test_main_cargo_names_the_largest_flow():
+    con = _store()
+    day = dt.date(2026, 9, 25)
+    rows = [_port_row(day, port="port1188", export=300_000.0, imp=900_000.0,
+                      export_dry_bulk=0.0, import_container=800_000.0),
+            _port_row(day, port="port1091", export=2_000_000.0, imp=0.0,
+                      export_dry_bulk=0.0, export_tanker=2_000_000.0)]
+    shipping.store_ports(con, shipping.parse_ports({"features": rows}))
+    assert shipping.main_cargo(con) == {"port1188": "container in",
+                                        "port1091": "tanker out"}
+
+
+def test_a_port_revision_replaces_the_day():
+    con = _store()
+    day = dt.date(2026, 9, 25)
+    for export in (1.0, 2.0):
+        shipping.store_ports(con, shipping.parse_ports(
+            {"features": [_port_row(day, export=export)]}))
+    assert con.execute("SELECT COUNT(*), MAX(export) FROM port_trade").fetchone() == (1, 2.0)
+
+
+def test_every_watched_port_has_a_place_and_a_reason():
+    assert len(shipping.PORTS) == 26
+    for name, iso3, lat, lon, known in shipping.PORTS.values():
+        assert len(iso3) == 3 and known
+        assert -90 <= lat <= 90 and -180 <= lon <= 180
+
+
+def test_a_nearly_empty_port_is_not_given_a_main_cargo():
+    con = _store()
+    day = dt.date(2026, 9, 25)
+    rows = [_port_row(day - dt.timedelta(days=b), port="port570", export=0.0, imp=300.0)
+            for b in range(30)]
+    shipping.store_ports(con, shipping.parse_ports({"features": rows}))
+    assert shipping.main_cargo(con) == {"port570": "too little to tell"}
