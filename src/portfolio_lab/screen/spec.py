@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, replace
 from typing import Literal
 
 # Fields a filter may reference. Mirrors the metric vocabulary in PLAN.md.

@@ -2,7 +2,6 @@
 import datetime as dt
 
 import duckdb
-import numpy as np
 import pandas as pd
 import pytest
 

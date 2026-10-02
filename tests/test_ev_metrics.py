@@ -5,7 +5,6 @@ One company: price 10, 100 shares (cap 1,000); debt 300 long + 100 short, cash 2
 gross profit 400; net income 90; interest 30; pre-tax 120, tax 30 (25%); equity 600;
 assets 2,000.
 """
-import datetime as dt
 
 import numpy as np
 import pandas as pd

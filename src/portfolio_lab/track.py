@@ -96,7 +96,6 @@ def performance(
     )
 
     last = wide.iloc[-1]
-    stale = wide.notna().iloc[-1] & (wide.index[-1] == wide.index[-1])
     detail = holdings.copy()
     detail["last_price"] = detail.ticker.map(last.to_dict())
     detail["return"] = detail.ticker.map((last / first - 1.0).to_dict())

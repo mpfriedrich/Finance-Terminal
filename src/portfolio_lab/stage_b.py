@@ -32,7 +32,6 @@ import calendar
 import datetime as dt
 from dataclasses import dataclass, field
 
-import duckdb
 import numpy as np
 import pandas as pd
 

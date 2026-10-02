@@ -1,7 +1,6 @@
 """R20: the result beside its variations, so a fragile one is visible before the money is."""
 import datetime as dt
 
-import pandas as pd
 import pytest
 
 from portfolio_lab import sensitivity

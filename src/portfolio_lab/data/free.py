@@ -9,7 +9,6 @@ survivors in practice (PLAN.md A21, Phase 7 measured 0/20).
 from __future__ import annotations
 
 import datetime as dt
-import json
 
 import duckdb
 import pandas as pd
