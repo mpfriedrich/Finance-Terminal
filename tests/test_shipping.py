@@ -236,10 +236,10 @@ def test_the_port_board_reads_tonnes_against_a_year_earlier_and_the_main_cargo()
 def test_main_cargo_names_the_largest_flow():
     con = _store()
     day = dt.date(2026, 9, 25)
-    rows = [_port_row(day, port="port1188", export=300.0, imp=900.0,
-                      export_dry_bulk=0.0, import_container=800.0),
-            _port_row(day, port="port1091", export=2_000.0, imp=0.0,
-                      export_dry_bulk=0.0, export_tanker=2_000.0)]
+    rows = [_port_row(day, port="port1188", export=300_000.0, imp=900_000.0,
+                      export_dry_bulk=0.0, import_container=800_000.0),
+            _port_row(day, port="port1091", export=2_000_000.0, imp=0.0,
+                      export_dry_bulk=0.0, export_tanker=2_000_000.0)]
     shipping.store_ports(con, shipping.parse_ports({"features": rows}))
     assert shipping.main_cargo(con) == {"port1188": "container in",
                                         "port1091": "tanker out"}
@@ -259,3 +259,12 @@ def test_every_watched_port_has_a_place_and_a_reason():
     for name, iso3, lat, lon, known in shipping.PORTS.values():
         assert len(iso3) == 3 and known
         assert -90 <= lat <= 90 and -180 <= lon <= 180
+
+
+def test_a_nearly_empty_port_is_not_given_a_main_cargo():
+    con = _store()
+    day = dt.date(2026, 9, 25)
+    rows = [_port_row(day - dt.timedelta(days=b), port="port570", export=0.0, imp=300.0)
+            for b in range(30)]
+    shipping.store_ports(con, shipping.parse_ports({"features": rows}))
+    assert shipping.main_cargo(con) == {"port570": "too little to tell"}

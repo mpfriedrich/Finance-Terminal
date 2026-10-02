@@ -3358,7 +3358,7 @@ with tab_commodities:
                     "`uv run python scripts/build_shipping.py` (the first run takes "
                     "about ten minutes; PortWatch answers port queries slowly).")
         else:
-            st.plotly_chart(charts.port_map(port_now), use_container_width=True,
+            st.plotly_chart(charts.port_map(port_now), width="stretch",
                             key="port_map_fig")
     if map_view == "aircraft now":
         live = _aircraft_now()
@@ -3376,7 +3376,7 @@ with tab_commodities:
                 charts.aircraft_map(aviation.grid(freighters), air_at, what="freighters",
                                     colour=ui.AMBER) if only_cargo
                 else charts.aircraft_map(aviation.grid(air), air_at),
-                use_container_width=True, key="air_map_fig")
+                width="stretch", key="air_map_fig")
             air_hist = aviation.history(src.con)
             table_air = pd.DataFrame({"region": regions_now.index,
                                       "airborne now": regions_now.map("{:,}".format)})
@@ -3424,7 +3424,7 @@ with tab_commodities:
             st.plotly_chart(
                 charts.chokepoint_map(shipping.on_map(ship_board),
                                       tankers=map_view == "tankers"),
-                use_container_width=True, key="ship_map_fig")
+                width="stretch", key="ship_map_fig")
         st.markdown("**Ships through the chokepoints**")
         key_only = st.toggle("Main chokepoints only", value=True, key="ship_key")
         shown = ship_board[ship_board.chokepoint.isin(shipping.KEY)] if key_only \

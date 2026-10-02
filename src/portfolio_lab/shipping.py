@@ -239,6 +239,8 @@ PORT_FIELDS = (["portid", "date", "portcalls", "import", "export"]
                + [f"{f}_{t}" for f in FLOWS for t in TYPES])
 PORT_COLUMNS = ["port"] + PORT_FIELDS[1:]
 TYPE_LABEL = {"tanker": "tanker", "container": "container", "dry_bulk": "dry bulk"}
+# Below this many tonnes a day over the window, "mostly" means nothing.
+MIN_CARGO_T = 5_000
 
 
 def parse_ports(payload: dict) -> pd.DataFrame:
@@ -321,7 +323,10 @@ def main_cargo(con: duckdb.DuckDBPyConnection, days: int = 30) -> dict[str, str]
         "GROUP BY port").fetch_df().set_index("port")
     out = {}
     for port, row in sums.iterrows():
-        if row.fillna(0).sum() <= 0:
+        if row.fillna(0).sum() < MIN_CARGO_T * days:
+            # Yanbu since August 2026: a few hundred tonnes a day, the largest of which
+            # was "dry bulk in" — a label for noise. Say there is too little to tell.
+            out[port] = "too little to tell"
             continue
         flow, kind = row.idxmax().split("_", 1)
         out[port] = f"{TYPE_LABEL[kind]} {'in' if flow == 'import' else 'out'}"
