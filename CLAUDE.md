@@ -45,7 +45,7 @@ Don't let two sessions edit the same branch at once. Before starting: `git pull`
 
 ```bash
 uv sync                                   # dependencies (incl. openpyxl, psycopg2-binary)
-uv run pytest -q                          # ~616 pass, 15 skip without local data (~75 s)
+uv run pytest -q                          # ~670 pass, ~15 skip without local data (~110 s)
 uv run streamlit run app.py               # the app, http://localhost:8501
 uv run python scripts/build_prices.py     # daily: prices, FX, world series, FRED, windows,
                                           #   and the US half of the world store
@@ -63,7 +63,7 @@ World store (WRDS): `build_wrds.py`. See section 7.
 ## 5. Map of the code
 
 ```
-app.py                      Streamlit UI, ~3.7k lines. Tabs: SCREEN MONITOR RESEARCH OPTIONS
+app.py                      Streamlit UI, ~3.9k lines. Tabs: SCREEN MONITOR RESEARCH OPTIONS
                             STRATEGY LAB BOOKS DEALS MACRO COMMODITIES CALENDAR NEWS
 src/portfolio_lab/
   config.py                 paths (MARKET_DB, PAID_DB, WORLD_DB, USER_DB), Settings, secret()
@@ -193,6 +193,16 @@ ticker; ended lines use their last CRSP ticker, with `-permno` appended on a col
 - `st.line_chart(color=[...])` needs exactly one colour per column. Slice the list.
 - `copy_us` once deleted Compustat's FX rows (every non-US company then had "no exchange
   rate"). It must only replace series that the free store itself supplies.
+- **A DuckDB connection is not thread-safe, and Streamlit runs every script run in its
+  own thread.** The app opens each store once (`st.cache_resource`); all access goes
+  through `sources.per_thread()`, which hands each thread a copy with its own
+  `con.cursor()`. A shared connection crossed results under a fast reload or a second
+  window (`fetchone()` None, frames without their columns). Never cache a connection
+  and use it directly.
+- **Two Claude sessions in one folder collide.** One switched the shared checkout to its
+  own branch while the other was working. A second session works in its own worktree:
+  `git worktree add -b <branch> ../portfolio-lab-<name> origin/main`, then symlink
+  `data` and `.env.local` into it (add `/data` to `.git/info/exclude`).
 - In `app.py`, `listing` is a local variable name. Import `data.listing` names directly
   (`MARKET_NAMES`).
 - Every screening frame has `country`: the ISO-3 code of the market where the line
@@ -242,14 +252,18 @@ ticker; ended lines use their last CRSP ticker, with `-permno` appended on a col
 - Don't `pkill -f` a pattern that also matches your own shell command. It kills the shell.
   Kill by PID.
 
-## 10. Status and open items (as of 26.09.2026)
+## 10. Status and open items (as of 02.10.2026)
 
-**Done and merged** (PRs #1–#4): phases 1–10, the Stage B reviews, world stages 1–2,
-analyst tools 1–12.
+**Done and merged** (PRs #1–#6, last 02.10.2026): phases 1–10, the Stage B reviews,
+world stages 1–3 (Compustat Global, the CRSP US half, CIZ, the second WRDS account),
+the gold toggle, memory-safe ingest, analyst tools 1–12, the pit-cache re-warm, the
+20-day risk range (volforecast.py), ship/aircraft data (PortWatch, OpenSky) and euro
+unemployment from Eurostat. Forecast models tested and rejected: PLAN.md → „Geprüft und
+verworfen“.
 
-**On branch `claude/jolly-archimedes-y8v5cz`, not merged yet:** world stage 3
-(Compustat Global), the CRSP US half, CIZ support, the second WRDS account, the gold
-toggle in MONITOR, memory-safe ingest, and several fixes. Tests pass.
+**On branch `claude/audit-review`, not merged yet:** the whole-terminal audit of
+02.10.2026 (PLAN.md → „Audit 02.10.2026“): thread-safe DB access, last-year volatility,
+R8 for an unknown market cap, Streamlit `width=` migration, `price_stats` cached.
 
 **World store: fully built 26.09.2026** (local session). All 21 default countries
 since 2010: 22,139 Compustat companies, 58.9M price rows (0 without an FX rate),
@@ -275,7 +289,7 @@ would only last until the next morning. Check `data/briefings/run.log` for the l
    PAM authentication, no Duo push). Once CRSP shows **blue** on his WRDS page:
    `uv run python scripts/build_wrds.py --countries=none`. Check the `CRSP: {...}`
    line: ended listings should number in the thousands. Then re-warm the pit cache.
-2. Merging the branch once he's satisfied.
+2. Merging `claude/audit-review` once he's satisfied.
 
 **Known gaps:**
 - CRSP and the Sharadar paid source are untested against the real services.

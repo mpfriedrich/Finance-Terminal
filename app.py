@@ -148,6 +148,15 @@ def _frame(asof: dt.date) -> pd.DataFrame:
     return _market_source().screening_frame(asof)
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _price_stats(ticker: str, asof: dt.date) -> dict:
+    """research.price_stats once per ticker and data date. RESEARCH, the WACC beta and
+    OPTIONS each asked for it on every rerun, each time reading the full price history
+    and the benchmark again (audit 02.10.2026). `asof` is part of the key, so a price
+    update is never served from yesterday's entry."""
+    return rs.price_stats(_market_source().con, ticker)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _vol_model(asof: dt.date) -> "vfc.Model | None":
     """The pooled Log-HAR fit (volforecast.py) on data up to `asof`: ~1 s, once a day."""
@@ -1230,7 +1239,7 @@ with tab_research:
                 ph["date"] = pd.to_datetime(ph["date"])
                 st.line_chart(ph.set_index("date")[["close_adj"]].rename(
                     columns={"close_adj": sym.symbol}), height=250, color=[ui.AMBER])
-            stats_np = rs.price_stats(src.con, sym.symbol)
+            stats_np = _price_stats(sym.symbol, asof)
             if stats_np:
                 cells = []
                 for label, key in (("1M", "return_1m"), ("3M", "return_3m"),
@@ -1504,7 +1513,7 @@ with tab_research:
                                 "outside them even when nothing is happening; that is what "
                                 "two standard deviations means, not a signal."
                             )
-                    stats_now = rs.price_stats(src.con, ticker)
+                    stats_now = _price_stats(ticker, asof)
                     if stats_now:
                         cells = []
                         for label, key in (("1M", "return_1m"), ("3M", "return_3m"),
@@ -1821,7 +1830,7 @@ with tab_research:
                         "AND close IS NOT NULL ORDER BY date DESC LIMIT 1").fetchone()
                     rf_default = (tnx[0] / 100.0) if tnx else mx.current_risk_free(
                         src.con, settings.risk_free_fallback)[0]
-                    beta_raw = (rs.price_stats(src.con, ticker) or {}).get("beta")
+                    beta_raw = (_price_stats(ticker, asof) or {}).get("beta")
                     w1, w2, w3, w4 = st.columns(4)
                     rf_in = w1.number_input(
                         "Risk-free %", 0.0, 15.0, round(rf_default * 100, 2), 0.05,
@@ -2031,7 +2040,7 @@ with tab_research:
                                     "tails than the bell curve it assumes."
                                 )
 
-                            stats_now = rs.price_stats(src.con, ticker)
+                            stats_now = _price_stats(ticker, asof)
                             # the last 60 sessions: the horizon of the nearest expiries
                             cmp_ = op.implied_vs_realised(atm, stats_now.get("volatility_60d"))
                             if cmp_:

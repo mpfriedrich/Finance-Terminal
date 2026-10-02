@@ -1221,6 +1221,52 @@ OECD-Euro-Reihen auf FRED enden 2023; Eurostat führt die Eurozone seit 2026 als
 (mit Bulgarien), `EA20` gibt es dort nicht mehr. Stand August 2026: 6,4 %. Wächst die
 Eurozone wieder, bleibt der Code stehen — die Spalte `period` im MACRO-Tab zeigt das.
 
+## Audit 02.10.2026 — das ganze Terminal (lokale Sitzung, Branch `claude/audit-review`)
+
+**Auftrag des Nutzers:** Logik, Kohärenz, Codefehler, Formatierung, Redundanzen. Gearbeitet
+in einem eigenen Worktree, weil eine zweite Sitzung (Schiffe/Flugzeuge) parallel im
+Hauptordner arbeitete; ihr Block in COMMODITIES und ihre Module wurden nur gelesen.
+
+**Gefundene Fehler (jeder mit Test, der ohne die Korrektur fehlschlägt):**
+1. **Eine DuckDB-Verbindung für alle Streamlit-Threads.** `st.cache_resource` hält die
+   Verbindung, Streamlit führt jeden Lauf in einem eigenen Thread aus; DuckDB-Verbindungen
+   sind nicht threadsicher. Folge bei schnellem Neuladen oder zwei Fenstern: gekreuzte
+   Ergebnisse — `fetchone()` lieferte None (beim Prüfen selbst gesehen: `snapshot()`,
+   `performance()`), ein Frame kam ohne seine Spalten an („'Pandas' object has no attribute
+   'metric'“ in `coverage.latest()`, vom Nutzer beobachtet). Gemessen: 4 Threads, 1.200
+   Abfragen, 10 Fehler; mit eigenem `cursor()` je Thread 0. Behoben mit
+   `sources.per_thread()` für Markt- und Portfolio-Speicher.
+2. **„VOL“ war ein 17-Jahres-Mittel.** `research.price_stats()` nahm die Standardabweichung
+   über die ganze gespeicherte Historie (meist ab 2009). RESEARCH zeigte das als „VOL“,
+   OPTIONS stellte die implizite Volatilität der nächsten Verfälle dagegen. Jetzt:
+   `volatility` = letzte 252 Sitzungen (Anzeige „VOL 1Y“, wie schon `world.stats`), neu
+   `volatility_60d`, und OPTIONS vergleicht mit den letzten 60 Sitzungen (Hinweis im Text).
+3. **R8 verletzt bei unbekannter Marktkapitalisierung.** `CostModel.spread_for(NaN)`:
+   NaN besteht keinen `<`-Vergleich, fiel also durch zur *billigsten* Stufe (0,05 % statt
+   1 %). Die meisten Aufrufer setzen vorher 0, aber `Store.start_tracking` reichte NaN
+   durch — verfolgte Screen-Positionen ohne Aktienzahl zahlten zu wenig. Jetzt zahlen
+   NaN und None in `spread_for` selbst die teuerste Stufe.
+
+**Aufgeräumt:** 36 × `use_container_width=True` → `width="stretch"` (Streamlit 1.64
+kündigt die Entfernung an; der Block der Schiffs-Sitzung stellt sie selbst um);
+`price_stats` je Ticker und Datenstand zwischengespeichert (RESEARCH, WACC-Beta, OPTIONS
+und Kurs-Symbole lasen pro Klick bis zu viermal die ganze Historie samt Benchmark);
+Importblock in `app.py` geordnet (stdlib oben, `screen.valuation` einmal); vorher schon
+auf dem alten Branch: toter Ausdruck in `track.py`, 23 unbenutzte Importe.
+
+**Geprüft, in Ordnung:** R7 (Marktkapitalisierung aus `close_raw`, beide Frame-Builder),
+R6 (seit `v9` keine Änderung am Frame-Aufbau), R9 (keine Geheimnisse in Fehlern, SMTP-
+und WRDS-Meldungen ohne Zugangsdaten), Stufe-B-Schleife (Eröffnungsfüllung, Kosten aus
+dem investierten Geld, Delistings vor dem Handel, keine Gratis-Ausstiege), breite
+`except`-Blöcke (alle melden sichtbar oder sind dokumentierte Rückfälle), Konventionen
+(252 Handelstage, 365,25 Tage/Jahr, 365 bei Optionen). Testsuite ohne eine einzige
+Warnung. Alle 12 Tabs headless (Streamlit `AppTest`, Wegwerf-Portfolio-Datenbank)
+ohne Ausnahme gerendert.
+
+**Nicht geprüft / offen:** die Module der Schiffs-Sitzung (nur gelesen); `pit.py`,
+`sec.py`, `wrds.py`, `crsp.py` nicht Zeile für Zeile (dicht getestet, mehrfach
+reviewt); Kosmetik ohne Funktion (Variablennamen `l`, `zip` ohne `strict`).
+
 ## Geplant: Hebel und Derivate (vorgemerkt am 25.09.2026, noch nicht begonnen)
 
 Auf Frage des Nutzers („gibt es die Option für Derivate und Leverage?“) nur in den Plan
