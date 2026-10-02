@@ -86,7 +86,12 @@ class CostModel:
         (float("inf"), 0.0005),
     )
 
-    def spread_for(self, market_cap: float) -> float:
+    def spread_for(self, market_cap: float | None) -> float:
+        # Unknown size pays the most expensive tier (R8). NaN fails every `<` below, so
+        # without this line a missing market cap fell through to the CHEAPEST tier —
+        # which is what Store.start_tracking passed on (audit 02.10.2026).
+        if market_cap is None or market_cap != market_cap:
+            return self.spread_tiers[0][1]
         for upper, cost in self.spread_tiers:
             if market_cap < upper:
                 return cost

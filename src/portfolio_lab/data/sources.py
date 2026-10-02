@@ -9,6 +9,8 @@ traceback.
 
 from __future__ import annotations
 
+import copy
+import threading
 from pathlib import Path
 
 import duckdb
@@ -20,6 +22,31 @@ from .schema import open_market
 from .wrds import WorldSource
 
 CHOICES = ("free", "paid", "world")
+
+_LOCAL = threading.local()
+
+
+def per_thread(holder):
+    """A shallow copy of `holder` whose `.con` is this thread's own DuckDB cursor.
+
+    The app opens each database once (`st.cache_resource`) and Streamlit runs every
+    script run in its own thread, so a fast reload or a second window ran two queries on
+    one connection at the same time. A DuckDB connection is not thread-safe: results got
+    crossed, `fetchone()` came back None and a frame arrived without its columns ("'Pandas'
+    object has no attribute 'metric'" in coverage.latest(), seen 02.10.2026). Measured:
+    four threads on one connection, 10 failures in 1,200 queries; one cursor each, none.
+    A cursor shares the database and its lock but has its own query state. Same thread,
+    same copy, so a run reuses its cursor instead of opening one per call.
+    """
+    clones = getattr(_LOCAL, "clones", None)
+    if clones is None:
+        clones = _LOCAL.clones = {}
+    hit = clones.get(id(holder))
+    if hit is None or hit[0] is not holder:      # the tuple keeps `holder` alive, so its
+        clone = copy.copy(holder)                # id cannot be reused by a new object
+        clone.con = holder.con.cursor()
+        hit = clones[id(holder)] = (holder, clone)
+    return hit[1]
 
 
 class SourceNotReady(RuntimeError):
