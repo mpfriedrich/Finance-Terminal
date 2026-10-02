@@ -118,7 +118,6 @@ def chokepoint_map(placed: pd.DataFrame, tankers: bool = False) -> go.Figure:
     # (and the straits around Taiwan) sit close together; fixed name labels overlapped
     # there on a laptop-width pane, so the names are in the hover and the table below.
     size = 5 + 1.7 * count.clip(lower=0) ** 0.5
-    colour = change.astype(float).clip(-MAP_COLOUR_CAP, MAP_COLOUR_CAP)
     what = "tankers" if tankers else "ships"
     hover = [
         f"<b>{n}</b><br>{c:,.0f} {what}/day (7-day avg)<br>"
@@ -126,9 +125,37 @@ def chokepoint_map(placed: pd.DataFrame, tankers: bool = False) -> go.Figure:
         + f"<br>as of {d:%d.%m.%Y}"
         for n, c, v, d in zip(placed.chokepoint, count, change, placed.as_of)
     ]
+    return _change_bubbles(placed.lat, placed.lon, size, change, hover)
+
+
+def port_map(board: pd.DataFrame) -> go.Figure:
+    """The watched ports (shipping.port_board): circle area for tonnes loaded plus
+    unloaded a day, colour for the change against a year earlier."""
+    kt = board.total_t.fillna(0.0).clip(lower=0) / 1e3
+    # Singapore at ~2,200 kt a day against a near-empty port: the square root again.
+    size = 5 + 0.7 * kt ** 0.5
+    hover = [
+        f"<b>{p}</b> ({c}) — {k}<br>mostly {m or '—'}<br>"
+        f"out {_kt(e)} · in {_kt(i)} a day (7-day avg)<br>"
+        + ("no year-earlier value" if pd.isna(v) else f"{v:+.0%} vs a year ago")
+        + f"<br>as of {d:%d.%m.%Y}"
+        for p, c, k, m, e, i, v, d in zip(board.port, board.country, board.known_for,
+                                          board.mostly, board.export_t, board.import_t,
+                                          board.total_vs_year_ago, board.as_of)
+    ]
+    return _change_bubbles(board.lat, board.lon, size, board.total_vs_year_ago, hover)
+
+
+def _kt(tonnes) -> str:
+    return "—" if tonnes is None or pd.isna(tonnes) else f"{tonnes / 1e3:,.0f} kt"
+
+
+def _change_bubbles(lat, lon, size, change, hover) -> go.Figure:
+    """Circles on the dark world, coloured by a change against a year earlier and capped
+    at ±MAP_COLOUR_CAP; a missing comparison is grey."""
+    colour = pd.Series(change, dtype=float).clip(-MAP_COLOUR_CAP, MAP_COLOUR_CAP)
     fig = go.Figure(go.Scattergeo(
-        lat=placed.lat, lon=placed.lon, mode="markers",
-        hovertext=hover, hoverinfo="text",
+        lat=lat, lon=lon, mode="markers", hovertext=hover, hoverinfo="text",
         marker=dict(
             size=size, sizemode="diameter", opacity=0.85,
             color=colour.fillna(0.0), cmin=-MAP_COLOUR_CAP, cmax=MAP_COLOUR_CAP,
@@ -159,15 +186,16 @@ def _world_geo(fig: go.Figure) -> None:
     )
 
 
-def aircraft_map(cells: pd.DataFrame, taken_at) -> go.Figure:
+def aircraft_map(cells: pd.DataFrame, taken_at, what: str = "aircraft",
+                 colour: str = ui.CYAN) -> go.Figure:
     """Airborne aircraft per grid cell (aviation.grid): circle area for the count."""
     count = cells["aircraft"].astype(float)
     fig = go.Figure(go.Scattergeo(
         lat=cells.lat, lon=cells.lon, mode="markers",
-        hovertext=[f"{int(n)} aircraft in this cell<br>{taken_at:%d.%m.%Y %H:%M} UTC"
+        hovertext=[f"{int(n)} {what} in this cell<br>{taken_at:%d.%m.%Y %H:%M} UTC"
                    for n in count],
         hoverinfo="text",
-        marker=dict(size=2 + 1.6 * count ** 0.5, sizemode="diameter", color=ui.CYAN,
+        marker=dict(size=2 + 1.6 * count ** 0.5, sizemode="diameter", color=colour,
                     opacity=0.6, line=dict(width=0)),
     ))
     _world_geo(fig)

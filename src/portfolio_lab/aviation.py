@@ -39,6 +39,19 @@ REGIONS: dict[str, tuple[float, float, float, float]] = {
     "Latin America": (-56, 14, -120, -30),
 }
 OTHER = "Oceans and elsewhere"
+# Cargo airlines by the ICAO designator that starts their callsign (FDX123 = FedEx). What
+# an aircraft carries is never public; whose freighter it is, is. Passenger airlines carry
+# about half of all air cargo in their holds, and those flights are not counted here, so
+# this measures dedicated freighters only. Some of these also fly charters or passengers.
+CARGO_AIRLINES: dict[str, str] = {
+    "FDX": "FedEx", "UPS": "UPS", "GTI": "Atlas Air", "CLX": "Cargolux",
+    "ICV": "Cargolux Italia", "BCS": "DHL (European Air Transport)", "DHK": "DHL Air UK",
+    "BOX": "AeroLogic (DHL)", "ABX": "ABX Air", "ATN": "Air Transport International",
+    "CKS": "Kalitta Air", "PAC": "Polar Air Cargo", "GEC": "Lufthansa Cargo",
+    "NCA": "Nippon Cargo Airlines", "CAO": "Air China Cargo", "CKK": "China Cargo Airlines",
+    "CSS": "SF Airlines", "AJT": "Amerijet", "WGN": "Western Global",
+    "MPH": "Martinair Cargo", "TAY": "ASL Airlines Belgium", "SQC": "Singapore Airlines Cargo",
+}
 
 
 def parse(payload: dict) -> tuple[dt.datetime, pd.DataFrame]:
@@ -94,12 +107,33 @@ def grid(aircraft: pd.DataFrame, step: float = 3.0) -> pd.DataFrame:
             .groupby(["lat", "lon"]).size().rename("aircraft").reset_index())
 
 
+def cargo_airline(callsign: str) -> str | None:
+    """The cargo airline flying under `callsign`, or None for anyone else. A missing
+    callsign arrives from pandas as NaN, a float, not as an empty string."""
+    if not isinstance(callsign, str):
+        return None
+    return CARGO_AIRLINES.get(callsign[:3].upper())
+
+
+def cargo_flights(aircraft: pd.DataFrame) -> pd.DataFrame:
+    """The airborne aircraft flying for a cargo airline, with the airline's name."""
+    if aircraft.empty:
+        return aircraft.assign(airline=pd.Series(dtype=str))
+    named = aircraft.assign(airline=aircraft.callsign.map(cargo_airline))
+    return named[named.airline.notna()].reset_index(drop=True)
+
+
 def store_snapshot(con: duckdb.DuckDBPyConnection, taken_at: dt.datetime,
                    aircraft: pd.DataFrame) -> int:
     counts = by_region(aircraft)
     con.execute("DELETE FROM air_traffic WHERE taken_at = ?", [taken_at])
     con.executemany("INSERT INTO air_traffic VALUES (?, ?, ?)",
                     [(taken_at, region, int(n)) for region, n in counts.items()])
+    cargo = cargo_flights(aircraft).airline.value_counts()
+    con.execute("DELETE FROM air_cargo WHERE taken_at = ?", [taken_at])
+    if len(cargo):
+        con.executemany("INSERT INTO air_cargo VALUES (?, ?, ?)",
+                        [(taken_at, airline, int(n)) for airline, n in cargo.items()])
     return int(counts.sum())
 
 
@@ -118,3 +152,19 @@ def history(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     wide = wide.reindex(columns=[c for c in [*REGIONS, OTHER] if c in wide.columns])
     wide["Total"] = wide.sum(axis=1)
     return wide.sort_index()
+
+
+def cargo_history(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    """Freighters in the air at each stored snapshot, with their share of all airborne
+    aircraft — the share moves less with the hour of the snapshot than the count does."""
+    frame = con.execute(
+        """SELECT t.taken_at, COALESCE(SUM(c.airborne), 0) AS freighters,
+                  ANY_VALUE(t.total) AS airborne
+           FROM (SELECT taken_at, SUM(airborne) AS total FROM air_traffic
+                 GROUP BY taken_at) t
+           LEFT JOIN air_cargo c USING (taken_at)
+           GROUP BY t.taken_at ORDER BY t.taken_at""").fetch_df()
+    if frame.empty:
+        return frame
+    frame["share"] = frame.freighters / frame.airborne
+    return frame.set_index("taken_at")

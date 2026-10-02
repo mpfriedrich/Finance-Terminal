@@ -91,6 +91,7 @@ if con.execute("SELECT COUNT(*) FROM macro_series").fetchone()[0]:
 if shipping.last_date(con):
     try:
         print(f"  PortWatch: {shipping.update(con)} chokepoint-days refreshed", flush=True)
+        print(f"  PortWatch: {shipping.update_ports(con)} port-days refreshed", flush=True)
     except Exception:                                                # noqa: BLE001
         print("  PortWatch: not refreshed", flush=True)
 # One count of the aircraft in the air per run (aviation.py). OpenSky keeps no free

@@ -92,7 +92,8 @@ src/portfolio_lab/
   risk.py alerts.py insiders.py fts.py fred.py export.py summary.py macro.py options.py
   volforecast.py            20-day risk range in RESEARCH: pooled Log-HAR on ~200 US
                             shares, width only, never direction (PLAN.md)
-  shipping.py               ship transits through 28 chokepoints (IMF PortWatch, no key)
+  shipping.py               ship transits through 28 chokepoints and cargo tonnes at 26
+                            ports (IMF PortWatch, no key)
   aviation.py               aircraft in the air now (OpenSky, no key) + daily snapshots
 tests/                      one file per module; fixtures: paid_fixture.py (Sharadar layout),
                             wrds_fixture.py (Compustat Global), crsp_fixture.py (CRSP + NA)
@@ -214,6 +215,13 @@ ticker; ended lines use their last CRSP ticker, with `-permno` appended on a col
   day); the only history is our own `air_traffic` snapshots, one per daily build. Counts
   swing several-fold with the time of day, and the Mac runs on Sydney time — compare
   snapshots taken at the same hour only. Unix time 1790910689 is 03:11 UTC, not 11:11.
+- **Cargo and owners (02.10.2026):** only quantities are free — PortWatch port tonnes
+  by ship type (`shipping.port_board`) and freighters by callsign (`aviation.
+  CARGO_AIRLINES`). Commodities per ship are paid (Kpler/Vortexa). **Aircraft owners
+  are deliberately not shown** (private owners are people). Dark ships read as missing
+  cargo: Yanbu fell to ~0 in PortWatch from August 2026 while Lloyd's List reports
+  about −⅓ (Saudi tankers sailing dark under the Houthi blockade). The first port
+  download takes ~9 min; the daily update ~1 s.
 - **TimesFM 3.0 and the Claude subagent „stock-price-movement-predictor“ were tested too
   (02.10.2026).** TimesFM tracks a random walk (no edge, bands slightly narrow); the
   agent restates 60-day volatility with coin-flip probabilities. Neither beats a 60-day
