@@ -1130,6 +1130,25 @@ Originalmethode: im Stichprobenzeitraum +0,75 %/Monat, nach Veröffentlichung +0
 +0,58 → +0,19 % (24 %), zusammen 2015–2024 +0,16 %/Monat, **t 1,7**, vor Kosten. Am
 stabilsten: Momentum 6 M, Analysten-Revisionen, Aktienausgabe, Optionssignale.
 
+**Lazy Prices (Cohen, Malloy & Nguyen, JF 2020), nur gemessen, nicht eingebaut:** Das
+Paper meldet „bis zu 188 Bp pro Monat“ für Nicht-Änderer minus Änderer (Stichprobe bis
+2014, beste von mehreren Varianten). Test: 500 zufällige US-Firmen (Kurs ab 2014,
+Umsatz 2015 > $1 Mio./Tag), 5.493 10-K-Hauptdokumente von der SEC (`submissions`-API,
+< 8 Abrufe/s, nur Wortzählungen gespeichert), 4.972 Paare aufeinanderfolgender Jahre.
+Signal ab dem Einreichungsdatum, jeden Monatsende das jüngste der letzten 12 Monate,
+Quintile, gleichgewichtete Gesamtrendite (`close_adj`) im Folgemonat, 140 Monate
+2015-02 bis 2026-09, Median 433 Firmen je Monat. Komplett außerhalb der Paper-Stichprobe.
+
+| Maß (beide aus dem Paper) | Spanne der Ähnlichkeit (10–90 %) | Q5−Q1 pro Monat | t |
+|---|---|---|---|
+| Kosinus auf Wortzählungen | 0,996–0,999 (kaum Streuung) | −0,15 % | −0,85 |
+| Jaccard auf Wortmengen | 0,836–0,936 | +0,002 % | +0,01 |
+
+**Befund:** kein Effekt, in beiden Teilzeiträumen (2015–19, 2020–26). Grenzen: nur
+Überlebende des Free-Bestands, ganze 10-K statt einzelner Abschnitte, keine 10-Q,
+Rohrenditen statt Faktor-Alpha, gleichgewichtet. Ein Effekt in der Größe des Papers
+hätte trotzdem sichtbar sein müssen.
+
 ## Schiffe, Züge, Flugzeuge — reale Mengenströme (02.10.2026, lokale Sitzung)
 
 **Frage des Nutzers:** kostenloses Tracking von Schiffen und Flugzeugen („Flightradar“).
