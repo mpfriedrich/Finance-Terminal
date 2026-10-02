@@ -90,6 +90,10 @@ src/portfolio_lab/
   comps.py wacc.py deals.py research.py   valuation tools
   world.py numeraire.py     market monitor, USD/gold unit
   risk.py alerts.py insiders.py fts.py fred.py export.py summary.py macro.py options.py
+  options.py (end of file)  implied_distribution (Breeden-Litzenberger), smile_slope
+                            (put-call IV spread, live quotes only, parity-checked),
+                            trailing_dividend_yield; scripts/snapshot_options.py records
+                            ~200 shares a day for a later out-of-sample test
   volforecast.py            20-day risk range in RESEARCH: pooled Log-HAR on ~200 US
                             shares, width only, never direction (PLAN.md)
   shipping.py               ship transits through 28 chokepoints and cargo tonnes at 26

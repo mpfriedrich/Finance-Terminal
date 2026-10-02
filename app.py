@@ -148,6 +148,22 @@ def _frame(asof: dt.date) -> pd.DataFrame:
     return _market_source().screening_frame(asof)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _option_snapshot() -> pd.DataFrame | None:
+    """The newest daily options snapshot (scripts/snapshot_options.py), if it is at most
+    four days old; the cross-section the put-call spread is ranked against."""
+    folder = CACHE_DIR / "options"
+    files = sorted(folder.glob("*.parquet")) if folder.exists() else []
+    if not files:
+        return None
+    day = dt.date.fromisoformat(files[-1].stem)
+    if (dt.date.today() - day).days > 4:
+        return None
+    frame = pd.read_parquet(files[-1])
+    frame.attrs["day"] = day
+    return frame if frame.smile_slope.notna().sum() >= 20 else None
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def _price_stats(ticker: str, asof: dt.date) -> dict:
     """research.price_stats once per ticker and data date. RESEARCH, the WACC beta and
@@ -1934,8 +1950,12 @@ with tab_research:
                     rate, rate_src = mx.current_risk_free(
                         src.con, settings.risk_free_fallback)
                     st.caption(f"Risk-free rate {rate:.2%} — {rate_src}.")
+                    # Trailing dividend yield from the store: solved with none, a payer's
+                    # puts look dearer than its calls for no other reason (options.py).
+                    div_q = op.trailing_dividend_yield(src.con, ticker)
                     with st.spinner("Reading the option chain"):
-                        surf = op.surface(ticker, spot, max_expiries=10, risk_free=rate)
+                        surf = op.surface(ticker, spot, max_expiries=10, risk_free=rate,
+                                          dividend_yield=div_q)
                     if surf.empty:
                         st.info(
                             "No usable option contracts. Either this company has no "
@@ -2057,6 +2077,105 @@ with tab_research:
                                     "way is the interesting case, and neither direction is "
                                     "a recommendation."
                                 )
+
+                        # --- the distribution the prices imply ----------------------
+                        dist = op.implied_distribution(one, spot, max(days, 1), rate, div_q)
+                        st.markdown(f"#### What the {expiry} prices imply")
+                        if dist.get("usable"):
+                            qd, rq = dist["quantiles"], dist["ref_quantiles"]
+                            st.markdown(ui.stats([
+                                ("MEDIAN", ui.num(qd[50]), "amber"),
+                                ("10% BELOW", ui.num(qd[10]), "down"),
+                                ("10% ABOVE", ui.num(qd[90]), "up"),
+                                ("P(< -10%)", f"{dist['p_down_10']:.0%}", "down"),
+                                ("P(> +10%)", f"{dist['p_up_10']:.0%}", "up"),
+                            ]), unsafe_allow_html=True)
+                            import plotly.graph_objects as go
+
+                            curve = dist["curve"]
+                            curve = curve[curve.price.between(qd[5] * 0.85, qd[95] * 1.15)]
+                            fig_d = go.Figure()
+                            fig_d.add_trace(go.Scatter(
+                                x=curve.price, y=curve.bell_curve, name="bell curve (ATM vol)",
+                                mode="lines", line=dict(color=ui.MUTED, width=1, dash="dot")))
+                            fig_d.add_trace(go.Scatter(
+                                x=curve.price, y=curve.density, name="from the chain",
+                                mode="lines", fill="tozeroy",
+                                fillcolor="rgba(255, 158, 27, 0.18)",
+                                line=dict(color=ui.AMBER, width=1.5)))
+                            fig_d.add_vline(x=spot, line=dict(color=ui.DATA, width=1, dash="dot"))
+                            fig_d.update_layout(
+                                height=260, margin=dict(l=0, r=0, t=6, b=0),
+                                paper_bgcolor=ui.BG, plot_bgcolor=ui.BG, hovermode="x unified",
+                                legend=dict(orientation="h", y=1.08, x=0),
+                                font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
+                                xaxis=dict(gridcolor=ui.RULE, color=ui.MUTED),
+                                yaxis=dict(gridcolor=ui.RULE, color=ui.MUTED, showticklabels=False),
+                            )
+                            st.plotly_chart(fig_d, width="stretch", key=f"dist_{ticker}")
+                            st.caption(
+                                f"The probability of each price on {expiry}, read from "
+                                f"{dist['contracts']} strikes (Breeden-Litzenberger), against "
+                                "the bell curve the expected move assumes. The chain puts "
+                                f"{dist['p_down_10']:.0%} on a fall of more than 10 % where "
+                                f"the bell curve has {dist['ref_p_down_10']:.0%}. These are "
+                                "risk-neutral odds: they include what buyers pay for "
+                                "protection, so they lean further to the downside than the "
+                                "real-world odds. What the market charges for, not a "
+                                f"forecast. {dist['beyond_quotes']:.0%} of the probability "
+                                "lies beyond the last quoted strikes and comes from holding "
+                                f"the smile flat there. Prices: {surf.attrs.get('mode', 'n/a')}."
+                            )
+                        else:
+                            st.caption(
+                                "Too few strikes on both sides of the price, or most of the "
+                                "probability would come from beyond the quoted strikes, so "
+                                "no distribution is drawn for this expiry."
+                            )
+
+                        # --- the put-call volatility spread (SmileSlope) ------------
+                        st.markdown("#### Put-call volatility spread")
+                        near_exp = sorted(
+                            [(e, int(d)) for e, d in zip(ts.expiry, ts.days) if 7 <= d <= 75],
+                            key=lambda x: abs(x[1] - op.SIGNAL_DAYS))[:2]
+                        with st.spinner("Reading full chains near 30 days"):
+                            full = [(d, op.chain(ticker, e, spot, rate, div_q))
+                                    for e, d in near_exp]
+                        slope = op.smile_slope([(d, c) for d, c in full if not c.empty],
+                                               r=rate, q=div_q)
+                        if slope.get("value") is not None:
+                            snap = _option_snapshot()
+                            pct = (op.percentile(slope["value"], snap.smile_slope)
+                                   if snap is not None else None)
+                            st.markdown(ui.stats([
+                                ("PUT - CALL VOL", f"{slope['value'] * 100:+.1f} pts", "amber"),
+                                ("AT", f"{slope['days']}d", ""),
+                                ("PAIRS", str(slope["pairs"]), ""),
+                                ("RANK", "—" if pct is None else f"{pct:.0%}", ""),
+                            ]), unsafe_allow_html=True)
+                            rank_note = (
+                                f"RANK places it among {len(snap)} US shares recorded on "
+                                f"{snap.attrs['day']}: 100 % = dearest puts. "
+                                if pct is not None else
+                                "No recent cross-section is recorded yet, so it cannot be "
+                                "ranked (scripts/snapshot_options.py collects one daily). ")
+                            st.caption(
+                                "Implied volatility of puts minus calls at the same strikes "
+                                f"near the money, {slope['method']}, dividend yield "
+                                f"{div_q:.1%} included. {rank_note}In published data "
+                                "(Yan 2011; Chen & Zimmermann's open replication, "
+                                "value-weighted tenths, measured 02.10.2026) shares with the "
+                                "dearest puts earned about 0.9 % a month less over the "
+                                "following month than those with the cheapest, 2015-2024 "
+                                "(t 2.8). It ranks shares against each other and says "
+                                "nothing certain about this one; it has not been tested on "
+                                "this app's own data, and the snapshots exist so that it can "
+                                "be."
+                            )
+                        else:
+                            st.caption(slope.get("rejected") or
+                                       "No expiry between 10 and 60 days with puts and calls "
+                                       "at the same strikes near the money.")
 
                         # --- the surface, in three dimensions -----------------------
                         try:

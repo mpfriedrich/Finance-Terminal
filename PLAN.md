@@ -1371,6 +1371,48 @@ ohne Ausnahme gerendert.
 `sec.py`, `wrds.py`, `crsp.py` nicht Zeile für Zeile (dicht getestet, mehrfach
 reviewt); Kosmetik ohne Funktion (Variablennamen `l`, `zip` ohne `strict`).
 
+## Optionen: Markterwartung und Put-Call-Spread (02.10.2026, lokale Sitzung)
+
+**Frage des Nutzers:** eine Preisvorhersage aus den vorhandenen Optionsdaten. **Ehrliche
+Antwort vorab:** Optionen sagen viel über die *Breite*, kaum etwas über die *Richtung*.
+Gebaut (Branch `claude/options-implied`, eigener Worktree; parallel lief die Schiffs-
+Sitzung, Absprache: `_clean()` gehört ihr, meine Funktionen stehen am Dateiende):
+
+1. **`options.implied_distribution`** — Breeden-Litzenberger: Dichte = e^{rT}·∂²C/∂K²,
+   Smile linear zwischen den Strikes, flach dahinter, Gauß-geglättet (etwa eine
+   Strike-Breite). Eine quadratische Anpassung, zuerst probiert, verfehlte bei einem
+   geknickten Smirk das ATM-Niveau. Ausgewiesen: Quantile, P(−10 %/+10 %), Vergleich mit
+   der Glockenkurve, Anteil jenseits der Quotes. Nicht „usable“ unter 6 Strikes oder
+   ≥ 25 % jenseits der Quotes. **Geprüft:** flacher Smile = Lognormal (Quantile auf 0,4 %);
+   P(S<90) aus der Dichte 12,13 % gegen 12,11 % direkt aus der Put-Steigung (Digital).
+   Risikoneutral — enthält den Preis für Absicherung, also mehr Abwärts-Gewicht als die
+   realen Chancen; so steht es im Text.
+2. **`options.smile_slope`** — Put- minus Call-IV am selben Strike, ±5 % um den Kurs,
+   auf 30 Tage interpoliert. **Warum dieses Signal:** in den Chen-Zimmermann-Daten (bis
+   12/2024, gemessen 02.10.2026) nach Veröffentlichung das robusteste Optionssignal:
+   SmileSlope (Yan 2011) wertgewichtet 2015–2024 0,86 %/Monat Top- minus Bottom-Zehntel,
+   t 2,8, 2020–2024 1,79 %, t 2,7. Der klassische Smirk (Xing/Zhang/Zhao 2010, „skew1“)
+   dagegen t 0,1 — die zuerst genannte Variante war die falsche. **Fallen, gefunden und
+   abgesichert:** (a) Dividenden — mit q = 0 gelöst sehen Puts eines Zahlers teurer aus;
+   jetzt `trailing_dividend_yield` aus `close_adj/close` (12 Monate), auch in `surface()`.
+   (b) veralteter Kurs — SXI ergab −83 Punkte, weil die Kette ~305 implizierte und der
+   Kurs 273 war; Paritätsprüfung, Ablehnung über 3 % (1 % hätte echte 10-Punkte-Spreads
+   verworfen). (c) geschlossene Börse — letzte Preise sind asynchron, gemessen ±15 bis
+   37 Punkte über 8 Aktien; nur Live-Quotes zählen.
+3. **`scripts/snapshot_options.py`** — täglich ~200 liquide US-Aktien
+   (`volforecast.sample_tickers`) nach `data/cache/options/JJJJ-MM-TT.parquet` (nicht in
+   den Store: der ist gesperrt, solange die App läuft). Zeitplan mit
+   `scripts/install_options_snapshot.sh`: Di–Sa 05:00 Sydney = US-Handelszeit. **Nicht
+   installiert** — der Nutzer entscheidet. RESEARCH → OPTIONS zeigt den Rang im jüngsten
+   Querschnitt (≤ 4 Tage alt, ≥ 20 Werte).
+
+**Nicht getestet:** das Signal auf eigenen Daten (dafür die Schnappschüsse; frühestens
+nach einigen Monaten sinnvoll), amerikanische Ausübung (Black-Scholes unterstellt
+europäisch; am Geld bei 30 Tagen klein), die Verteilung bei illiquiden Ketten. Auf `main`
+ohne den `_clean()`-Fix der Schiffs-Sitzung sind Ketten vor der US-Eröffnung oft leer;
+geprüft wurde die Anzeige mit diesem Fix vorübergehend eingespielt (AAPL: 27 Strikes,
+Spread zwischen 28 und 35 Tagen interpoliert), danach wieder entfernt.
+
 ## Geplant: Hebel und Derivate (vorgemerkt am 25.09.2026, noch nicht begonnen)
 
 Auf Frage des Nutzers („gibt es die Option für Derivate und Leverage?“) nur in den Plan

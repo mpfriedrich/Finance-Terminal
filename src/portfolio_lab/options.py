@@ -551,3 +551,257 @@ PRESETS = {
     "Iron condor": [("put", 0.90, +1), ("put", 0.95, -1),
                     ("call", 1.05, -1), ("call", 1.10, +1)],
 }
+
+
+# ------------------------------------------------------ what the prices imply (02.10.2026)
+# Two additions, kept apart from everything above so that work on the chain cleaning in
+# a parallel branch merges without touching them.
+#
+# 1. The distribution the chain prices in (Breeden-Litzenberger). `expected_move` and the
+#    cone assume a bell curve with one volatility; the chain itself quotes a different
+#    volatility at every strike, and that smirk is exactly the fat left tail the bell
+#    curve leaves out.
+# 2. The put-call volatility spread at the money ("SmileSlope", Yan 2011). Of the option
+#    signals in Chen & Zimmermann's open-source replication it is the one that kept
+#    working after publication: value-weighted deciles, high-minus-low, -0.86 % a month
+#    in 2015-2024 (t 2.8) and -1.79 % in 2020-2024 (t 2.7), measured on their data on
+#    02.10.2026. The classic smirk (Xing, Zhang & Zhao 2010) earned nothing over the same
+#    years (t 0.1). It ranks shares against each other; it is not a price forecast for
+#    one of them, and it has not been tested on this app's data (PLAN.md).
+
+_ERF = np.vectorize(math.erf, otypes=[float])
+
+
+def _ndtr(x: np.ndarray) -> np.ndarray:
+    return 0.5 * (1.0 + _ERF(np.asarray(x, float) / math.sqrt(2.0)))
+
+
+def _bs_call_vec(S: float, K: np.ndarray, T: float, r: float, sigma: np.ndarray,
+                 q: float = 0.0) -> np.ndarray:
+    ndtr = _ndtr
+    sq = sigma * np.sqrt(T)
+    d1 = (np.log(S / K) + (r - q + 0.5 * sigma ** 2) * T) / sq
+    return S * np.exp(-q * T) * ndtr(d1) - K * np.exp(-r * T) * ndtr(d1 - sq)
+
+
+def implied_distribution(otm: pd.DataFrame, spot: float, days: int, r: float = 0.04,
+                         q: float = 0.0, points: int = 1601) -> dict:
+    """Probability of each price at expiry, as the chain prices it.
+
+    Breeden-Litzenberger: the second derivative of the call price with respect to the
+    strike, grown at the risk-free rate, is the density the prices imply. Taken directly
+    from quotes it is noise, so the volatility smile is smoothed first (a quadratic in
+    log-moneyness, the shape equity smiles have) and held flat beyond the last quoted
+    strike on each side. How much probability sits out there is reported, because that
+    part is extrapolation and not quotes.
+
+    These are RISK-NEUTRAL probabilities: they include what buyers pay to be insured
+    against falls, so they put more weight on the downside than the real-world odds.
+    They say what the market charges for, not what will happen.
+    """
+    need = {"strike", "iv", "kind"}
+    if otm is None or otm.empty or not need <= set(otm.columns) or spot <= 0 or days <= 0:
+        return {}
+    pts = otm.dropna(subset=["strike", "iv"])
+    pts = pts[(pts.iv > 0) & (pts.strike > 0)]
+    if len(pts) < 5 or (pts.kind == "put").sum() < 2 or (pts.kind == "call").sum() < 2:
+        return {}
+    T = days / 365.0
+    fwd = spot * math.exp((r - q) * T)
+    pts = pts.groupby("strike", as_index=False).iv.mean()
+    k = np.log(pts.strike.to_numpy(float) / fwd)
+    ivs = pts.iv.to_numpy(float)
+    k_lo, k_hi = float(k.min()), float(k.max())
+    atm = float(np.interp(0.0, k, ivs))                 # observed, not fitted
+    reach = max(7.0 * atm * math.sqrt(T), 1.2 * max(abs(k_lo), abs(k_hi)))
+    grid_k = np.linspace(-reach, reach, points)
+    # Straight lines between the quoted strikes, flat beyond them, then a Gaussian
+    # smoothing about one strike step wide: close to the quotes, and smooth enough that
+    # the second derivative is a density rather than spikes at every quoted strike.
+    # (A quadratic fit, tried first, missed the at-the-money level of a kinked smirk.)
+    raw = np.interp(np.clip(grid_k, k_lo, k_hi), k, ivs)
+    step = grid_k[1] - grid_k[0]
+    width = max(float(np.median(np.diff(k))) if len(k) > 1 else 0.02, 0.01)
+    half = int(4 * width / step)
+    kern = np.exp(-0.5 * (np.arange(-half, half + 1) * step / width) ** 2)
+    kern /= kern.sum()
+    smooth = np.convolve(np.pad(raw, half, mode="edge"), kern, mode="valid")
+    K = fwd * np.exp(grid_k)
+    C = _bs_call_vec(spot, K, T, r, smooth, q)
+    dens = math.exp(r * T) * np.gradient(np.gradient(C, K), K)
+    negative = float(-np.trapezoid(np.minimum(dens, 0.0), K))
+    dens = np.maximum(dens, 0.0)
+    total = float(np.trapezoid(dens, K))
+    if not total > 0:
+        return {}
+    dens = dens / total
+    cdf = np.concatenate([[0.0], np.cumsum(0.5 * (dens[1:] + dens[:-1]) * np.diff(K))])
+    cdf = cdf / cdf[-1]
+
+    def quantile(p: float) -> float:
+        return float(np.interp(p, cdf, K))
+
+    def below(level: float) -> float:
+        return float(np.interp(level, K, cdf))
+
+    # the bell-curve reading of the same expiry, for comparison: one volatility, the ATM
+    # one, lognormal around the forward (stdlib only; the project has no scipy)
+    from statistics import NormalDist
+
+    sd = atm * math.sqrt(T)
+    mu = math.log(fwd) - 0.5 * sd * sd
+    unit = NormalDist()
+
+    class _Ref:
+        @staticmethod
+        def cdf(x):
+            return unit.cdf((math.log(x) - mu) / sd)
+
+        @staticmethod
+        def ppf(p):
+            return math.exp(mu + sd * unit.inv_cdf(p))
+
+        @staticmethod
+        def pdf(x):
+            x = np.asarray(x, float)
+            return np.exp(-0.5 * ((np.log(x) - mu) / sd) ** 2) / (x * sd * math.sqrt(2 * math.pi))
+
+    ref = _Ref()
+    inside = (K >= float(pts.strike.min())) & (K <= float(pts.strike.max()))
+    return {
+        "days": int(days),
+        "forward": fwd,
+        "atm_iv": atm,
+        "quantiles": {p: quantile(p / 100) for p in (5, 10, 25, 50, 75, 90, 95)},
+        "mean": float(np.trapezoid(K * dens, K)),
+        "p_below_spot": below(spot),
+        "p_down_10": below(0.9 * spot),
+        "p_up_10": 1.0 - below(1.1 * spot),
+        "ref_p_down_10": float(ref.cdf(0.9 * spot)),
+        "ref_p_up_10": float(1.0 - ref.cdf(1.1 * spot)),
+        "ref_quantiles": {p: float(ref.ppf(p / 100)) for p in (5, 10, 25, 50, 75, 90, 95)},
+        "beyond_quotes": float(1.0 - np.trapezoid(dens[inside], K[inside])),
+        "negative_mass": negative / (negative + total),
+        "contracts": int(len(pts)),
+        # mostly quotes, not extrapolation: otherwise the shape is our assumption
+        "usable": bool(len(pts) >= 6 and float(1.0 - np.trapezoid(dens[inside], K[inside])) < 0.25),
+        "curve": pd.DataFrame({"price": K, "density": dens, "bell_curve": ref.pdf(K)}),
+    }
+
+
+ATM_BAND = (0.95, 1.05)
+SIGNAL_DAYS = 30
+
+
+# A stale share price and a genuine parity deviation look the same from the chain, so
+# this only catches the impossible: 3 % of the forward is ~25 volatility points at 30
+# days, beyond any spread the literature reports. 1 %, tried first, would have thrown away
+# a genuine 10-point spread (a 1.1 % gap at 30 days), the very tail the signal ranks on.
+# The real defence is a share price taken at the same moment as the chain.
+MAX_PARITY_GAP = 0.03
+
+
+def put_call_spread(chain_df: pd.DataFrame, band: tuple[float, float] = ATM_BAND,
+                    r: float = 0.04, q: float = 0.0) -> dict:
+    """Put minus call implied volatility at the same strikes, near the money.
+
+    Weighted towards the strike closest to spot. Needs calls AND puts at one strike,
+    which `surface()` does not keep (it drops in-the-money contracts), so this takes a
+    full `chain()`.
+
+    The spread measures how far put and call prices stray from put-call parity, so it is
+    only as good as the share price they are measured against. Each pair implies a
+    forward, K + e^{rT}(C - P); if that differs from spot x e^{(r-q)T} by more than
+    MAX_PARITY_GAP the price and the chain are out of step and there is no number. Found
+    on 02.10.2026: SXI's pairs implied ~305 while the price on hand was 273, and the
+    "spread" came out at -83 volatility points.
+    """
+    if chain_df is None or chain_df.empty or "kind" not in chain_df:
+        return {}
+    # Last traded prices are from different moments for each contract. Measured on
+    # 02.10.2026 before the US open: spreads of -37 to +25 volatility points across 8
+    # shares, where the literature reports a few. Only live two-sided quotes are used.
+    if str(chain_df.attrs.get("mode", "")).startswith("last traded"):
+        return {"rejected": "market closed: last traded prices are from different "
+                            "moments, so puts and calls cannot be compared"}
+    spot = float((chain_df.strike / chain_df.moneyness).median())
+    days = float(chain_df["days"].iloc[0]) if "days" in chain_df else 30.0
+    T = max(days, 1.0) / 365.0
+    near = chain_df[chain_df.moneyness.between(*band)]
+    side = {kind: near[near.kind == kind].groupby("strike")[["iv", "mid"]].mean()
+            for kind in ("call", "put")}
+    both = side["put"].join(side["call"], lsuffix="_put", rsuffix="_call", how="inner").dropna()
+    if both.empty:
+        return {}
+    strikes = both.index.to_numpy(float)
+    implied_fwd = strikes + math.exp(r * T) * (both.mid_call - both.mid_put).to_numpy(float)
+    gap = float(np.median(implied_fwd) / (spot * math.exp((r - q) * T)) - 1.0)
+    if abs(gap) > MAX_PARITY_GAP:
+        return {"rejected": f"price and chain out of step: the pairs imply a forward "
+                            f"{gap:+.1%} from the price on hand", "parity_gap": gap}
+    w = 1.0 / (np.abs(strikes / spot - 1.0) + 0.01)
+    spread = both.iv_put - both.iv_call
+    return {"spread": float(np.average(spread, weights=w)), "pairs": int(len(both)),
+            "put_iv": float(np.average(both.iv_put, weights=w)),
+            "call_iv": float(np.average(both.iv_call, weights=w)), "parity_gap": gap}
+
+
+def smile_slope(by_expiry: list[tuple[int, pd.DataFrame]],
+                target: int = SIGNAL_DAYS, r: float = 0.04, q: float = 0.0) -> dict:
+    """The put-call spread at `target` days: interpolated between the expiries either
+    side, or the nearest expiry within 10-60 days (the window the literature uses).
+
+    Positive = puts dearer than calls at the same strike. Historically the shares with
+    the highest values earned less the following month than those with the lowest.
+    """
+    rows, rejected = [], []
+    for days, ch in by_expiry:
+        if days < 7:
+            continue                              # the last week before expiry is noise
+        pc = put_call_spread(ch, r=r, q=q)
+        if "rejected" in pc:
+            rejected.append(pc["rejected"])
+        elif pc:
+            rows.append({"days": int(days), **{k: pc[k] for k in ("spread", "pairs")}})
+    if not rows:
+        return {"rejected": rejected[0]} if rejected else {}
+    t = pd.DataFrame(rows).sort_values("days")
+    before, after = t[t.days <= target], t[t.days >= target]
+    if len(before) and len(after) and before.days.iloc[-1] != after.days.iloc[0]:
+        a, b = before.iloc[-1], after.iloc[0]
+        w = (target - a.days) / (b.days - a.days)
+        return {"value": float(a.spread + w * (b.spread - a.spread)), "days": target,
+                "method": f"interpolated between {int(a.days)} and {int(b.days)} days",
+                "pairs": int(a.pairs + b.pairs)}
+    window = t[t.days.between(10, 60)]
+    if window.empty:
+        return {}
+    one = window.iloc[(window.days - target).abs().argsort()[:1]].iloc[0]
+    return {"value": float(one.spread), "days": int(one.days),
+            "method": f"nearest expiry, {int(one.days)} days", "pairs": int(one.pairs)}
+
+
+def trailing_dividend_yield(con, ticker: str, sessions: int = 252) -> float:
+    """Dividends of the last year as a fraction of the price, from the store alone.
+
+    close_adj is the close with dividends folded back in, so its ratio to the plain close
+    drifts by each payout. The drift over a year is the trailing yield. Without it, every
+    implied volatility here is solved with no dividend, and a high payer's puts look
+    dearer than its calls for no other reason, which is exactly the spread above.
+    """
+    rows = con.execute(
+        "SELECT close_adj / NULLIF(close, 0) FROM prices WHERE ticker = ? "
+        "AND close > 0 AND close_adj > 0 ORDER BY date DESC LIMIT ?",
+        [ticker, sessions + 1]).fetchall()
+    if len(rows) < sessions // 2:
+        return 0.0
+    now, then = float(rows[0][0]), float(rows[-1][0])
+    return max(min(now / then - 1.0, 0.25), 0.0) if then > 0 else 0.0
+
+
+def percentile(value: float, cross_section: pd.Series) -> float | None:
+    """Share of the cross-section at or below `value`; None without a cross-section."""
+    s = pd.Series(cross_section).dropna()
+    if len(s) < 20 or value is None:
+        return None
+    return float((s <= value).mean())
