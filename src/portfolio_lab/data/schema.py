@@ -183,6 +183,76 @@ MARKET_MIGRATIONS: list[str] = [
     DROP TABLE ticker_history;
     ALTER TABLE ticker_history_v2 RENAME TO ticker_history;
     """,
+    # 021 — what a shareholder actually received when a listing ended (CRSP's delisting
+    # return). Where a row exists the backtests use it instead of the assumed loss (R18).
+    """
+    CREATE TABLE IF NOT EXISTS delisting_returns (
+        ticker  VARCHAR PRIMARY KEY,
+        date    DATE    NOT NULL,
+        ret     DOUBLE  NOT NULL,
+        code    VARCHAR,
+        source  VARCHAR NOT NULL
+    );
+    """,
+    # 022 — the last date a licensed source covers (CRSP ends where the subscription
+    # ends; the free prices continue its active names after that date).
+    """
+    CREATE TABLE IF NOT EXISTS source_windows (
+        source     VARCHAR PRIMARY KEY,
+        last_date  DATE NOT NULL
+    );
+    """,
+    # 023 — which securities came from CRSP, under which key and ticker, and whether the
+    # line was still trading when CRSP ends. The free store's daily prices are appended
+    # to exactly these lines.
+    """
+    CREATE TABLE IF NOT EXISTS crsp_link (
+        permno     BIGINT PRIMARY KEY,
+        cik        BIGINT  NOT NULL,
+        ticker     VARCHAR NOT NULL,
+        last_date  DATE,
+        active     BOOLEAN NOT NULL
+    );
+    """,
+    # 024 — daily ship transits through the maritime chokepoints (shipping.py, IMF
+    # PortWatch). The latest published value; PortWatch revises recent days.
+    """
+    CREATE TABLE IF NOT EXISTS chokepoint_transits (
+        chokepoint       VARCHAR NOT NULL,
+        name             VARCHAR NOT NULL,
+        date             DATE    NOT NULL,
+        n_total          INTEGER,
+        n_tanker         INTEGER,
+        n_container      INTEGER,
+        n_dry_bulk       INTEGER,
+        n_cargo          INTEGER,
+        capacity         BIGINT,
+        capacity_tanker  BIGINT,
+        PRIMARY KEY (chokepoint, date)
+    );
+    """,
+    # 025 — the first value seen for each chokepoint-day, never overwritten, with the day
+    # it was seen: the point-in-time record (R13) that a later backtest would need.
+    """
+    CREATE TABLE IF NOT EXISTS chokepoint_first (
+        chokepoint  VARCHAR NOT NULL,
+        date        DATE    NOT NULL,
+        n_total     INTEGER,
+        n_tanker    INTEGER,
+        seen_on     DATE    NOT NULL,
+        PRIMARY KEY (chokepoint, date)
+    );
+    """,
+    # 026 — airborne aircraft per region at each stored snapshot (aviation.py, OpenSky).
+    # OpenSky keeps no free history, so this table is the history, from its first run.
+    """
+    CREATE TABLE IF NOT EXISTS air_traffic (
+        taken_at  TIMESTAMP NOT NULL,
+        region    VARCHAR   NOT NULL,
+        airborne  INTEGER   NOT NULL,
+        PRIMARY KEY (taken_at, region)
+    );
+    """,
 ]
 
 USER_MIGRATIONS: list[str] = [

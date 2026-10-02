@@ -62,3 +62,40 @@ def apply(frame: pd.DataFrame, con: duckdb.DuckDBPyConnection | None) -> pd.Data
     if "shares_outstanding" in out.columns:
         out["shares_outstanding"] = out["shares_outstanding"] / out["listing_ratio"]
     return out
+
+
+# -- the market a line trades in ------------------------------------------------------------
+
+# ISO 3166 alpha-3 codes Compustat Global uses for the listing country, with the names a
+# person types. The US store's lines (SEC and CRSP) all trade in the United States.
+COUNTRIES = {
+    "USA": "United States", "AUS": "Australia", "AUT": "Austria", "BEL": "Belgium",
+    "CHE": "Switzerland", "DEU": "Germany", "DNK": "Denmark", "ESP": "Spain",
+    "FIN": "Finland", "FRA": "France", "GBR": "United Kingdom", "HKG": "Hong Kong",
+    "IRL": "Ireland", "ISR": "Israel", "ITA": "Italy", "JPN": "Japan",
+    "NLD": "Netherlands", "NOR": "Norway", "NZL": "New Zealand", "PRT": "Portugal",
+    "SGP": "Singapore", "SWE": "Sweden", "CAN": "Canada", "CHN": "China",
+    "KOR": "South Korea", "IND": "India", "BRA": "Brazil", "ZAF": "South Africa",
+    "TWN": "Taiwan", "LUX": "Luxembourg", "GRC": "Greece", "POL": "Poland",
+}
+# Compustat Global's key range (data/wrds.py): its lines carry the country in `exchange`.
+_GLOBAL_FIRST, _GLOBAL_LAST = 1_000_000_000, 1_999_999_999
+
+
+def add_country(frame: pd.DataFrame) -> pd.DataFrame:
+    """Add `country`: the ISO-3 code of the market the line trades in.
+
+    The market, not the headquarters: a Japanese company's ADR in New York trades in the
+    United States and is priced, costed and settled there, while its Tokyo line is JPN.
+    Screening by country therefore picks the market the money would go to.
+    """
+    out = frame.copy()
+    if out.empty or "cik" not in out.columns:
+        out["country"] = pd.Series(dtype=object)
+        return out
+    cik = pd.to_numeric(out["cik"], errors="coerce")
+    is_global = cik.between(_GLOBAL_FIRST, _GLOBAL_LAST)
+    exchange = (out["exchange"].astype(str).str.upper() if "exchange" in out.columns
+                else pd.Series("", index=out.index))
+    out["country"] = exchange.where(is_global, "USA")
+    return out

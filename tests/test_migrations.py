@@ -6,7 +6,6 @@ done" treated the two new entries as done, and the tables were simply never crea
 Nothing raised, nothing warned. Only a query against a missing table gave it away.
 """
 import duckdb
-import pytest
 
 from portfolio_lab.data.schema import _apply, _name_of
 

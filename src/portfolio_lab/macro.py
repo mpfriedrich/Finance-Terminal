@@ -232,7 +232,8 @@ def rate_sensitivity(
         r["date"] = pd.to_datetime(r["date"])
         # Yield changes in percentage points, so beta reads as "% move per 1pp of rate".
         moves = r.set_index("date")["close"].astype(float).diff().dropna()
-        joined = pd.concat([stock.rename("a"), moves.rename("b")], axis=1).dropna()
+        joined = pd.concat([stock.rename("a"), moves.rename("b")], axis=1)
+        joined = joined.replace([np.inf, -np.inf], np.nan).dropna()
         if len(joined) < min_days or joined.b.var() == 0:
             continue
         rows.append({

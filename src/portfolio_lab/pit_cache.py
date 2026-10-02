@@ -41,7 +41,39 @@ import pandas as pd
 # v6: first filing is found before the age limit is applied.
 # v7: foreign filers — amounts converted to USD, shares on the listed-share basis.
 # v8: EBIT, D&A, interest, tax, gross profit and prior-year revenue in the frame.
-CACHE_VERSION = "v8"
+# v9: `country`, the market a line trades in (world store).
+CACHE_VERSION = "v9"
+
+
+def prune(root: Path, keep: Path, older_than_days: int = 7,
+          now: dt.datetime | None = None) -> int:
+    """Delete cached builds nobody can ask for any more. Returns how many went.
+
+    Every daily price update gives the store a new fingerprint, so yesterday's frames
+    are never read again (measured 01.10.2026); with a daily re-warm that leaves ~39 MB
+    of orphans per weekday. A build is removed once its newest file is older than
+    `older_than_days` — age rather than "everything but `keep`", because the cache
+    directory does not record which source a build belongs to, and a world build warmed
+    two days ago may still be the current one. Old CACHE_VERSION directories go by the
+    same rule. Deleting a frame never changes a result, only the time to the next one.
+    """
+    import shutil
+
+    root, keep = Path(root), Path(keep).resolve()
+    cutoff = (now or dt.datetime.now()).timestamp() - older_than_days * 86400
+    removed = 0
+    for build in sorted(root.glob("*/*")):
+        if not build.is_dir() or build.resolve() == keep:
+            continue
+        newest = max((f.stat().st_mtime for f in build.iterdir()),
+                     default=build.stat().st_mtime)
+        if newest < cutoff:
+            shutil.rmtree(build)
+            removed += 1
+    for version in root.iterdir() if root.exists() else ():
+        if version.is_dir() and not any(version.iterdir()):
+            version.rmdir()
+    return removed
 
 
 def _build_id(fingerprint: str) -> str:

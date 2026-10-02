@@ -42,6 +42,7 @@ import pandas as pd
 from . import metrics as mx
 from . import numeraire as nm
 from .config import CostModel
+from .data import history
 
 BENCHMARK = "^SP500TR"
 TRADING_DAYS = 252
@@ -178,16 +179,22 @@ def buy_and_hold(
             if last_bar[c] is not None and (window_end - last_bar[c]).days > 10]
 
     wide = wide.ffill()
+    # CRSP records what holders actually got for some of these; that beats any assumption.
+    known_exit = history.delisting_returns(con, gone)
     for column in gone:
         stopped = last_bar[column]
-        final = wide.loc[stopped, column] * (1.0 + delisting_return)
+        final = wide.loc[stopped, column] * (1.0 + known_exit.get(column, delisting_return))
         wide.loc[wide.index > stopped, column] = final
     if gone:
+        actual = sorted(set(gone) & set(known_exit))
         notes.append(
             f"{len(gone)} position(s) stopped trading before the end of the window "
             f"({', '.join(sorted(gone))}). A delisting return of {delisting_return:.0%} "
             "was applied at the last bar instead of carrying the last price forward — "
             "the assumption is a setting, and it moves the result (R18, [A17])."
+            + (f" For {len(actual)} of them CRSP records the actual delisting return, "
+               "which was used instead: " + ", ".join(
+                   f"{t} {known_exit[t]:+.0%}" for t in actual[:6]) + "." if actual else "")
         )
 
     held = holdings[holdings.ticker.isin(tradable)].copy()

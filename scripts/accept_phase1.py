@@ -1,7 +1,6 @@
 """Phase 1 acceptance. Every criterion from PLAN.md, measured."""
-import datetime as dt, time
-import pandas as pd
-from portfolio_lab.config import MARKET_DB, Settings
+import time
+from portfolio_lab.config import MARKET_DB
 from portfolio_lab.data.schema import open_market
 from portfolio_lab.data.free import FreeSource
 from portfolio_lab.screen.spec import Filter, PortfolioSpec

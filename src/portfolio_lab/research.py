@@ -315,12 +315,15 @@ def peers(frame: pd.DataFrame, ticker: str, limit: int = 12) -> pd.DataFrame:
     Size matters as much as industry: a $400m miner and a $90bn miner do not trade on
     comparable multiples, and lining them up side by side invites a wrong conclusion.
     """
+    # An empty answer keeps the frame's columns: callers read `.ticker` off it, and a
+    # frame without columns turned "no peers" into a crash in the comps section.
+    none = frame.iloc[0:0]
     row = frame[frame.ticker.astype(str).str.upper() == ticker.upper()]
     if row.empty:
-        return pd.DataFrame()
+        return none
     row = row.iloc[0]
     if pd.isna(row.get("sector")):
-        return pd.DataFrame()
+        return none
     same = frame[
         (frame.sector == row.sector)
         & (frame.ticker.astype(str).str.upper() != ticker.upper())
@@ -330,6 +333,13 @@ def peers(frame: pd.DataFrame, ticker: str, limit: int = 12) -> pd.DataFrame:
         return same
     same["size_gap"] = (np.log10(same.market_cap) - np.log10(row.market_cap)).abs()
     return same.nsmallest(limit, "size_gap")
+
+
+def _finite(joined: pd.DataFrame) -> pd.DataFrame:
+    """Rows where both returns are real numbers. A price of zero or below (WTI traded at
+    -$37 in April 2020) turns the next return infinite, and one infinity makes every
+    covariance NaN — with a numpy warning per call in the terminal."""
+    return joined.replace([np.inf, -np.inf], np.nan).dropna()
 
 
 # --------------------------------------------------------------------------- live quote
@@ -401,7 +411,7 @@ def price_stats(
     if len(bench) > 30:
         bench["date"] = pd.to_datetime(bench["date"])
         b = bench.set_index("date")["close_adj"].astype(float).pct_change().dropna()
-        joined = pd.concat([rets.rename("a"), b.rename("b")], axis=1).dropna()
+        joined = _finite(pd.concat([rets.rename("a"), b.rename("b")], axis=1))
         if len(joined) > 30 and joined.b.var() > 0:
             out["beta"] = float(joined.a.cov(joined.b) / joined.b.var())
             out["beta_days"] = len(joined)
@@ -722,7 +732,7 @@ def commodity_sensitivity(
             continue
         c["date"] = pd.to_datetime(c["date"])
         other = c.set_index("date")["close_adj"].astype(float).pct_change().dropna()
-        joined = pd.concat([stock.rename("a"), other.rename("b")], axis=1).dropna()
+        joined = _finite(pd.concat([stock.rename("a"), other.rename("b")], axis=1))
         if len(joined) < min_days or joined.b.var() == 0:
             continue
         rows.append({

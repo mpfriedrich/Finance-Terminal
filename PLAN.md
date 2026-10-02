@@ -62,7 +62,7 @@ Lokal auf dem Mac laufende Web-Oberfläche: Chat → Filterspezifikation → Scr
 - **Nicht-US-Märkte** — „us markt" (user). Zweiter Markt wäre eine zusätzliche Quelle, kein Umbau.
 - **Zugriff vom iPhone/iPad** — v1 läuft lokal `[A3]`.
 - **Steuern, Währungsumrechnung, Depotgebühren** — nicht in der Backtest-Rechnung. Handelskosten dagegen schon.
-- **Intraday, Optionen, Leerverkäufe, Hebel** — nur Long auf Tagesschlusskursen.
+- **Intraday, Optionen, Leerverkäufe, Hebel** — nur Long auf Tagesschlusskursen. *Stand 25.09.2026: Hebel, Leerverkäufe und Options-Backtests sind als nächster Ausbau vorgemerkt, siehe „Geplant: Hebel und Derivate“ unten; Optionen gibt es bereits als Analyse (OPTIONS-Reiter).*
 - **Bezahlte Datenquelle** — Anschluss wird vorbereitet (Phase 10), nicht abonniert (user, Q5).
 - **Vollständige Beseitigung der Überlebensverzerrung** — mit kostenlosen Quellen nicht erreichbar. Wird beziffert und angezeigt, nicht behauptet. Beseitigung ist genau das, was die bezahlte Quelle später liefert.
 
@@ -719,6 +719,193 @@ zeigt am Ende die Filer je Währung), `scripts/build_fx.py`,
   Yahoo-Zugang ergibt eine klare Meldung, keinen Absturz). Der echte Yahoo-Abruf ist
   in der Cloud-Sitzung gesperrt und daher nur mit nachgebautem Download getestet.
 
+## Weltmarkt, Stufe 3 — Compustat Global über WRDS (25.09.2026, Cloud-Sitzung)
+
+Entscheidung des Nutzers: WRDS über die Uni statt eigener ESEF/EDINET-Strecken oder
+eines bezahlten Anbieters.
+
+* **Download** (`data/wrds.py`, `scripts/build_wrds.py`): SQL direkt gegen den
+  WRDS-PostgreSQL-Server (`psycopg2`), nicht über das `wrds`-Paket — das verlangt
+  pandas < 2.3. Tabellen `g_company`, `g_security`, `g_secd`, `g_funda`, `g_fundq`,
+  `g_exrt_dly`; nur Spalten, die WRDS tatsächlich führt (vorher abgefragt). Ablage als
+  Parquet unter `data/cache/wrds/`; abgeschlossene Jahre der Tageskurse werden nicht
+  erneut geholt. Standard-Länder: entwickelte Märkte außerhalb Nordamerikas, ab 2010.
+* **Übersetzung** ins bestehende Schema, in eine eigene Datei `data/world.duckdb`, die
+  zusätzlich den US-Teil des freien Bestands trägt (`copy_us`, von `build_prices.py`
+  täglich nachgezogen). Eine Zeile je Firma: die Hauptnotiz im Heimatmarkt
+  (`prirow`), nur Stammaktien. Ticker = Compustat-Ticker + Land (`7203.JPN`).
+  CIK = 1.000.000.000 + gvkey, damit nie eine SEC-CIK getroffen wird.
+* **Alles in USD zum Tageskurs** (Kurse je Pfund aus `g_exrt_dly`, über den Dollar
+  gekreuzt; Pence/Cent/Agorot durch 100; `qunit`). Split-bereinigt über `ajexdi`,
+  Gesamtrendite über `trfd`. Fundamentaldaten behalten ihre Währung und laufen durch
+  `pit.to_usd`, die Kurse dafür stehen als `{CUR}USD=X` im Bestand.
+* **Meldedatum geschätzt**, weil Compustat Global es für Jahresabschlüsse nicht führt:
+  Periodenende + gesetzliche Frist (4 Monate Jahresbericht in EU/UK/Japan, 3 Monate
+  Zwischenbericht) — das späteste Datum, zu dem eine fristgerechte Firma veröffentlicht
+  haben muss, also nie vor der Wahrheit. Wo `g_fundq.rdq` existiert, gilt es. Rest-
+  Vorgriff: Firmen, die die Frist reißen. Der Build zählt, wie viele Fakten auf einer
+  Schätzung beruhen (`fundamentals.fp = 'est'`).
+* **Aktienzahl** aus der Tagesdatei (`cshoc`, je Monat der letzte Handelstag, am selben
+  Tag bekannt) vor der aus dem Bericht; bei zwei Aktiengattungen nur die Hauptlinie —
+  Börsenwert dann zu niedrig.
+* **Grenzen, bekannt:** Quartals-Cashflow wird nicht gelesen (in `g_fundq` kumuliert,
+  `oancfy`); die Floors ($5 Mindestkurs, $1m Umsatz) sind US-gedacht und schließen
+  britische Pennystocks und kleine europäische Werte aus; Research-Bereiche, die SEC-
+  Meldungen brauchen (Form 4, 10-K, Filings), sagen bei Compustat-Firmen, dass es sie
+  nicht gibt. Der US-Teil bleibt überlebendenbasiert, daher `survivorship_free = False`.
+* **Ungetestet gegen den echten Dienst** (aus der Cloud-Sitzung nicht erreichbar): die
+  Übersetzung ist mit handgebauten Dateien im Compustat-Global-Layout getestet
+  (`tests/wrds_fixture.py`, 17 Tests), der Download gegen einen nachgebauten Server.
+  Unsicher sind vor allem Spaltennamen (`qunit`, `rdq`, `gp`), die Einheit von `cshoc`
+  (angenommen: Stück, nicht Millionen) und ob `datafmt = 'HIST_STD'` in `g_funda`
+  befüllt ist. Die Länderzählung am Ende des ersten Builds zeigt es.
+
+**Nachtrag 25.09.2026 — US-Teil aus CRSP** (`data/crsp.py`), auf Wunsch des Nutzers,
+nachdem die erste Anmeldung bei WRDS funktioniert hat. Behebt die Überlebensverzerrung
+für die USA, die Phase 7 gemessen hat (0 von 20):
+
+* **Kurse** aus der CRSP-Tagesdatei (Legacy-Format `crsp.dsf`, `dsenames`, `dsedelist`):
+  Stammaktien (Share Code 10/11) an NYSE, NYSE American, Nasdaq. Gehandelter Kurs
+  `|prc|` (negativ = Geld-Brief-Mitte), Split-bereinigt über `cfacpr`, Gesamtrendite aus
+  CRSPs `ret` aufgezinst.
+* **Nach dem CRSP-Ende** (Abo-Stand, oft Dezember des Vorjahres) laufen die noch
+  gehandelten Linien mit den Tageskursen des freien Bestands weiter, am letzten CRSP-Tag
+  auf CRSPs Basis umgerechnet (`extend`, täglich über `build_prices.py`). Ticker einer
+  noch gehandelten Linie = der heutige des freien Bestands (META, nicht FB); beendete
+  Linien behalten den letzten CRSP-Ticker, bei Kollision mit Permno-Suffix.
+* **Schlüssel = SEC-CIK** über die CRSP-Compustat-Verknüpfung (`ccmxpf_lnkhist`) und
+  `comp.company.cik`, damit die SEC-Fundamentaldaten mit echtem Meldedatum gelten —
+  auch für verschwundene Firmen, die die SEC weiter führt. Ohne CIK: 2 Mrd. + Permno.
+  **Compustat NA** nur für Perioden vor der ersten XBRL-Meldung (`prune_compustat`),
+  datiert über `rdq`, sonst Frist (10-Q 45, 10-K 90 Tage).
+* **Delisting-Rendite**: neue Tabelle `delisting_returns`; Stufe A und B nehmen sie statt
+  der angenommenen −30 %, wo CRSP sie hat, und sagen im Bericht, welche Werte echt
+  waren. Fehlt sie (häufig bei Delistings wegen schlechter Lage), bleibt die Annahme.
+* `WorldSource.survivorship_free` misst: wahr, sobald beendete CRSP-Linien im Bestand
+  sind; die Oberfläche sagt dann, wie viele beendete Notierungen enthalten sind.
+* **Ungetestet gegen den echten Dienst**; unsicher vor allem: ob das Abo das
+  Legacy-Format `dsf` noch führt (CRSP stellt auf das CIZ-Format `dsf_v2` um — dann
+  meldet der Build klar, dass `crsp.dsf` fehlt, und dieser Teil muss angepasst werden),
+  und wie viele noch gehandelte Linien im freien Bestand keinen Anschluss finden (der
+  Build zählt sie).
+* **Gemessen am 25.09.2026 (erster echter Lauf):** Der WRDS-Account der FU darf CRSP
+  nicht lesen („permission denied for schema crsp_a_stock“) — die Tabellen sind
+  sichtbar, die Zeilen nicht. Der Build prüft das jetzt vorab (eine Zeile lesen) und
+  fällt mit klarer Meldung auf den freien US-Bestand zurück. Der US-Teil bleibt damit
+  vorerst überlebendenbasiert; der Code liegt bereit, falls die Lizenz kommt.
+  Compustat Global dagegen ist lesbar: 9.020 Firmen in DEU/JPN, 8,8 Mio. Tageskurse.
+  Abweichende Namen dort: Jahresüberschuss `nicon`, Aktien `cshoi`, kein `gp`, im
+  Quartal `ibq` statt `niq`, kein `rdq` — alle über Ausweichnamen abgefangen.
+* **CRSP im aktuellen Format (CIZ)**: CRSP hat das Legacy-Format mit Dezember 2024
+  eingestellt; ein aktuelles Abo hat vermutlich nur `crsp.dsf_v2` und
+  `crsp.stksecurityinfohist`. Der Download nimmt CIZ, wenn lesbar, sonst Legacy. Das
+  Einlesen übersetzt CIZ in die Legacy-Form: Aktienfilter wie Tidy Finance
+  (`sharetype 'NS'`, `securitytype 'EQTY'`, `securitysubtype 'COM'`, US-Firma, NYSE/
+  AMEX/Nasdaq); die Split-Basis wird aus der Kursrendite ohne Dividenden (`dlyretx`)
+  rückgerechnet, weil CIZ keinen kumulierten Faktor führt; die Delisting-Rendite steht
+  in CIZ in einer eigenen Zeile (`dlydelflg = 'Y'`) und wird von dort gelesen. Test:
+  dieselben Testdaten in beiden Formaten ergeben denselben Bestand. Spaltennamen aus
+  dem `tidyfinance`-Paket (PyPI) abgeglichen, das dieselben WRDS-Abfragen stellt.
+* **Zweiter WRDS-Account für CRSP** (`WRDS_CRSP_USERNAME`/`_PASSWORD`), weil die FU
+  CRSP nicht lizenziert; der Nutzer beantragt einen USYD-Account.
+* **Länderfilter** (`country`, ISO-3 des Handelsplatzes: USA, JPN, DEU, …) im
+  Screening-Rahmen beider Wege, als Filterfeld für den Chat („japanische Aktien“ →
+  `country == "JPN"`) und als Auswahl „Market“ in der Seitenleiste, sobald der Bestand
+  mehr als einen Markt hat. `CACHE_VERSION` → `v9` (Cache neu wärmen).
+* **Gefunden beim Test dazu:** `copy_us` löschte beim Übernehmen des US-Bestands die
+  Wechselkurse aus Compustat (`JPYUSD=X` …); danach wäre jede Nicht-US-Firma mit „no
+  exchange rate“ ausgeschlossen worden. Ersetzt werden jetzt nur die Reihen, die der
+  freie Bestand selbst liefert. Test schlug vorher fehl.
+* Nebenbei behoben: `research.peers` gab bei fehlender Branche eine Tabelle ohne Spalten
+  zurück, der Comps-Bereich stürzte ab.
+
+**Verifikation 25.09.2026 (lokale Sitzung):** Der Build aus dem Zwischenlager
+(`--from-dir=data/cache/wrds --us=free`) ist durchgelaufen; `data/world.duckdb` ist
+4,9 GB. Gezählt: 10.914 Linien = 5.364 US (aus dem freien Bestand kopiert) + 5.550
+Compustat Global + 0 CRSP (FU-Account ohne Lizenz, wie gemessen). Die Compustat-
+Abdeckung ist nur für **DEU (863 Firmen, 692 handelnd) und JPN (4.663 / 4.028)**
+vollständig — die anderen Standardländer kommen mit einstelligen Restzahlen (GBR 5,
+FRA 3, AUT 5, …) aus Firmen mit Doppelnotiz, weil das Zwischenlager nur die
+DEU/JPN-Testläufe ab 2020 enthält. Kurse laufen bis 2026-09-25 (die US-Fortschreibung
+aus dem freien Bestand greift), die FRED-Serien sind mitkopiert. Rauchtest
+`WorldSource.screening_frame(2026-06-30)`: 10.047 Zeilen (USA 5.305, JPN 4.031,
+DEU 695), Länderfeld befüllt. Testsuite als Grundlinie: 631 grün, 1 übersprungen.
+**Nächster Schritt:** voller Download aller 21 Standardländer ab 2010
+(`scripts/build_wrds.py`, Duo-Freigabe nötig); abgeschlossene DEU/JPN-Jahre im
+Zwischenlager werden übersprungen, 2010–2019 wird für sie nachgeholt.
+
+**Gemessen am 26.09.2026 (voller Download, lokale Sitzung):** Der erste Lauf brach
+nach ~12 Stunden bei Italien 2026 ab („SSL connection has been closed unexpectedly“
+— WRDS trennt lange Verbindungen); der Neustart setzte dank des Jahr-für-Jahr-
+Zwischenlagers nahtlos an der Bruchstelle auf. Ergebnis (`world.duckdb`, 10,5 GB):
+**22.139 Compustat-Global-Firmen** (JPN 5.337, AUS 2.997, GBR 2.724, HKG 1.752,
+DEU 1.574, …; dazu Doppelnotizen in KOR, ZAF, TWN u. a. in einstelliger Zahl),
+**58,9 Mio. Compustat-Tageskurse** (74,9 Mio. mit US-Anteil), **16,0 Mio. Fakten**,
+davon 13,3 Mio. (83 %) auf geschätztem Meldedatum — wie erwartet, Jahresabschlüsse
+haben kein echtes in Compustat Global. **Kein einziger Kurs ohne Wechselkurs**
+(`price_rows_without_rate = 0`). US-Teil: 5.364 Linien aus dem freien Bestand,
+Kurse bis 25.09.2026. Rauchtest `WorldSource.screening_frame(2026-06-30)`:
+18.900 Zeilen, alle 21 Länder vertreten, Länderfeld befüllt. Testsuite grün.
+**CRSP:** Der USYD-Account (Zugangsdaten in `.env.local` als `WRDS_CRSP_*`)
+wartet noch auf die Freischaltung der CRSP-Lizenz; danach
+`scripts/build_wrds.py --countries=none` — die Prüfung `crsp.readable()` fängt
+eine fehlende Lizenz ab. Bis dahin bleibt der US-Teil überlebendenbasiert
+(`survivorship_free = False` für den Welt-Bestand).
+
+**Stufe B auf dem vollen Welt-Bestand, gemessen am 27.09.2026:** Der PIT-Zwischenspeicher
+wurde für den Welt-Bestand gewärmt (60 Stichtage neu gerechnet, ~64 s je Rahmen wegen der
+25 Mio. Fakten, gesamt 2:39 h; `warm_pit_cache.py` folgt jetzt der gewählten Quelle).
+Ein voller Lauf 2011-01-03 bis 2024-09-24 (Holdout-Regel greift, 55 von 63 Stichtagen)
+mit einem Value-Screen (KGV ≤ 5, KBV ≤ 2, 30 Titel, quartalsweise) brauchte **7 Sekunden,
+55/55 Cache-Treffer** — die 5-Minuten-Grenze aus Phase 8 ist auf dem vollen Bestand
+eingehalten; kalt wären es ~55 Minuten. Ergebnis zur Plausibilität: 5,7 % p. a. gegen
+13,8 % S&P 500 TR (−8,1 Prozentpunkte) — passt zur dokumentierten Deep-Value-Schwäche
+dieses Fensters; die Rechnung schmeichelt nicht.
+
+**Befund 01.10.2026 (lokale Sitzung) — das tägliche Update verwaist den PIT-Cache:**
+Der werktägliche Launchdienst (`com.moritzfriedrich.portfoliolab.briefing`, Mo–Fr 10:00)
+bringt die Kurse auf den Tagesstand. Der Cache-Schlüssel ist der Fingerabdruck des
+Snapshots (Quelle, neueste Kurszeile, Zeilenzahlen, `snapshot()` in `data/free.py`) —
+der ändert sich mit **jedem** Tagesupdate, also sind nach jeder Aktualisierung alle 63
+Rahmen verwaist und Stufe B läuft kalt. Gemessen: Build-Kennungen `2c79ada07b` (World,
+gewärmt 27.09.) und `9592b54c09` (Free, 25.09.) galten nicht mehr; die aktuellen waren
+`b9b5f92eb6` / `30e55a1712`. In der Nacht auf den 02.10. wurden beide Caches neu gewärmt
+(Free ~8 min, World ~2:40 h) — gültig bis zum nächsten 10-Uhr-Update.
+**Offene Entscheidung (Nutzer):** (1) Morgenjob wärmt Free täglich mit (+8 min CPU),
+World wöchentlich zusammen mit `build_wrds.py`; (2) World unter der Woche kalt lassen;
+(3) Cache-Schlüssel entschärfen (alte Rahmen über Tagesupdates behalten — ändern sich
+fast nie, Ausnahme: verspätete Nachmeldung alter Perioden; schwächt eine bewusst
+konservative Schutzregel, bräuchte Test und Doku). Empfehlung der Sitzung: 1 + 2.
+
+**Entschieden 02.10.2026 (Nutzer): 1 + 2, umgesetzt (lokale Sitzung).**
+* `morning_briefing.py` wärmt nach einem erfolgreichen Kurs-Update den Free-Cache neu
+  (`warm_pit_cache.py --source=free --prune`, ~8 min). Nach dem Mailversand, damit das
+  Briefing nicht wartet; im `finally`, also auch wenn das Briefing scheitert oder nichts
+  verfolgt wird; im Vordergrund, weil launchd beim Jobende die ganze Prozessgruppe
+  beendet. Scheitert das Kurs-Update, wird nicht gewärmt — der Fingerabdruck ist dann
+  unverändert, die alten Rahmen gelten weiter.
+* **World wöchentlich wärmen lohnt nicht:** `build_prices.py` frischt täglich auch die
+  US-Hälfte des Welt-Bestands auf (`refresh_world_store`), also ändert sich auch dessen
+  Fingerabdruck jeden Werktag. Ein wöchentlicher Lauf (2:40 h) hielte nur bis zum
+  nächsten Morgen. World bleibt unter der Woche kalt (Option 2); wer dort viele
+  Stufe-B-Läufe plant, wärmt vorher von Hand.
+* **Aufräumen:** jeder verwaiste Free-Build wiegt ~39 MB, täglich gewärmt wären das
+  ~10 GB/Jahr. `pit_cache.prune()` löscht Builds, deren neueste Datei älter als 7 Tage
+  ist (nach Alter, nicht „alles außer dem aktuellen“, weil das Verzeichnis nicht weiß,
+  zu welcher Quelle ein Build gehört — ein zwei Tage alter World-Build kann noch gültig
+  sein), dazu alte `CACHE_VERSION`-Ordner. Löschen ändert nie ein Ergebnis.
+* Tests: `test_pit_cache.py` (Pruning: aktuell und jung bleibt, alt und alte Version
+  geht; leerer Cache harmlos), `test_morning_briefing.py` (Befehl, kein Wärmen nach
+  gescheitertem Update, Wärmen auch bei gescheitertem Briefing). Alle fünf scheitern
+  ohne die Änderung. **Ungetestet:** der echte launchd-Lauf — erster Beleg ist
+  `data/briefings/run.log` am nächsten Werktag (Zeile „pit cache warmed …“).
+
+**Nebenbei:** MONITOR hat einen Umschalter Dollar ↔ Gold. Indizes und Aktien in Unzen,
+Währungen in Milligramm Gold je Einheit, fremde Indizes erst zum Tageskurs in Dollar;
+Renditen, Dollar-Index und Kreuzkurse bleiben (keine Währung). Die dafür nötigen
+Dollarkurse (`CAD`, `BRL`, `CHF`, `JPY`, `HKD`, `CNY`, `KRW`, `INR`) speichert
+`build_world.py` mit.
+
 ## Nachtrag 24.09.2026 (Cloud-Sitzung) — Papierdepots, Einzeltitel-Regeln, Chart
 
 Auf Zuruf des Nutzers, außerhalb der Phasenliste:
@@ -791,6 +978,294 @@ unbereinigten Reihe, aus der die Kerzen gezeichnet werden.
 **Nebenbefund, der einen Ladefehler verhindert hat:** `open_market_for_rebuild()` hat die
 Migrationen übersprungen. Solange nie eine Spalte dazukam, fiel das nicht auf; der erste
 Aufbau auf einer Kopie hätte gegen die alte Tabelle geschrieben und wäre gescheitert.
+
+## Geprüft und verworfen: Kronos als Kursprognose (02.10.2026, lokale Sitzung)
+
+**Anlass:** Ein Instagram-Reel („$24,000/year terminal vs. a free model“) stellte ein
+freies Prognosemodell vor. Nach den Einblendungen (Open Source, Kerzen, „45 global
+exchanges“, Fächer möglicher Pfade) ist es **Kronos** (`shiyu-coder/Kronos`, MIT,
+Tsinghua, AAAI 2026; Modelle `NeoQuasar/Kronos-mini|small|base`, `large` nicht frei).
+Kommentare tippten auf TimesFM (Google) — unwahrscheinlich: TimesFM ist ein allgemeines
+Zeitreihenmodell, nicht auf Börsenkerzen trainiert.
+
+**Test, außerhalb des Projekts (Zwischenordner, nichts eingebaut):** Kronos'
+Vortraining endet im **Juni 2024**, also nur Prognosen ab Juli 2024. Kurse aus
+`market.duckdb` (Free), Auswahl der Aktien zum 28.06.2024 (Kurs > $5, Median-Umsatz
+60 T > $20 Mio., 40 zufällig, Seed 7; nur Überlebende — Free-Bestand). Pfade einzeln
+gezogen (`predict_batch` mit `sample_count=1`; `predict` *mittelt* die Pfade intern).
+Vergleich gegen „bleibt wie heute“ (Random Walk), „immer aufwärts“, Momentum, und ein
+Band aus der 60-Tage-Volatilität (log-normal, √h).
+
+* **Haupttest** (small, 256 T Vorlauf, 20 T Horizont, 20 Pfade, 9 Zeitpunkte
+  07/2024–10/2025, 350 Prognosen): Richtung 46 % (immer aufwärts 58 %), MAE 14,4 %
+  (Random Walk 7,6 %), RankIC −0,05 (t −0,7), 80-%-Band hält 23 % (Vol-Band 82 %).
+* **Gegenprobe** (20 Aktien × 6 Zeitpunkte bzw. 120 künstliche Random Walks, 10 Pfade):
+
+  | Variante | nach Anstieg: Prognose (tats.) | nach Fall | MAE Kronos / RW | 80-%-Band (Vol-Band) |
+  |---|---|---|---|---|
+  | Zufall, small, 256/20 | −11,2 % (−1,5 %) | +5,1 % (+1,3 %) | 11,7 / 7,1 % | 20 % (79 %) |
+  | Zufall, base, 256/20 | −9,2 % (−1,5 %) | +9,9 % (+1,3 %) | 14,3 / 7,1 % | 12 % (79 %) |
+  | echt, small, 400/20 | −13,3 % (+1,4 %) | +3,9 % (−4,5 %) | 13,6 / 9,3 % | 34 % (74 %) |
+  | echt, small, 400/5 | −8,0 % (+0,7 %) | −0,2 % (−1,9 %) | 7,9 / 4,4 % | 39 % (79 %) |
+  | echt, base, 400/20 | −11,1 % (+1,4 %) | +12,8 % (−4,5 %) | 20,2 / 9,3 % | 12 % (74 %) |
+  | echt, base, 400/5 | −8,1 % (+0,7 %) | +6,8 % (−1,9 %) | 14,5 / 4,4 % | 21 % (79 %) |
+
+**Befund:** Kronos kehrt jeden jüngsten Trend um und ist viel zu selbstsicher — auch auf
+reinen Zufallskursen, wo „im Mittel unverändert“ richtig ist. Es liegt also am Modell,
+nicht an unseren Daten; der Aufbau entspricht dem offiziellen Tagesbeispiel
+(`examples/prediction_cn_markets_day.py`, 400 T Vorlauf, `amount = Kurs × Volumen`).
+Das größere `base` ist schlechter als `small`. Kein Horizont, kein Vorlauf schlägt den
+Random Walk. **Entscheidung (Nutzer, 02.10.2026): nicht einbauen.** Wer eine Bandbreite
+in RESEARCH will: das Band aus der 60-Tage-Volatilität trifft sein Soll (74–82 % bei
+80 %), ohne PyTorch.
+
+**Nicht geprüft:** chinesische/asiatische Börsen und Intraday-Daten, auf denen das Paper
+misst; Feinabstimmung (Fine-Tuning) auf US-Daten; Kronos-mini.
+
+### TimesFM 3.0 (Google) — getestet 02.10.2026
+
+`google-research/timesfm`, Gewichte 3.0 unter `timesfm-non-commercial-license-v1.0`
+(privat erlaubt, kommerziell nur über Google Cloud; 2.5 ist Apache-2.0). Vortraining:
+GiftEval-Pretrain, Wikipedia-Aufrufe bis 11/2023, Google Trends bis 2022, synthetisch —
+**keine Börsenkurse**, Testzeitraum ab 07/2024 also sauber. MLX-Backend für Apple
+Silicon, ohne PyTorch: ~20.000 Prognosen in 1–3 min (in Paketen à 500; alles auf einmal
+belegte bei 1.024 T Vorlauf **16 GB**). Univariat auf dem split-bereinigten Schlusskurs,
+Dezile direkt aus dem Modell. 200 Aktien (Auswahl wie oben, Stand 28.06.2024), alle 5
+Handelstage ab 01.07.2024; t-Werte nur über nicht überlappende Zeitpunkte.
+
+| Vorlauf/Horizont | Richtung (immer auf) | MAE (Random Walk) | 80-%-Band (Vol-Band) | RankIC | Risiko-Rang: Breite (Vol 60 T) |
+|---|---|---|---|---|---|
+| 256/20 | 50,7 % (52,6 %) | 8,92 % (8,34 %) | 71 % (80 %) | +0,024, t 1,3 | +0,28 (+0,30) |
+| 1024/20 | 50,6 % (52,5 %) | 8,63 % (8,37 %) | 76 % (80 %) | −0,009, t −0,4 | +0,31 (+0,30) |
+| 256/5 | 50,9 % (52,5 %) | 4,26 % (4,08 %) | 77 % (82 %) | +0,016, t 1,5 | +0,31 (+0,29) |
+| 1024/5 | 50,3 % (52,5 %) | 4,17 % (4,09 %) | 78 % (82 %) | +0,009, t 1,0 | +0,32 (+0,29) |
+
+**Befund:** keine Trendumkehr wie bei Kronos (nach Anstieg −0,2 bis −1,2 %, tatsächlich
++0,1 bis +0,9 %), MAE knapp über dem Random Walk, Bänder etwas zu eng, Risiko-Rangfolge so
+gut wie die 60-Tage-Volatilität. Keine belastbare Renditeprognose (alle |t| < 2). Bringt
+nichts, was das Vol-Band nicht schon kann.
+
+### Agent „stock-price-movement-predictor“ — Rücktest 02.10.2026
+
+`ChrisRoyse/610ClaudeSubagents/agents/stock-price-movement-predictor.md`: kein Modell,
+nur eine Rollenanleitung für Claude (RSI, MACD, Fundamentaldaten, Stimmung; nennt
+Bloomberg als Quelle, ohne Zugriff). **Aufbau:** Stichtage nach Claudes Wissensstand
+(~06/2026): 01.07. und 03.08.2026, Horizont 20 Handelstage; 40 Aktien (Kronos-Auswahl),
+8 Claude-Subagenten mit je 10 Aktien. Jeder bekam nur ein Datenpaket bis zum Stichtag
+(260 T OHLCV, point-in-time-Kennzahlen aus `derive_metrics(screening_frame)`, S&P 500),
+Websuche und Datenbank verboten, Lösungen getrennt abgelegt. Alle 8 Dateien geprüft
+(richtige Ticker, Spannen um den letzten Kurs). Vergleich auf denselben 80 Fällen:
+
+| | Richtung | MAE | 80-%-Band | RankIC Jul / Aug |
+|---|---|---|---|---|
+| Agent | 57 % | 8,19 % | 82 % | −0,10 / −0,10 |
+| TimesFM 3.0 (256/20) | 57 % | 9,10 % | 66 % | −0,03 / −0,15 |
+| immer auf / Random Walk / Vol-Band | 64 % | 8,22 % | 82 % | – |
+
+Brier-Score der Wahrscheinlichkeiten 0,246 (Münzwurf 0,250, Basisrate 0,231). Alle
+Wahrscheinlichkeiten 47–58 %; bei „fällt“ (9 Fälle) 2 Treffer. Das Band ist praktisch
+das Vol-Band (Breite 24,5 % gegenüber 24,7 %; ein Subagent schrieb, er habe es genau so
+gerechnet). ~65.000 Token je 10 Aktien. **Nur 80 Fälle an 2 Tagen, Juli stark (70 %
+gestiegen)** — statistisch dünn, aber nirgends ein Vorteil.
+
+**Gesamtentscheidung (Nutzer, 02.10.2026):** keines der drei einbauen. Rangfolge
+TimesFM > Agent > Kronos, keines schlägt die einfachen Regeln. Für eine Bandbreite in
+RESEARCH ist das 60-Tage-Vol-Band die ehrliche Wahl (80–82 % bei 80 % Soll).
+**Technik (Kronos), falls je wieder:** braucht PyTorch (~770 MB Umgebung) und GPU (MPS, M4).
+Kein KV-Cache — jeder Schritt rechnet den ganzen Verlauf neu: 800 Pfade auf einmal
+brauchten 40–75 min je Zeitpunkt, in Paketen à 100 nur ~4 min für 1.200. `base` mit
+400 T Vorlauf und Paketen à 100 belegte **13 GB** und lagerte aus (16-GB-Mac);
+Pakete à 20 plus `torch.mps.empty_cache()` hielten es bei ~2,4 GB. Einen Tokenizer
+nicht zwischen Geräten teilen (sein Rotary-Cache bleibt auf dem alten Gerät).
+
+## Umgesetzt: Risikospanne mit Log-HAR in RESEARCH (02.10.2026, lokale Sitzung)
+
+**Anlass:** Recherche „was lohnt sich wirklich“, danach drei vorhersagende Ansätze
+getestet (Risiko-Modell, Anomalien, Lazy Prices). Nur das Risiko-Modell hat klar
+bestanden; der Nutzer hat „integrier mal“ gesagt.
+
+**Was:** `volforecast.py` — Log-HAR nach Corsi plus Ein-Jahres-Term, *gepoolt* über ~200
+liquide US-Aktien (`sample_tickers`: kein `.`/`^`/`=`, Median-Umsatz 90 T > $5 Mio.,
+Kurs > $5, drei Jahre Historie, Auswahl per Hash des Tickers, also stabil), geschätzt
+nur mit Daten bis zum Stichtag. Zurück aus Logs mit Duans Smearing; die 80-%-Spanne nimmt
+den Multiplikator, der in den Schätzdaten 80 % der 20-Tage-Bewegungen hielt (statt 1,28).
+RESEARCH zeigt unter den Kennzahlen „VOL MODEL 20D“, „VOL 60D“ und „80% RANGE“, um den
+heutigen Schluss **zentriert** — Breite, nie Richtung. Nur für US-Linien (Ticker ohne
+Punkt); für `TIC.CTY` gibt es keine Zahl, weil dort nicht gemessen. Modell
+`st.cache_data` 1 h, Schätzung ~0,5–1 s.
+
+**Gemessen** (Forschungsskript, 200 Aktien der TimesFM-Auswahl, Ursprünge alle 5 Tage
+2013–2026, Neuschätzung alle 250 Tage nur auf Vergangenem, 126.480 Prognosen):
+
+| | QLIKE | Rangkorr. mit realisierter Varianz | 80-%-Band |
+|---|---|---|---|
+| 60-Tage-Vol (bisher) | 0,482 | 0,710 | 81 % |
+| EWMA (λ 0,94) | 0,478 | 0,683 | 79 % |
+| HAR/Log-HAR ohne Jahresterm | 0,507 / 0,402 | 0,640 / 0,650 | 86 / 84 % |
+| **Log-HAR + Jahresterm** | **0,397** | **0,736** | 83 %, kalibriert **78 %** |
+
+Ohne Jahresterm zieht das gepoolte Modell jede Aktie zum Marktmittel (schlechtere
+Rangfolge); genau eine Erweiterung (die in der Literatur übliche) wurde probiert, keine
+weitere, um nicht an die Testdaten anzupassen.
+
+**Das Modul selbst nachgeprüft** (jährlich mit `fit_from_store` auf Daten bis Vorjahresende,
+auf den 200 Testaktien, 122.550 Prognosen 2014–2026): QLIKE 0,382 gegenüber 0,483 für
+die 60-Tage-Vol (−21 %), Rangkorrelation 0,677 gegenüber 0,642, Spanne hält 78,3 %
+(je Jahr 75–83 %, auch 2020 und 2022).
+
+**Dabei gefunden:** eingefrorene Kurse. Eine Stichprobenlinie hatte 1.741 unveränderte
+Schlusskurse; auf dem `EPS`-Boden trieb deren Log-Varianz Duans Faktor auf 9,7 und jede
+Prognose auf das ~2,6-Fache (AAPL 74 % statt ~28 %). Fenster mit mehr als 5 unveränderten
+Schlüssen in 22 Tagen trainieren nicht und bekommen keine Prognose. Test
+`test_a_frozen_price_is_a_gap_not_calm` schlägt ohne diesen Schutz fehl (geprüft).
+
+**Ungetestet:** Nicht-US-Linien, andere Horizonte als 20 Tage, Schätzung auf dem
+Welt-Bestand (dort zieht die Auswahl dieselben US-Linien; geprüft: identische
+Koeffizienten wie im Free-Bestand).
+
+**Anomalien (Open Source Asset Pricing, Chen & Zimmermann), nur gemessen, nicht
+eingebaut:** 165 in der Originalstudie klar signifikante Signale, Long-Short bis 12/2024.
+Originalmethode: im Stichprobenzeitraum +0,75 %/Monat, nach Veröffentlichung +0,30 %
+(40 %), alle zusammen 2015–2024 +0,30 %, t 3,8. Wertgewichtete Dezile (realistischer):
++0,58 → +0,19 % (24 %), zusammen 2015–2024 +0,16 %/Monat, **t 1,7**, vor Kosten. Am
+stabilsten: Momentum 6 M, Analysten-Revisionen, Aktienausgabe, Optionssignale.
+
+**Lazy Prices (Cohen, Malloy & Nguyen, JF 2020), nur gemessen, nicht eingebaut:** Das
+Paper meldet „bis zu 188 Bp pro Monat“ für Nicht-Änderer minus Änderer (Stichprobe bis
+2014, beste von mehreren Varianten). Test: 500 zufällige US-Firmen (Kurs ab 2014,
+Umsatz 2015 > $1 Mio./Tag), 5.493 10-K-Hauptdokumente von der SEC (`submissions`-API,
+< 8 Abrufe/s, nur Wortzählungen gespeichert), 4.972 Paare aufeinanderfolgender Jahre.
+Signal ab dem Einreichungsdatum, jeden Monatsende das jüngste der letzten 12 Monate,
+Quintile, gleichgewichtete Gesamtrendite (`close_adj`) im Folgemonat, 140 Monate
+2015-02 bis 2026-09, Median 433 Firmen je Monat. Komplett außerhalb der Paper-Stichprobe.
+
+| Maß (beide aus dem Paper) | Spanne der Ähnlichkeit (10–90 %) | Q5−Q1 pro Monat | t |
+|---|---|---|---|
+| Kosinus auf Wortzählungen | 0,996–0,999 (kaum Streuung) | −0,15 % | −0,85 |
+| Jaccard auf Wortmengen | 0,836–0,936 | +0,002 % | +0,01 |
+
+**Befund:** kein Effekt, in beiden Teilzeiträumen (2015–19, 2020–26). Grenzen: nur
+Überlebende des Free-Bestands, ganze 10-K statt einzelner Abschnitte, keine 10-Q,
+Rohrenditen statt Faktor-Alpha, gleichgewichtet. Ein Effekt in der Größe des Papers
+hätte trotzdem sichtbar sein müssen.
+
+## Schiffe, Züge, Flugzeuge — reale Mengenströme (02.10.2026, lokale Sitzung)
+
+**Frage des Nutzers:** kostenloses Tracking von Schiffen und Flugzeugen („Flightradar“).
+**Entscheidung:** keine Live-Karte, sondern Tageszählungen als Zeitreihe — die sagen etwas
+über Rohstoffe und Frachtraten, Punkte auf einer Karte nicht.
+
+**Geprüft und nicht genommen:**
+- Live-Positionen (OpenSky, adsb.lol, AISStream): kostenlos, aber ohne Historie; AIS an
+  Land reicht nur ~50 km vor die Küste. Flightradar24 hat nur eine kostenpflichtige API.
+- Uni-Zugänge: FU hat LSEG Workspace for Students (Commodity Data, sogar CRSP — als
+  Plan B für Stichproben denkbar), aber nur Konten bis 2 Monate und nur wissenschaftliche
+  Nutzung; Schiffsdaten dort nicht bestätigt. DBIS (Clarksons usw.) blieb hinter einem
+  Captcha ungeprüft. USYD-Bibliothek: keine Schiffs-/Flugdaten gefunden. **Wichtig:** die
+  USYD-Nutzungsbedingungen verbieten, Inhalte ihrer Datenbanken in generative KI zu
+  geben. Ob das auch für Daten über das USYD-WRDS-Konto (CRSP) gilt, ist **ungeklärt** —
+  vor dem CRSP-Lauf klären, denn Briefing/Zusammenfassungen schicken Daten an Claude.
+
+**Gebaut:**
+- `shipping.py` + `scripts/build_shipping.py`: IMF PortWatch, tägliche Durchfahrten durch
+  28 Meerengen nach Schiffstyp, seit 2019-01-01, kein Schlüssel (ArcGIS-Dienst
+  `Daily_Chokepoints_Data`, 1.000 Zeilen je Seite). Erster Lauf 79.156 Zeilen in ~55 s,
+  Folgeläufe holen nur die letzten 30 Tage neu (PortWatch revidiert). Stand am
+  02.10.2026: neuester Tag 27.09.2026, also ~5 Tage Verzug.
+- Zwei Tabellen: `chokepoint_transits` (jeweils neuester Wert) und `chokepoint_first`
+  (erster gesehener Wert mit Datum, nie überschrieben — R13). Die Zeitpunkt-Treue beginnt
+  erst mit dem ersten Download; vorher tragen alle Zeilen dessen Datum. Nichts davon
+  fließt in einen Backtest.
+- COMMODITIES-Tab: 7-Tage-Schnitt Schiffe/Tag und Tanker/Tag, Veränderung gegen dieselbe
+  Woche ein Jahr früher (Saison fällt heraus), Chart je Schiffstyp. Eine Lücke ist eine
+  Lücke, keine null Schiffe (Test).
+- FRED, neue Gruppe „US transport“: Güterzug-Waggonladungen, Container auf der Schiene,
+  Fluggäste, Auslastung (BTS, monatlich, 2–3 Monate Verzug). Tägliche Zug- oder Flugzahlen
+  mit Historie gibt es kostenlos nicht; Eurocontrol (Europa, täglich) wäre ein späterer
+  Schritt.
+- `build_prices.py` aktualisiert PortWatch täglich, sobald es einmal gespeichert ist;
+  `copy_us` bringt beide Tabellen in den Welt-Bestand.
+- Weltkarte darüber (`charts.chokepoint_map`, Plotly `Scattergeo`): Kreisfläche = Schiffe
+  bzw. Tanker pro Tag, Farbe = Veränderung zum Vorjahr, bei ±50 % gekappt (sonst macht
+  Hormus mit −96 % alles andere grau). Plotlys eingebaute Küstenlinien, keine
+  Kartenkacheln von fremden Servern — läuft offline. Koordinaten fest in
+  `shipping.COORDS` (aus PortWatch, 02.10.2026). Feste Namensschilder wurden verworfen:
+  Suez/Bab el-Mandeb/Hormus und die Straßen um Taiwan überlappten; Namen per Hover.
+- **Flugzeuge** (`aviation.py`, `scripts/build_air.py`): dritte Kartenansicht „aircraft
+  now“ — alle Flugzeuge in der Luft von OpenSky (anonym, kein Schlüssel, ~3 s, 4 von
+  400 Tages-Credits je weltweitem Abruf; die App hält einen Abruf 15 min vor), als
+  Dichte in 3°-Zellen statt 6.000 Einzelpunkten. Dazu eine Tabelle nach groben Regionen
+  (Kästen, erster Treffer gewinnt — Naher Osten vor Afrika/Asien). OpenSky hat keine
+  kostenlose Historie, deshalb speichert `build_prices.py` je Lauf einen Schnappschuss
+  pro Region (`air_traffic`, auch in den Welt-Bestand kopiert). Erster Schnappschuss
+  02.10.2026 03:14 UTC: 6.358 in der Luft — Nordamerika 3.533, Asien-Pazifik 1.668,
+  Europa 812 (Nacht in Europa). **Die Tageszeit verändert die Zahlen um ein Mehrfaches**;
+  nur Schnappschüsse zur gleichen Uhrzeit sind vergleichbar. Der Mac läuft auf
+  Sydney-Zeit, der Morgen-Job um 10:00 trifft also ~00:00 UTC.
+
+**Gegen die Wirklichkeit geprüft:** Hormus fällt am 01.03.2026 von ~100 auf 0–4 Schiffe
+pro Tag (127 am 22.02., 57 am 28.02., 20, 4, 0 am 04.03.) — genau die öffentlich
+berichteten Zahlen nach den Angriffen von USA/Israel auf Iran am 28.02.2026. Stand
+27.09.2026: 3 Schiffe/Tag, −96 % zum Vorjahr; Bosporus −46 %; Kertsch 0.
+
+**Bekannte Grenzen:** Schiffe mit abgeschaltetem Transponder fehlen (Schattenflotte —
+Tanker durch Hormus und das Schwarze Meer systematisch zu niedrig). Ungeprüft: wie stark
+PortWatch alte Tage nachträglich ändert; `chokepoint_first` misst das ab jetzt.
+Flugzeuge: Abdeckung folgt den freiwilligen Empfängern (dicht in Europa/Nordamerika,
+dünn über Ozeanen, Afrika, Russland, China); Militär sendet oft nicht; ein Umbau des
+Empfängernetzes verschiebt die Zahlen. Ein Sprung in `air_traffic` ist zuerst verdächtig.
+Nebenbei gefunden: FRED `LRHUTTTTEZM156S` (Euro-Arbeitslosigkeit) endet im Januar 2023,
+die Zeile im MACRO-Tab ist also veraltet.
+
+## Geplant: Hebel und Derivate (vorgemerkt am 25.09.2026, noch nicht begonnen)
+
+Auf Frage des Nutzers („gibt es die Option für Derivate und Leverage?“) nur in den Plan
+aufgenommen — **nichts davon ist gebaut**. Der Nutzer entscheidet, wann und was.
+
+**Ist-Stand:**
+* OPTIONS-Reiter: Mehrbein-Positionen aus Calls, Puts und Aktien (long/short, Vorlagen),
+  Auszahlung bei Fälligkeit, Wert heute, Greeks, implizite Volatilität (selbst per
+  Bisektion aus Black-Scholes), Fläche, erwartete Schwankung, Wahrscheinlichkeit über
+  einem Niveau; je Portfolio gespeichert. Nur Live-Kurse von Yahoo, kein Backtest.
+* Futures nur als Kursreihen (MONITOR, COMMODITIES), keine Positionen.
+* Backtests (Stufe A/B), Papierdepots und LAB: nur long, voll investiert, kein Kredit,
+  keine Leerverkäufe.
+
+**Vorgemerkt, in empfohlener Reihenfolge:**
+
+1. **Hebel in Stufe A/B, Papierdepots und LAB** (Vorschlag: zuerst).
+   Faktor einstellbar (z. B. 1,0–3,0×). Kreditzins auf den geliehenen Teil = kurzer
+   Zins (`^IRX`) + Aufschlag (Einstellung), täglich belastet. Wartungsmarge
+   (Einstellung, z. B. 25 %): fällt das Eigenkapital darunter, Zwangsverkauf zur
+   nächsten Eröffnung (R16-Logik), Kosten wie jeder Handel (R8); ein Tag unter null =
+   Totalverlust, ausgewiesen. Bericht nennt Zinskosten, Anzahl Margin Calls und den
+   schlechtesten Stand des Eigenkapitals. Prüfung: Hebel 1,0 = heutiges Ergebnis auf
+   den Cent; Hand-Rechnung einer Reihe mit bekanntem Einbruch, die genau einen Margin
+   Call auslöst.
+2. **Leerverkäufe in LAB** (Einzeltitel-Regeln): Verkaufssignal eröffnet eine
+   Short-Position statt nur auszusteigen. Leihgebühr p. a. (Einstellung, schwer
+   leihbare Titel sind in Wahrheit teurer — nicht messbar mit freien Daten, daher als
+   Annahme ausweisen), Dividenden werden dem Leerverkäufer belastet. Delisting einer
+   Short-Position: Gewinn nur bis zum letzten Kurs, keine Annahme zugunsten des Nutzers.
+3. **Gehebelte ETFs simulieren** (2×/3× mit täglicher Neugewichtung, Kosten p. a.):
+   zeigt den Volatilitätsverlust in Seitwärtsmärkten; Vergleich gegen echte Produkte
+   (z. B. `SSO`, `UPRO`) als Plausibilitätsprüfung, wo Yahoo sie führt.
+4. **Backtest von Optionsstrategien.** Zwei Wege, klar getrennt ausweisen:
+   * *Näherung:* Preise per Black-Scholes aus historischer Volatilität (bzw. VIX für
+     den Index) — deutlich als Schätzung etikettiert (R12), ohne Skew und ohne echte
+     Geld-Brief-Spannen, beides ist zu nennen.
+   * *Echt:* historische Optionsdaten aus **OptionMetrics (IvyDB) über WRDS**, falls FU
+     oder USYD es lizenzieren (auf der WRDS-Seite prüfen: blau = lizenziert). Dann
+     eigene Datenstrecke wie `data/crsp.py`, Point-in-Time-Regeln unverändert.
+5. **Futures-Positionen** (Rohstoffe, Index) mit Initial-/Wartungsmarge und Rollen der
+   Kontrakte — nur, wenn 1–4 stehen; fortlaufende Kontraktreihen mit Rollrendite
+   brauchen eine eigene Datenquelle, Yahoos `=F`-Reihen sind nur der Frontmonat.
+
+**Regeln, die dafür gelten müssen:** R16 (Ausführung zur nächsten Eröffnung, auch bei
+Zwangsverkauf), R8 (Kosten je Handel), R18 (Delisting), R12 (Etikett nennt jede Annahme:
+Zinsaufschlag, Leihgebühr, Modellpreise), R23 (keine Empfehlung — Hebel wird gezeigt,
+nicht angeraten). Die Oberfläche soll bei Hebel > 1 sichtbar machen, dass Verluste über
+den Einsatz hinaus möglich sind.
 
 ## Build Phases
 

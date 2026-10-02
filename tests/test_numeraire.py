@@ -1,14 +1,12 @@
 """Pricing in gold instead of dollars: the unit changes, the arithmetic must not."""
 import datetime as dt
 
-import duckdb
 import pandas as pd
 import pytest
 
 from portfolio_lab import backtest as bt
 from portfolio_lab import numeraire as nm
 from portfolio_lab.config import CostModel
-from portfolio_lab.data.schema import MARKET_MIGRATIONS, _apply
 from tests.test_backtest import synthetic_market
 
 

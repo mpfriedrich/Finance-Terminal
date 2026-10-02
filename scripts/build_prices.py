@@ -12,10 +12,10 @@ import datetime as dt
 import sys
 import time
 
-from portfolio_lab.config import MARKET_DB
+from portfolio_lab.config import MARKET_DB, WORLD_DB
 from portfolio_lab.data.schema import finish_rebuild, open_market_for_rebuild
-from portfolio_lab import fred, world
-from portfolio_lab.data import history, prices as px, universe
+from portfolio_lab import aviation, fred, shipping, world
+from portfolio_lab.data import history, prices as px, universe, wrds
 
 FULL_WINDOW_DAYS = 460
 OVERLAP_DAYS = 5
@@ -52,7 +52,22 @@ else:
         history.refresh_price_windows(con)
         print("already current; price windows refreshed")
         finish_rebuild(con, work, MARKET_DB)
-        raise SystemExit(0)
+        start = None
+
+
+def refresh_world_store() -> None:
+    """The world store (stage 3) carries a copy of this store's US half; bring it up to
+    date so the world screen does not run on yesterday's US prices."""
+    if not WORLD_DB.exists():
+        return
+    wcon, wwork = open_market_for_rebuild(WORLD_DB)
+    print(f"world store: US half refreshed {wrds.copy_us(wcon, MARKET_DB)}", flush=True)
+    finish_rebuild(wcon, wwork, WORLD_DB)
+
+
+if start is None or start >= end:
+    refresh_world_store()
+    raise SystemExit(0)
 
 stats = px.fetch_into_store(con, tickers, start, end)
 # Exchange rates for the foreign filers (scripts/build_fx.py) and the market monitor's
@@ -60,7 +75,7 @@ stats = px.fetch_into_store(con, tickers, start, end)
 # screen after ten days would lose its rates as stale, and the monitor would freeze.
 extra = sorted({r[0] for r in con.execute(
     "SELECT DISTINCT ticker FROM prices WHERE ticker LIKE '%USD=X' "
-    "OR ticker IN (SELECT UNNEST(?))", [world.all_symbols()]).fetchall()})
+    "OR ticker IN (SELECT UNNEST(?))", [world.stored_symbols()]).fetchall()})
 if extra:
     px.fetch_into_store(con, extra, start, end)
 # Macro series (scripts/build_fred.py), refreshed only if they were stored once. A FRED
@@ -71,6 +86,19 @@ if con.execute("SELECT COUNT(*) FROM macro_series").fetchone()[0]:
             fred.store(con, fred.download(sid))
         except Exception:                                            # noqa: BLE001
             print(f"  FRED {sid}: not refreshed", flush=True)
+# Chokepoint transits (scripts/build_shipping.py), the same way: only once stored, and an
+# outage must not fail the price build.
+if shipping.last_date(con):
+    try:
+        print(f"  PortWatch: {shipping.update(con)} chokepoint-days refreshed", flush=True)
+    except Exception:                                                # noqa: BLE001
+        print("  PortWatch: not refreshed", flush=True)
+# One count of the aircraft in the air per run (aviation.py). OpenSky keeps no free
+# history, so these snapshots are it; 4 of the 400 anonymous daily credits.
+try:
+    print(f"  OpenSky: {aviation.snapshot(con):,} aircraft airborne", flush=True)
+except Exception:                                                    # noqa: BLE001
+    print("  OpenSky: no snapshot", flush=True)
 universe.observed_ranges(con)
 # ticker_history's price windows are what the universe is read from; keep them current.
 history.refresh_price_windows(con)
@@ -99,3 +127,4 @@ print(f"\ntotal {time.time()-t0:.0f}s", flush=True)
 if finish_rebuild(con, work, MARKET_DB):
     print("swapped the rebuilt store into place; restart the app to see it",
           flush=True)
+refresh_world_store()

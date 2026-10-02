@@ -97,3 +97,78 @@ def price_figure(
                      rangeslider=dict(visible=False))
     fig.update_yaxes(gridcolor=ui.RULE, color=ui.MUTED, side="right")
     return fig
+
+
+# A change beyond this many percent gets the full colour. Hormuz at −96 % (2026) would
+# otherwise stretch the scale until every ordinary ±10 % looked the same grey.
+MAP_COLOUR_CAP = 0.5
+
+
+def chokepoint_map(placed: pd.DataFrame, tankers: bool = False) -> go.Figure:
+    """World map of the chokepoints: circle area for ships a day, colour for the change
+    against a year earlier (red fewer, green more, grey no comparison).
+
+    `placed` is shipping.on_map(dashboard). Drawn with plotly's built-in coastlines, so
+    no map tiles are fetched from anyone's server.
+    """
+    count = placed["tankers_per_day" if tankers else "ships_per_day"].fillna(0.0)
+    change = placed["tankers_vs_year_ago" if tankers else "vs_year_ago"]
+    # Area, not radius, carries the number: the square root keeps 3 ships at Hormuz
+    # visible next to 218 at Malacca. Kept small, because Suez, Bab el-Mandeb and Hormuz
+    # (and the straits around Taiwan) sit close together; fixed name labels overlapped
+    # there on a laptop-width pane, so the names are in the hover and the table below.
+    size = 5 + 1.7 * count.clip(lower=0) ** 0.5
+    colour = change.astype(float).clip(-MAP_COLOUR_CAP, MAP_COLOUR_CAP)
+    what = "tankers" if tankers else "ships"
+    hover = [
+        f"<b>{n}</b><br>{c:,.0f} {what}/day (7-day avg)<br>"
+        + ("no year-earlier value" if pd.isna(v) else f"{v:+.0%} vs a year ago")
+        + f"<br>as of {d:%d.%m.%Y}"
+        for n, c, v, d in zip(placed.chokepoint, count, change, placed.as_of)
+    ]
+    fig = go.Figure(go.Scattergeo(
+        lat=placed.lat, lon=placed.lon, mode="markers",
+        hovertext=hover, hoverinfo="text",
+        marker=dict(
+            size=size, sizemode="diameter", opacity=0.85,
+            color=colour.fillna(0.0), cmin=-MAP_COLOUR_CAP, cmax=MAP_COLOUR_CAP,
+            colorscale=[[0, ui.DOWN], [0.5, ui.MUTED], [1, ui.UP]],
+            line=dict(width=0.6, color=ui.BG),
+            colorbar=dict(
+                title=dict(text="vs year ago", side="right"), thickness=8, len=0.6,
+                tickvals=[-0.5, -0.25, 0, 0.25, 0.5],
+                ticktext=["≤−50%", "−25%", "0", "+25%", "≥+50%"],
+                tickfont=dict(color=ui.MUTED, size=9), outlinewidth=0),
+        ),
+    ))
+    _world_geo(fig)
+    return fig
+
+
+def _world_geo(fig: go.Figure) -> None:
+    """The dark world the traffic maps share: built-in coastlines, no tiles fetched."""
+    fig.update_geos(
+        projection_type="natural earth", showframe=False, bgcolor=ui.BG,
+        showland=True, landcolor=ui.PANEL, showocean=True, oceancolor=ui.BG,
+        showcoastlines=True, coastlinecolor=ui.RULE, showcountries=True,
+        countrycolor=ui.RULE, showlakes=False, lataxis_range=[-58, 75],
+    )
+    fig.update_layout(
+        height=400, margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor=ui.BG,
+        font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
+    )
+
+
+def aircraft_map(cells: pd.DataFrame, taken_at) -> go.Figure:
+    """Airborne aircraft per grid cell (aviation.grid): circle area for the count."""
+    count = cells["aircraft"].astype(float)
+    fig = go.Figure(go.Scattergeo(
+        lat=cells.lat, lon=cells.lon, mode="markers",
+        hovertext=[f"{int(n)} aircraft in this cell<br>{taken_at:%d.%m.%Y %H:%M} UTC"
+                   for n in count],
+        hoverinfo="text",
+        marker=dict(size=2 + 1.6 * count ** 0.5, sizemode="diameter", color=ui.CYAN,
+                    opacity=0.6, line=dict(width=0)),
+    ))
+    _world_geo(fig)
+    return fig

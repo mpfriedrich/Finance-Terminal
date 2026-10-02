@@ -1,5 +1,4 @@
 """The briefing. What matters is what the model is ALLOWED to see."""
-import datetime as dt
 
 import duckdb
 import numpy as np

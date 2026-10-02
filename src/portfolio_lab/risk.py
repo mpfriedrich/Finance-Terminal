@@ -86,7 +86,8 @@ def measures(con: duckdb.DuckDBPyConnection, positions: pd.DataFrame, asof: dt.d
     out["max_drawdown"] = float((growth / growth.cummax() - 1).min())
     if bench is not None:
         b = bench.pct_change().reindex(port.index)
-        both = pd.concat([port, b], axis=1, sort=True).dropna()
+        both = (pd.concat([port, b], axis=1, sort=True)
+                .replace([np.inf, -np.inf], np.nan).dropna())
         if len(both) > 60 and both.iloc[:, 1].var() > 0:
             out["beta"] = float(both.iloc[:, 0].cov(both.iloc[:, 1]) / both.iloc[:, 1].var())
             # A portfolio that does not move has no correlation with anything.

@@ -9,7 +9,6 @@ survivors in practice (PLAN.md A21, Phase 7 measured 0/20).
 from __future__ import annotations
 
 import datetime as dt
-import json
 
 import duckdb
 import pandas as pd
@@ -106,6 +105,10 @@ class FreeSource:
     def survivorship_free(self) -> bool:
         return False
 
+    def delisting_returns(self, tickers) -> dict[str, float]:
+        """Known returns at the end of a listing (CRSP); empty on the free data."""
+        return history.delisting_returns(self.con, tickers)
+
     # -- convenience for the screener -------------------------------------------------
     def screening_frame(self, asof: dt.date) -> pd.DataFrame:
         """One row per security with everything a screen needs."""
@@ -144,7 +147,7 @@ class FreeSource:
         # 400 days after the only filing.
         if "data_age_days" not in out.columns:
             out["data_age_days"] = float("nan")
-        out = listing.apply(out, self.con)
+        out = listing.add_country(listing.apply(out, self.con))
         # The SEC wording stays in `sector`; `industry_group` is the coarse, typeable
         # version of the same fact. Both travel with the row so the screen can filter on
         # one and still show the other.

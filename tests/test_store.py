@@ -156,7 +156,6 @@ def test_opening_a_missing_store_read_only_explains_itself(tmp_path):
 def test_the_two_chat_threads_do_not_bleed_into_each_other(store):
     """The screen and the rule are different conversations about the same portfolio.
     Read interleaved, both become nonsense."""
-    from portfolio_lab.lab.spec import StrategySpec
 
     pid = store.create("Deep value")
     store.add_message(pid, "user", "cheap small caps")

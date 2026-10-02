@@ -137,3 +137,43 @@ def test_frames_from_a_fallback_universe_are_not_served_after_it_is_fixed(tmp_pa
     fallback = FrameCache(Source("securities"), tmp_path, "same-fingerprint")
     current = FrameCache(Source("ticker_history"), tmp_path, "same-fingerprint")
     assert fallback.root != current.root
+
+
+def _aged(directory, days, now):
+    import os
+
+    stamp = now.timestamp() - days * 86400
+    for f in directory.iterdir():
+        os.utime(f, (stamp, stamp))
+
+
+def test_pruning_removes_orphaned_builds_and_keeps_current_and_recent(tmp_path):
+    from portfolio_lab.pit_cache import prune
+
+    now = dt.datetime(2026, 10, 2, 12)
+    day = dt.date(2024, 1, 2)
+    src = CountingSource()
+    current = FrameCache(src, tmp_path, "today")
+    yesterday = FrameCache(src, tmp_path, "yesterday")      # e.g. the world build
+    orphan = FrameCache(src, tmp_path, "last-month")
+    for cache in (current, yesterday, orphan):
+        cache.frame_for(day)
+    old_version = tmp_path / "v1" / "abc"
+    old_version.mkdir(parents=True)
+    (old_version / "2020-01-02.parquet").write_bytes(b"x")
+    _aged(current.root, 30, now)        # current is kept however old its files are
+    _aged(yesterday.root, 1, now)
+    _aged(orphan.root, 30, now)
+    _aged(old_version, 400, now)
+
+    assert prune(tmp_path, current.root, older_than_days=7, now=now) == 2
+    assert current.path_for(day).exists()
+    assert yesterday.path_for(day).exists()
+    assert not orphan.root.exists()
+    assert not (tmp_path / "v1").exists()
+
+
+def test_pruning_an_empty_cache_is_harmless(tmp_path):
+    from portfolio_lab.pit_cache import prune
+
+    assert prune(tmp_path / "missing", tmp_path / "missing" / "x") == 0

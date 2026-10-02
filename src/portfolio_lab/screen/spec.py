@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, replace
 from typing import Literal
 
 # Fields a filter may reference. Mirrors the metric vocabulary in PLAN.md.
@@ -70,6 +70,7 @@ FILTERABLE: tuple[str, ...] = (
     "industry_group",  # the coarse, typeable one: "Technology", "Health Care", ...
     "sector",          # the SEC's own wording: "Services-Prepackaged Software", ...
     "exchange",
+    "country",         # ISO-3 of the market the line trades in: "USA", "JPN", "DEU", ...
 )
 
 Op = Literal["<=", ">=", "<", ">", "==", "!=", "in", "contains", "not_contains"]

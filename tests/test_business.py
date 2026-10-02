@@ -1,6 +1,4 @@
 """Filing extraction. The quote check is the whole guarantee — everything else is prose."""
-import pandas as pd
-import pytest
 
 from portfolio_lab import business as bz
 

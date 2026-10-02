@@ -82,7 +82,14 @@ uv run python scripts/build_fundamentals.py   # SEC XBRL facts
 uv run python scripts/build_prices.py --since=2010-01-01
 uv run python scripts/add_benchmark.py        # S&P 500 TR, the price index, SPY
 uv run python scripts/build_ticker_history.py # and how little of it can be recovered
+uv run python scripts/build_fred.py           # macro, rail and airline series (no key)
+uv run python scripts/build_shipping.py       # ships through the chokepoints (no key)
+uv run python scripts/build_air.py            # one count of aircraft in the air (no key)
 ```
+
+`build_prices.py` keeps the FRED series and the ship counts current once they are stored,
+and stores one aircraft count per run. The live aircraft map comes from the OpenSky
+Network (non-commercial use, attribution shown in the app).
 
 Then:
 
@@ -93,7 +100,9 @@ uv run streamlit run app.py
 Optional, and worth it before using stage B: `uv run python scripts/warm_pit_cache.py`
 assembles the point-in-time universe for each rebalance date once, which turns a
 multi-minute backtest into a fast one. It changes speed and nothing else — there is a
-test for exactly that.
+test for exactly that. It warms the source the app would run on (the one in
+`PORTFOLIO_LAB_SOURCE`, free by default); `--source=world` or `--source=paid` picks
+another, because frames are cached per source.
 
 ## Switching to the paid data source
 
@@ -118,7 +127,8 @@ rules stay exactly as they are.
    ```
    PORTFOLIO_LAB_SOURCE=paid
    ```
-4. Warm the cache again (`scripts/warm_pit_cache.py`); frames are cached per source.
+4. Warm the cache again (`scripts/warm_pit_cache.py --source=paid`); frames are cached
+   per source.
 
 Back to the free data: `PORTFOLIO_LAB_SOURCE=free`, or delete the line. A missing key or
 an unbuilt store shows a message saying which step is missing, not a crash.
@@ -127,6 +137,62 @@ an unbuilt store shows a message saying which step is missing, not a crash.
 the published Sharadar layout (and the screener's test series runs unchanged against
 it), but no subscription existed when it was written. Check the first build's output —
 the number of delisted companies with prices should be in the thousands, not zero.
+
+## Adding the rest of the world (Compustat Global via WRDS)
+
+With a WRDS account (many universities have one; students usually register through the
+library), the screen can cover listed companies outside North America as well: every
+company Compustat Global lists in the chosen countries, with prices, share counts and
+annual and quarterly fundamentals, including companies that stopped trading. The US
+half stays the free store; both live in one file, `data/world.duckdb`.
+
+1. Put the login in `.env.local` (never shown, never committed):
+   ```
+   WRDS_USERNAME=...
+   WRDS_PASSWORD=...
+   ```
+   The password can live in `~/.pgpass` instead. If the account uses two-factor
+   authentication, approve the Duo push on the phone when the build connects.
+2. Build the world store (first run: long — daily prices for ~20 countries since 2010;
+   later runs fetch only the current year):
+   ```bash
+   uv run python scripts/build_wrds.py
+   uv run python scripts/build_wrds.py --countries=DEU,GBR,JPN --since=2015-01-01
+   ```
+3. Choose it in `.env.local`, restart the app, warm the cache:
+   ```
+   PORTFOLIO_LAB_SOURCE=world
+   ```
+
+How it reads: tickers are the Compustat ticker plus the country (`7203.JPN`, `SAP.DEU`),
+every price is in dollars at that day's rate (so returns are what a dollar investor
+earned), fundamentals keep their currency and are converted at the screen date. **Report
+dates are estimated**: Compustat Global does not record when an annual report came out,
+so it counts as published at the legal deadline (period end + 4 months; interim reports
++ 3 months, or the report date where Compustat has one). `build_prices.py` keeps the US
+half current; rerun `build_wrds.py` weekly for the rest. Check the licence terms of your
+WRDS access before using the data outside your studies.
+
+**The US without survivorship bias (CRSP).** If the WRDS account includes CRSP, the same
+build replaces the free US prices with CRSP's: every US common stock since `--since`,
+including the ones that went bankrupt or were taken over, and the delisting return
+holders actually received, which the backtests then use instead of the assumed -30%.
+CRSP ends where the subscription ends (often the previous December); the lines still
+trading continue with the free store's daily prices from there, spliced so nothing
+jumps. Fundamentals stay the SEC filings (dated by the SEC, kept for companies that no
+longer exist); Compustat North America fills only the years before a company's first
+XBRL filing. `--us=free` skips CRSP; `--countries=none` builds the US only. Both
+CRSP formats are read: the current one (CIZ, `dsf_v2`) and the legacy one, which ends
+with December 2024. If CRSP comes through another university's WRDS account than
+Compustat Global, add that account as well — the build then connects twice:
+```
+WRDS_CRSP_USERNAME=...
+WRDS_CRSP_PASSWORD=...
+```
+
+**Untested against the real service**, like the paid source: the translation is tested
+on hand-made files in the Compustat Global and CRSP layouts. Check the counts the first
+build prints — per country, and the number of US listings that ended.
 
 ## Tests
 

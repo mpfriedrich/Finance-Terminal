@@ -4,7 +4,6 @@ No network: the model is replaced by a stand-in that records the request. What c
 tested is that the data sheet is the app's own numbers, that the request carries the
 rules and the fallback, and that a refusal never looks like an empty summary.
 """
-import datetime as dt
 import json
 from types import SimpleNamespace
 

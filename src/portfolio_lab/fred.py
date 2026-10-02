@@ -46,6 +46,13 @@ SERIES: dict[str, tuple[str, str, str, str]] = {
     "FEDFUNDS": ("Fed funds rate", "US money", "level", "%"),
     "M2SL": ("M2 money supply", "US money", "yoy", "%"),
     "T10Y2Y": ("10y − 2y Treasury spread", "US money", "level", "pts"),
+    # Freight and passengers actually moving (Bureau of Transportation Statistics,
+    # monthly, two to three months behind; checked 02.10.2026). Free daily train or flight
+    # counts with a history do not exist; ships are in shipping.py.
+    "RAILFRTCARLOADSD11": ("Rail freight carloads", "US transport", "yoy", "%"),
+    "RAILFRTINTERMODALD11": ("Rail intermodal (containers)", "US transport", "yoy", "%"),
+    "ENPLANED11": ("Airline passengers", "US transport", "yoy", "%"),
+    "LOADFACTOR": ("Airline load factor", "US transport", "level", "%"),
     "AUSCPIALLQINMEI": ("Australia CPI", "Australia", "yoy", "%"),
     "LRUNTTTTAUM156S": ("Australia unemployment", "Australia", "level", "%"),
     "CP0000EZ19M086NEST": ("Euro area HICP inflation", "Euro area", "yoy", "%"),

@@ -7,7 +7,6 @@ still ran on survivors — which is the exact failure this phase exists to preve
 import datetime as dt
 
 import duckdb
-import pandas as pd
 import pytest
 
 from portfolio_lab.data import history
