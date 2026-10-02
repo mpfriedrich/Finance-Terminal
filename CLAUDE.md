@@ -198,6 +198,10 @@ ticker; ended lines use their last CRSP ticker, with `-permno` appended on a col
   random walk in every variant (small/base, 5/20-day horizon), reversed every recent
   trend even on synthetic random walks, and its 80 % bands held 12–39 % of the time.
   Don't re-test from scratch; PLAN.md → „Geprüft und verworfen: Kronos“ has the numbers.
+- **TimesFM 3.0 and the Claude subagent „stock-price-movement-predictor“ were tested too
+  (02.10.2026).** TimesFM tracks a random walk (no edge, bands slightly narrow); the
+  agent restates 60-day volatility with coin-flip probabilities. Neither beats a 60-day
+  volatility band. Same PLAN.md section. Run big model batches in chunks: 16 GB Mac.
 
 ## 9. How to work here
 

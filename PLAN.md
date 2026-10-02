@@ -1021,6 +1021,56 @@ in RESEARCH will: das Band aus der 60-Tage-Volatilität trifft sein Soll (74–8
 
 **Nicht geprüft:** chinesische/asiatische Börsen und Intraday-Daten, auf denen das Paper
 misst; Feinabstimmung (Fine-Tuning) auf US-Daten; Kronos-mini.
+
+### TimesFM 3.0 (Google) — getestet 02.10.2026
+
+`google-research/timesfm`, Gewichte 3.0 unter `timesfm-non-commercial-license-v1.0`
+(privat erlaubt, kommerziell nur über Google Cloud; 2.5 ist Apache-2.0). Vortraining:
+GiftEval-Pretrain, Wikipedia-Aufrufe bis 11/2023, Google Trends bis 2022, synthetisch —
+**keine Börsenkurse**, Testzeitraum ab 07/2024 also sauber. MLX-Backend für Apple
+Silicon, ohne PyTorch: ~20.000 Prognosen in 1–3 min (in Paketen à 500; alles auf einmal
+belegte bei 1.024 T Vorlauf **16 GB**). Univariat auf dem split-bereinigten Schlusskurs,
+Dezile direkt aus dem Modell. 200 Aktien (Auswahl wie oben, Stand 28.06.2024), alle 5
+Handelstage ab 01.07.2024; t-Werte nur über nicht überlappende Zeitpunkte.
+
+| Vorlauf/Horizont | Richtung (immer auf) | MAE (Random Walk) | 80-%-Band (Vol-Band) | RankIC | Risiko-Rang: Breite (Vol 60 T) |
+|---|---|---|---|---|---|
+| 256/20 | 50,7 % (52,6 %) | 8,92 % (8,34 %) | 71 % (80 %) | +0,024, t 1,3 | +0,28 (+0,30) |
+| 1024/20 | 50,6 % (52,5 %) | 8,63 % (8,37 %) | 76 % (80 %) | −0,009, t −0,4 | +0,31 (+0,30) |
+| 256/5 | 50,9 % (52,5 %) | 4,26 % (4,08 %) | 77 % (82 %) | +0,016, t 1,5 | +0,31 (+0,29) |
+| 1024/5 | 50,3 % (52,5 %) | 4,17 % (4,09 %) | 78 % (82 %) | +0,009, t 1,0 | +0,32 (+0,29) |
+
+**Befund:** keine Trendumkehr wie bei Kronos (nach Anstieg −0,2 bis −1,2 %, tatsächlich
++0,1 bis +0,9 %), MAE knapp über dem Random Walk, Bänder etwas zu eng, Risiko-Rangfolge so
+gut wie die 60-Tage-Volatilität. Keine belastbare Renditeprognose (alle |t| < 2). Bringt
+nichts, was das Vol-Band nicht schon kann.
+
+### Agent „stock-price-movement-predictor“ — Rücktest 02.10.2026
+
+`ChrisRoyse/610ClaudeSubagents/agents/stock-price-movement-predictor.md`: kein Modell,
+nur eine Rollenanleitung für Claude (RSI, MACD, Fundamentaldaten, Stimmung; nennt
+Bloomberg als Quelle, ohne Zugriff). **Aufbau:** Stichtage nach Claudes Wissensstand
+(~06/2026): 01.07. und 03.08.2026, Horizont 20 Handelstage; 40 Aktien (Kronos-Auswahl),
+8 Claude-Subagenten mit je 10 Aktien. Jeder bekam nur ein Datenpaket bis zum Stichtag
+(260 T OHLCV, point-in-time-Kennzahlen aus `derive_metrics(screening_frame)`, S&P 500),
+Websuche und Datenbank verboten, Lösungen getrennt abgelegt. Alle 8 Dateien geprüft
+(richtige Ticker, Spannen um den letzten Kurs). Vergleich auf denselben 80 Fällen:
+
+| | Richtung | MAE | 80-%-Band | RankIC Jul / Aug |
+|---|---|---|---|---|
+| Agent | 57 % | 8,19 % | 82 % | −0,10 / −0,10 |
+| TimesFM 3.0 (256/20) | 57 % | 9,10 % | 66 % | −0,03 / −0,15 |
+| immer auf / Random Walk / Vol-Band | 64 % | 8,22 % | 82 % | – |
+
+Brier-Score der Wahrscheinlichkeiten 0,246 (Münzwurf 0,250, Basisrate 0,231). Alle
+Wahrscheinlichkeiten 47–58 %; bei „fällt“ (9 Fälle) 2 Treffer. Das Band ist praktisch
+das Vol-Band (Breite 24,5 % gegenüber 24,7 %; ein Subagent schrieb, er habe es genau so
+gerechnet). ~65.000 Token je 10 Aktien. **Nur 80 Fälle an 2 Tagen, Juli stark (70 %
+gestiegen)** — statistisch dünn, aber nirgends ein Vorteil.
+
+**Gesamtentscheidung (Nutzer, 02.10.2026):** keines der drei einbauen. Rangfolge
+TimesFM > Agent > Kronos, keines schlägt die einfachen Regeln. Für eine Bandbreite in
+RESEARCH ist das 60-Tage-Vol-Band die ehrliche Wahl (80–82 % bei 80 % Soll).
 **Technik, falls je wieder:** braucht PyTorch (~770 MB Umgebung) und GPU (MPS, M4).
 Kein KV-Cache — jeder Schritt rechnet den ganzen Verlauf neu: 800 Pfade auf einmal
 brauchten 40–75 min je Zeitpunkt, in Paketen à 100 nur ~4 min für 1.200. `base` mit
