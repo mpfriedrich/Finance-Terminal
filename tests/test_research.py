@@ -127,3 +127,22 @@ def test_a_negative_oil_price_does_not_poison_the_commodity_betas():
         table = rs.commodity_sensitivity(con, "XOM")
     row = table.set_index("symbol").loc["CL=F"]
     assert math.isfinite(row["beta"]) and math.isfinite(row["correlation"])
+
+
+def test_volatility_is_last_year_and_last_60_sessions_not_the_whole_history():
+    # Audit 02.10.2026: "VOL" averaged every stored day (back to 2009), and OPTIONS set
+    # next month's implied volatility against that. Calm for years, wild for the last
+    # year: the figures must show the wild year, not the long average.
+    import numpy as np
+
+    c = duckdb.connect(":memory:")
+    _apply(c, MARKET_MIGRATIONS)
+    days = pd.bdate_range("2018-01-01", periods=1500)
+    # alternating moves have an exactly known standard deviation
+    moves = np.where(np.arange(1500) % 2, 1, -1) * np.where(np.arange(1500) < 1248, 0.005, 0.03)
+    px = 100 * np.cumprod(1 + moves)
+    c.executemany("INSERT INTO prices (ticker, date, close, close_adj) VALUES ('X', ?, ?, ?)",
+                  [(d.date(), p, p) for d, p in zip(days, px)])
+    out = rs.price_stats(c, "X")
+    assert out["volatility"] == pytest.approx(0.03 * np.sqrt(252), rel=0.02)
+    assert out["volatility_60d"] == pytest.approx(0.03 * np.sqrt(252), rel=0.02)

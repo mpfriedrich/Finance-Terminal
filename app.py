@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import datetime as dt
 import sys
+import time
+from dataclasses import replace
 
 # A Streamlit app is served, not executed. Pressing VS Code's plain "Run Python File"
 # button runs `python app.py`, which either fails on a missing dependency (wrong
@@ -43,16 +45,12 @@ from portfolio_lab.data import history as hist, industry
 from portfolio_lab.data.listing import COUNTRIES as MARKET_NAMES
 from portfolio_lab.data.paid import MissingKey
 from portfolio_lab.data.schema import open_user
-from portfolio_lab.data.sources import SourceNotReady, open_selected
+from portfolio_lab.data.sources import SourceNotReady, open_selected, per_thread
 from portfolio_lab.data.wrds import WorldSource, is_compustat
 from portfolio_lab.screen import translate as T
 from portfolio_lab.screen.engine import derive_metrics, merge_selection, run_screen
-from portfolio_lab.screen.valuation import add_valuation
-from dataclasses import replace
-
 from portfolio_lab.screen.spec import Filter, spec_to_json
-from portfolio_lab.screen.valuation import Assumptions
-import time
+from portfolio_lab.screen.valuation import Assumptions, add_valuation
 
 from portfolio_lab import backtest as bktest
 from portfolio_lab import holdout
@@ -113,12 +111,17 @@ def _market_source():
             st.rerun()
     except OSError:
         pass  # Mid-swap. The next rerun will see the new file.
-    return source
+    return per_thread(source)
 
 
 @st.cache_resource
-def _store():
+def _shared_store():
     return Store(open_user(USER_DB))
+
+
+def _store():
+    """The portfolio store with this thread's own cursor (see sources.per_thread)."""
+    return per_thread(_shared_store())
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
@@ -143,6 +146,15 @@ def _yahoo_bars(symbol: str) -> pd.DataFrame:
 @st.cache_data(ttl=600)
 def _frame(asof: dt.date) -> pd.DataFrame:
     return _market_source().screening_frame(asof)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _price_stats(ticker: str, asof: dt.date) -> dict:
+    """research.price_stats once per ticker and data date. RESEARCH, the WACC beta and
+    OPTIONS each asked for it on every rerun, each time reading the full price history
+    and the benchmark again (audit 02.10.2026). `asof` is part of the key, so a price
+    update is never served from yesterday's entry."""
+    return rs.price_stats(_market_source().con, ticker)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -236,14 +248,14 @@ with st.sidebar:
 
     with st.form("new", clear_on_submit=True):
         new_name = st.text_input("New portfolio", placeholder="Deep value")
-        if st.form_submit_button("Create", use_container_width=True) and new_name:
+        if st.form_submit_button("Create", width="stretch") and new_name:
             try:
                 store.create(new_name)
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
 
-    if chosen and st.button("Delete portfolio", use_container_width=True):
+    if chosen and st.button("Delete portfolio", width="stretch"):
         store.delete(chosen)
         st.rerun()
 
@@ -266,7 +278,7 @@ with st.sidebar:
     with st.form("watch_add", clear_on_submit=True):
         wt = st.text_input("Add ticker", placeholder="NVDA")
         wn = st.text_input("Note", placeholder="why you are watching")
-        if st.form_submit_button("Watch", use_container_width=True) and wt.strip():
+        if st.form_submit_button("Watch", width="stretch") and wt.strip():
             store.watch(wt, wn)
             st.rerun()
 
@@ -402,7 +414,7 @@ def _lab_price_chart(con, ticker: str, result, rule) -> None:
         else result.fills
     st.plotly_chart(
         charts.price_figure(px_rule, ticker, bands=bands, trades=trades),
-        use_container_width=True, key=f"lab_px_{ticker}")
+        width="stretch", key=f"lab_px_{ticker}")
     n_buy = int((trades.side == "buy").sum()) if not trades.empty else 0
     st.caption(
         f"▲ {n_buy} buys, ▼ {len(trades) - n_buy} sells, each at the open after the "
@@ -495,7 +507,7 @@ def _risk_block(positions: pd.DataFrame, key: str) -> None:
                            margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor=ui.BG,
                            plot_bgcolor=ui.BG,
                            font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10))
-        st.plotly_chart(heat, use_container_width=True, key=f"corr_{key}")
+        st.plotly_chart(heat, width="stretch", key=f"corr_{key}")
 
 
 def _paper_section(origin: str, key: str, opener, default_name: str,
@@ -514,7 +526,7 @@ def _paper_section(origin: str, key: str, opener, default_name: str,
                   if amount_label else None)
         name = c2.text_input("Name", value=default_name, key=f"paper_name_{key}")
         c3.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
-        if c3.button("Buy on paper", type="primary", use_container_width=True,
+        if c3.button("Buy on paper", type="primary", width="stretch",
                      key=f"paper_buy_{key}"):
             try:
                 opener(name, amount)
@@ -574,7 +586,7 @@ with tab_screen:
                 height=80,
                 label_visibility="collapsed",
             )
-            if st.form_submit_button("Use these companies", use_container_width=True):
+            if st.form_submit_button("Use these companies", width="stretch"):
                 picked = tuple(
                     t.strip().upper()
                     for t in typed.replace("\n", ",").replace(" ", ",").split(",")
@@ -685,12 +697,12 @@ with tab_screen:
         if not spec.is_hand_picked:
             quick = st.columns(5)
             for col, n in zip(quick, (10, 25, 50)):
-                if col.button(f"TOP {n}", use_container_width=True,
+                if col.button(f"TOP {n}", width="stretch",
                               disabled=res.n_passing <= n and n != 10):
                     _choose(r.ticker.astype(str).head(n))
-            if quick[3].button(f"ALL {res.n_passing}", use_container_width=True):
+            if quick[3].button(f"ALL {res.n_passing}", width="stretch"):
                 _choose(r.ticker.astype(str))
-            if quick[4].button("NONE", use_container_width=True):
+            if quick[4].button("NONE", width="stretch"):
                 _choose(())
 
         def _col(name: str) -> pd.Series:
@@ -722,7 +734,7 @@ with tab_screen:
         edited = st.data_editor(
             editor,
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
             row_height=28,
             height=min(660, 80 + 28 * len(editor)),
             disabled=[c for c in editor.columns if c != "hold"],
@@ -814,7 +826,7 @@ with tab_screen:
             )
         can = len(picks) > 0
         if st.button(f"Start tracking {len(picks)} positions",
-                     type="primary", disabled=not can, use_container_width=True):
+                     type="primary", disabled=not can, width="stretch"):
             n = store.start_tracking(chosen, picks, asof, spec_to_json(spec), thesis,
                                      cost_of=settings.cost.round_trip_cost)
             st.success(f"Tracking {n} positions from {asof}.")
@@ -878,7 +890,7 @@ with tab_screen:
                 unsafe_allow_html=True,
             )
 
-        if st.button("Stop tracking and discard", use_container_width=True):
+        if st.button("Stop tracking and discard", width="stretch"):
             store.stop_tracking(chosen)
             st.rerun()
 
@@ -937,9 +949,9 @@ with tab_screen:
         dates = bstage.rebalance_dates(hw.start, hw.end, frequency)
         ready = sum(1 for d in dates if cache.path_for(d).exists())
         c4, c5 = st.columns([1, 1])
-        go_pit = c4.button("Run point-in-time", use_container_width=True,
+        go_pit = c4.button("Run point-in-time", width="stretch",
                            key=f"pit_go_{chosen}")
-        go_sens = c5.button("Run with sensitivity checks", use_container_width=True,
+        go_sens = c5.button("Run with sensitivity checks", width="stretch",
                             key=f"pit_sens_{chosen}",
                             help="The same run started six months earlier and later, and "
                                  "again without the holding it leaned on most.")
@@ -1075,7 +1087,7 @@ with tab_screen:
             )
             charge = c2.toggle("Trading costs", value=True, key=f"bt_costs_{chosen}",
                                help="Tiered by market cap; switch off to see what they cost you.")
-            go = c3.button("Run backtest", use_container_width=True, key=f"bt_go_{chosen}")
+            go = c3.button("Run backtest", width="stretch", key=f"bt_go_{chosen}")
 
             if go:
                 snapshot = src.snapshot()
@@ -1227,7 +1239,7 @@ with tab_research:
                 ph["date"] = pd.to_datetime(ph["date"])
                 st.line_chart(ph.set_index("date")[["close_adj"]].rename(
                     columns={"close_adj": sym.symbol}), height=250, color=[ui.AMBER])
-            stats_np = rs.price_stats(src.con, sym.symbol)
+            stats_np = _price_stats(sym.symbol, asof)
             if stats_np:
                 cells = []
                 for label, key in (("1M", "return_1m"), ("3M", "return_3m"),
@@ -1236,7 +1248,7 @@ with tab_research:
                     if v is not None and not pd.isna(v):
                         cells.append((label, ui.pct(v, 1), "up" if v >= 0 else "down"))
                 if stats_np.get("volatility") and not pd.isna(stats_np["volatility"]):
-                    cells.append(("VOLATILITY", f"{stats_np['volatility']:.0%}", ""))
+                    cells.append(("VOL 1Y", f"{stats_np['volatility']:.0%}", ""))
                 if stats_np.get("max_drawdown") is not None:
                     cells.append(("MAX DRAWDOWN", ui.pct(stats_np["max_drawdown"], 1), "down"))
                 if stats_np.get("beta") is not None:
@@ -1282,12 +1294,12 @@ with tab_research:
                 {"6M": 126, "1Y": 252, "5Y": 1260}[yspan])
             ybands = st.toggle("Bollinger 20d", value=False, key=f"ybands_{ysym}")
             st.plotly_chart(charts.price_figure(yview, ysym, bands=ybands),
-                            use_container_width=True, key=f"ychart_{ysym}")
+                            width="stretch", key=f"ychart_{ysym}")
             ystats = world.stats(ybars)
             cells = [(k, ui.pct(ystats[k], 1), "up" if ystats[k] >= 0 else "down")
                      for k in ("1M", "3M", "6M", "1Y") if ystats.get(k) is not None]
             if ystats.get("volatility"):
-                cells.append(("VOLATILITY", f"{ystats['volatility']:.0%}", ""))
+                cells.append(("VOL 1Y", f"{ystats['volatility']:.0%}", ""))
             if ystats.get("max_drawdown") is not None:
                 cells.append(("MAX DD 1Y", ui.pct(ystats["max_drawdown"], 1), "down"))
             st.markdown(ui.stats(cells), unsafe_allow_html=True)
@@ -1343,7 +1355,7 @@ with tab_research:
                 a1, a2 = st.columns([3, 1])
                 a1.markdown("#### AI summary")
                 label = "Write again" if have else "Write AI summary"
-                if a2.button(label, key=f"ai_sum_{ticker}", use_container_width=True):
+                if a2.button(label, key=f"ai_sum_{ticker}", width="stretch"):
                     if not secret("ANTHROPIC_API_KEY"):
                         st.error("ANTHROPIC_API_KEY missing from .env.local.")
                     else:
@@ -1483,7 +1495,7 @@ with tab_research:
 
                         fig = charts.price_figure(view, ticker, bands=bands,
                                                   candles=candles)
-                        st.plotly_chart(fig, use_container_width=True,
+                        st.plotly_chart(fig, width="stretch",
                                         key=f"pxchart_{ticker}")
                         if chart_unit == nm.GOLD:
                             st.caption(nm.note(nm.GOLD))
@@ -1501,7 +1513,7 @@ with tab_research:
                                 "outside them even when nothing is happening; that is what "
                                 "two standard deviations means, not a signal."
                             )
-                    stats_now = rs.price_stats(src.con, ticker)
+                    stats_now = _price_stats(ticker, asof)
                     if stats_now:
                         cells = []
                         for label, key in (("1M", "return_1m"), ("3M", "return_3m"),
@@ -1510,7 +1522,7 @@ with tab_research:
                             if v is not None and not pd.isna(v):
                                 cells.append((label, ui.pct(v, 1), "up" if v >= 0 else "down"))
                         if stats_now.get("volatility") and not pd.isna(stats_now["volatility"]):
-                            cells.append(("VOL", f"{stats_now['volatility']:.0%}", ""))
+                            cells.append(("VOL 1Y", f"{stats_now['volatility']:.0%}", ""))
                         if stats_now.get("max_drawdown") is not None:
                             cells.append(("MAX DD", ui.pct(stats_now["max_drawdown"], 1), "down"))
                         if stats_now.get("beta") is not None:
@@ -1640,7 +1652,7 @@ with tab_research:
                 else:
                     row = tenk.iloc[0]
                     st.caption(f"From the 10-K filed {row.filed} for the period {row.period}.")
-                    if st.button("Read the filing", key="read_10k", use_container_width=True):
+                    if st.button("Read the filing", key="read_10k", width="stretch"):
                         with st.spinner("Downloading and reading Item 1"):
                             try:
                                 text = bz.fetch_filing_text(row.url)
@@ -1818,7 +1830,7 @@ with tab_research:
                         "AND close IS NOT NULL ORDER BY date DESC LIMIT 1").fetchone()
                     rf_default = (tnx[0] / 100.0) if tnx else mx.current_risk_free(
                         src.con, settings.risk_free_fallback)[0]
-                    beta_raw = (rs.price_stats(src.con, ticker) or {}).get("beta")
+                    beta_raw = (_price_stats(ticker, asof) or {}).get("beta")
                     w1, w2, w3, w4 = st.columns(4)
                     rf_in = w1.number_input(
                         "Risk-free %", 0.0, 15.0, round(rf_default * 100, 2), 0.05,
@@ -2012,7 +2024,7 @@ with tab_research:
                                     yaxis=dict(gridcolor=ui.RULE, color=ui.MUTED, side="right"),
                                 )
                                 st.markdown("#### Where the market thinks the price will be")
-                                st.plotly_chart(fig_c, use_container_width=True,
+                                st.plotly_chart(fig_c, width="stretch",
                                                 key=f"cone_{ticker}")
                                 widest = cone.iloc[-1]
                                 st.caption(
@@ -2028,8 +2040,9 @@ with tab_research:
                                     "tails than the bell curve it assumes."
                                 )
 
-                            stats_now = rs.price_stats(src.con, ticker)
-                            cmp_ = op.implied_vs_realised(atm, stats_now.get("volatility"))
+                            stats_now = _price_stats(ticker, asof)
+                            # the last 60 sessions: the horizon of the nearest expiries
+                            cmp_ = op.implied_vs_realised(atm, stats_now.get("volatility_60d"))
                             if cmp_:
                                 tone = "up" if cmp_["premium"] > 0 else "down"
                                 st.markdown(ui.stats([
@@ -2038,6 +2051,7 @@ with tab_research:
                                     ("PREMIUM", f"{cmp_['premium']:+.1%}", tone),
                                 ]), unsafe_allow_html=True)
                                 st.caption(
+                                    "Realised is the last 60 sessions, annualised. "
                                     "Implied above realised is the normal state — option "
                                     "sellers want paying for the risk. A large gap either "
                                     "way is the interesting case, and neither direction is "
@@ -2075,7 +2089,7 @@ with tab_research:
                                     ),
                                 )
                                 st.markdown("#### Volatility surface")
-                                st.plotly_chart(fig, use_container_width=True)
+                                st.plotly_chart(fig, width="stretch")
                                 st.caption(
                                     "Drag to rotate. Left of 1.0 are puts, right are calls. "
                                     "The lift towards the left edge is the equity smirk: "
@@ -2357,7 +2371,7 @@ with tab_options:
                         price_b, iv_b = float(picked.mid), float(picked.iv)
 
                 if strike_b is not None and st.button(
-                    "Add leg", type="primary", use_container_width=True, key="opt_b_add"
+                    "Add leg", type="primary", width="stretch", key="opt_b_add"
                 ):
                     store.add_leg(
                         chosen, under, kind_b, strike_b, exp_b,
@@ -2369,7 +2383,7 @@ with tab_options:
                 st.markdown("#### Presets")
                 pc = st.columns(3)
                 for i, (name, spec_legs) in enumerate(op.PRESETS.items()):
-                    if pc[i % 3].button(name, key=f"preset_{i}", use_container_width=True):
+                    if pc[i % 3].button(name, key=f"preset_{i}", width="stretch"):
                         store.clear_legs(chosen)
                         for lk, ratio, qty in spec_legs:
                             if lk == "share":
@@ -2409,7 +2423,7 @@ with tab_options:
                 "cost": [ui.money(l.entry_price * l.multiplier) for l in legs_obj],
             }), numeric={"iv", "cost"}, ticker_col="leg"), unsafe_allow_html=True)
 
-            if st.button("Clear position", key="opt_b_clear", use_container_width=True):
+            if st.button("Clear position", key="opt_b_clear", width="stretch"):
                 store.clear_legs(chosen)
                 st.rerun()
 
@@ -2766,7 +2780,7 @@ with tab_monitor:
                     legend=dict(orientation="h", y=-0.15),
                     xaxis=dict(gridcolor=ui.RULE),
                     yaxis=dict(gridcolor=ui.RULE, side="right"))
-                st.plotly_chart(cmp_fig, use_container_width=True, key="monitor_cmp")
+                st.plotly_chart(cmp_fig, width="stretch", key="monitor_cmp")
                 st.caption("Each line starts at 100 on its first close in the window, so "
                            "an index, a currency and gold can share one scale. Price "
                            "only, " + ("measured in gold (gold itself is the unit and "
@@ -2808,7 +2822,7 @@ with tab_monitor:
                            legend=dict(orientation="h", y=-0.15),
                            xaxis=dict(gridcolor=ui.RULE),
                            yaxis=dict(gridcolor=ui.RULE, side="right"))
-        st.plotly_chart(cfig, use_container_width=True, key="cmp_chart")
+        st.plotly_chart(cfig, width="stretch", key="cmp_chart")
         cs = cmp["stats"]
         st.markdown(ui.grid(pd.DataFrame({
             "symbol": cs["symbol"],
@@ -2830,7 +2844,7 @@ with tab_monitor:
                              margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor=ui.BG,
                              plot_bgcolor=ui.BG,
                              font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10))
-            st.plotly_chart(hm, use_container_width=True, key="cmp_corr")
+            st.plotly_chart(hm, width="stretch", key="cmp_corr")
         st.caption(
             f"Correlation of daily returns over the {cmp['shared_days']} days all of them "
             "traded. Beta against the S&P 500 total return. "
@@ -2898,7 +2912,7 @@ with tab_books:
                 yaxis=dict(title="% on money in", gridcolor=ui.RULE, side="right"),
                 xaxis=dict(gridcolor=ui.RULE),
             )
-            st.plotly_chart(fig, use_container_width=True, key="books_compare")
+            st.plotly_chart(fig, width="stretch", key="books_compare")
             st.caption(
                 "Each line is the gain on the money that book has put in so far. Books "
                 "opened on different days start at different points; a savings plan's "
@@ -2957,7 +2971,7 @@ with tab_books:
                         font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
                         yaxis=dict(gridcolor=ui.RULE, side="right"),
                         xaxis=dict(gridcolor=ui.RULE))
-                    st.plotly_chart(detail, use_container_width=True,
+                    st.plotly_chart(detail, width="stretch",
                                     key=f"book_{b['id']}")
                     fills = v.get("fills")
                     if fills is not None and len(fills):
@@ -3252,7 +3266,7 @@ with tab_macro:
         ev_date = e2.date_input("Event date", value=dt.date.today() - dt.timedelta(days=60),
                                 key="ev_date")
         ev_win = e3.slider("Window, days either side", 1, 20, 5, key="ev_window")
-        if st.button("Measure", key="ev_run", use_container_width=True):
+        if st.button("Measure", key="ev_run", width="stretch"):
             res_ev = mc.event_study(src.con, ev_tk.strip(), ev_date,
                                     window=(-ev_win, ev_win))
             if not res_ev:
@@ -3834,7 +3848,7 @@ with tab_lab:
         lab_start = c1.date_input(
             "From", value=max(dt.date(2011, 1, 3), asof - dt.timedelta(days=365 * 10)),
             min_value=dt.date(2010, 1, 4), max_value=asof, key=f"lab_start_{chosen}")
-        go_lab = c2.button("Run rule", use_container_width=True, key=f"lab_go_{chosen}")
+        go_lab = c2.button("Run rule", width="stretch", key=f"lab_go_{chosen}")
 
         if go_lab:
             bars = src.con.execute(
@@ -3991,7 +4005,7 @@ with tab_news:
                                   format_func=lambda k: alerts.KINDS[k])
             a_x = a3.number_input("Level / %", min_value=0.0, value=0.0, step=1.0)
             a4.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
-            if a4.form_submit_button("Add", use_container_width=True) and a_ticker.strip():
+            if a4.form_submit_button("Add", width="stretch") and a_ticker.strip():
                 try:
                     alerts.add(store.con, a_ticker, a_kind,
                                None if a_kind == "new_filing" else a_x)
@@ -4038,7 +4052,7 @@ with tab_news:
                 default=["10-K", "10-Q", "8-K"])
             fts_from = f4.date_input("From", value=dt.date.today() - dt.timedelta(days=730))
             fts_to = f5.date_input("To", value=dt.date.today())
-            go_fts = st.form_submit_button("Search", use_container_width=True)
+            go_fts = st.form_submit_button("Search", width="stretch")
         if go_fts and fts_q.strip():
             fts_cik = None
             if fts_ticker.strip():
@@ -4060,7 +4074,7 @@ with tab_news:
                 st.caption(f"{total:,} filings contain it; the latest {len(found)} shown. "
                            "A hit means the words appear, not that they matter — "
                            "risk-factor boilerplate matches too.")
-                st.dataframe(found, hide_index=True, use_container_width=True,
+                st.dataframe(found, hide_index=True, width="stretch",
                              column_config={"url": st.column_config.LinkColumn(
                                  "filing", display_text="open")})
             elif not fts_failed:
@@ -4082,7 +4096,7 @@ with tab_news:
         if not secret("ANTHROPIC_API_KEY"):
             st.error("Needs ANTHROPIC_API_KEY in .env.local.")
         elif st.button("Write today's briefing", type="primary",
-                       use_container_width=True, key="brief_go"):
+                       width="stretch", key="brief_go"):
             with st.spinner("Gathering evidence, then writing"):
                 bundle = bfg.gather(src.con, followed)
                 try:
