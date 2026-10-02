@@ -54,3 +54,35 @@ def test_storing_again_replaces_rather_than_duplicates():
     for _ in range(2):
         fred.store(con, fred.download("CPIAUCSL", getter=lambda url: CSV))
     assert con.execute("SELECT COUNT(*) FROM macro_series").fetchone()[0] == 36
+
+
+# Eurostat's JSON-stat layout (checked against une_rt_m on 02.10.2026): `value` keys are
+# the positions in `dimension.time`; a period without a figure has no key at all.
+ESTAT = """{"label": "Unemployment by sex and age - monthly data",
+ "value": {"0": 6.5, "1": 6.4, "3": 6.4},
+ "dimension": {"time": {"category": {"index":
+     {"2026-05": 0, "2026-06": 1, "2026-07": 2, "2026-08": 3}}}}}"""
+
+
+def test_eurostat_answer_is_read_by_position_and_skips_missing_months():
+    frame = fred.parse_eurostat(ESTAT, "ESTAT_UNE_RT_M_EA21")
+    assert frame.date.tolist() == [dt.date(2026, 5, 1), dt.date(2026, 6, 1),
+                                   dt.date(2026, 8, 1)]
+    assert frame.value.tolist() == [6.5, 6.4, 6.4]
+
+
+def test_euro_unemployment_comes_from_eurostat_not_the_stale_fred_copy():
+    # FRED's OECD copy (LRHUTTTTEZM156S) stopped at 2023-01; the board showed it as current.
+    assert "LRHUTTTTEZM156S" not in fred.SERIES
+    asked = []
+    frame = fred.download("ESTAT_UNE_RT_M_EA21",
+                          getter=lambda url: asked.append(url) or ESTAT)
+    assert asked[0].startswith("https://ec.europa.eu/eurostat/")
+    assert "geo=EA21" in asked[0] and "s_adj=SA" in asked[0]
+    assert len(frame) == 3
+    con = duckdb.connect(":memory:")
+    _apply(con, MARKET_MIGRATIONS)
+    fred.store(con, frame)
+    row = fred.dashboard(con).set_index("id").loc["ESTAT_UNE_RT_M_EA21"]
+    assert row.latest == pytest.approx(6.4)
+    assert pd.Timestamp(row.period) == pd.Timestamp("2026-08-01")
