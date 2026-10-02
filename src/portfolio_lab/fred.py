@@ -12,17 +12,33 @@ without a consensus would be inventing one.
 Dates are FRED's observation dates (the period the figure describes), not release dates.
 A figure for June is published in July; nothing here is used in a backtest, and the
 table says which period each number belongs to.
+
+A few series come from Eurostat instead (EUROSTAT below), where FRED's copy stopped:
+the OECD euro-area unemployment rate on FRED ends in January 2023. Eurostat's JSON API
+needs no key either.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import io
+import json
+import urllib.parse
 
 import duckdb
 import pandas as pd
 
 URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series}"
+EUROSTAT_URL = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/{dataset}"
+
+# Series read from Eurostat: id -> (dataset, filters). The euro area's code follows its
+# membership (EA20 until 2025, EA21 from 2026 with Bulgaria), so when it grows the old
+# code stops updating — the board's `period` column then shows the series ageing, as it
+# did for the FRED copy (stuck at 2023-01 until 02.10.2026).
+EUROSTAT: dict[str, tuple[str, dict[str, str]]] = {
+    "ESTAT_UNE_RT_M_EA21": ("une_rt_m", {"geo": "EA21", "s_adj": "SA", "age": "TOTAL",
+                                         "sex": "T", "unit": "PC_ACT"}),
+}
 
 # id -> (label, group, how it is read, unit)
 #   yoy   % change on the same period a year earlier
@@ -56,7 +72,7 @@ SERIES: dict[str, tuple[str, str, str, str]] = {
     "AUSCPIALLQINMEI": ("Australia CPI", "Australia", "yoy", "%"),
     "LRUNTTTTAUM156S": ("Australia unemployment", "Australia", "level", "%"),
     "CP0000EZ19M086NEST": ("Euro area HICP inflation", "Euro area", "yoy", "%"),
-    "LRHUTTTTEZM156S": ("Euro area unemployment", "Euro area", "level", "%"),
+    "ESTAT_UNE_RT_M_EA21": ("Euro area unemployment", "Euro area", "level", "%"),
 }
 
 
@@ -73,6 +89,25 @@ def parse_csv(text: str, series: str) -> pd.DataFrame:
     return frame
 
 
+def parse_eurostat(text: str, series: str) -> pd.DataFrame:
+    """Eurostat's JSON-stat answer for one filtered series: `value` maps the position of
+    each period in `dimension.time` to its figure; periods without a figure are absent."""
+    payload = json.loads(text)
+    periods = payload["dimension"]["time"]["category"]["index"]
+    values = payload.get("value", {})
+    rows = [(series, pd.Timestamp(period).date(), float(values[str(pos)]))
+            for period, pos in sorted(periods.items(), key=lambda kv: kv[1])
+            if str(pos) in values]
+    return pd.DataFrame(rows, columns=["series_id", "date", "value"])
+
+
+def url_for(series: str) -> str:
+    if series in EUROSTAT:
+        dataset, filters = EUROSTAT[series]
+        return f"{EUROSTAT_URL.format(dataset=dataset)}?{urllib.parse.urlencode(filters)}"
+    return URL.format(series=series)
+
+
 def download(series: str, getter=None, timeout: int = 60) -> pd.DataFrame:
     if getter is None:
         import requests
@@ -81,7 +116,10 @@ def download(series: str, getter=None, timeout: int = 60) -> pd.DataFrame:
             r = requests.get(url, timeout=timeout)
             r.raise_for_status()
             return r.text
-    return parse_csv(getter(URL.format(series=series)), series)
+    text = getter(url_for(series))
+    if series in EUROSTAT:
+        return parse_eurostat(text, series)
+    return parse_csv(text, series)
 
 
 def store(con: duckdb.DuckDBPyConnection, frame: pd.DataFrame) -> int:
