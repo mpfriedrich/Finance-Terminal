@@ -1078,6 +1078,54 @@ brauchten 40–75 min je Zeitpunkt, in Paketen à 100 nur ~4 min für 1.200. `ba
 Pakete à 20 plus `torch.mps.empty_cache()` hielten es bei ~2,4 GB. Einen Tokenizer
 nicht zwischen Geräten teilen (sein Rotary-Cache bleibt auf dem alten Gerät).
 
+## Schiffe, Züge, Flugzeuge — reale Mengenströme (02.10.2026, lokale Sitzung)
+
+**Frage des Nutzers:** kostenloses Tracking von Schiffen und Flugzeugen („Flightradar“).
+**Entscheidung:** keine Live-Karte, sondern Tageszählungen als Zeitreihe — die sagen etwas
+über Rohstoffe und Frachtraten, Punkte auf einer Karte nicht.
+
+**Geprüft und nicht genommen:**
+- Live-Positionen (OpenSky, adsb.lol, AISStream): kostenlos, aber ohne Historie; AIS an
+  Land reicht nur ~50 km vor die Küste. Flightradar24 hat nur eine kostenpflichtige API.
+- Uni-Zugänge: FU hat LSEG Workspace for Students (Commodity Data, sogar CRSP — als
+  Plan B für Stichproben denkbar), aber nur Konten bis 2 Monate und nur wissenschaftliche
+  Nutzung; Schiffsdaten dort nicht bestätigt. DBIS (Clarksons usw.) blieb hinter einem
+  Captcha ungeprüft. USYD-Bibliothek: keine Schiffs-/Flugdaten gefunden. **Wichtig:** die
+  USYD-Nutzungsbedingungen verbieten, Inhalte ihrer Datenbanken in generative KI zu
+  geben. Ob das auch für Daten über das USYD-WRDS-Konto (CRSP) gilt, ist **ungeklärt** —
+  vor dem CRSP-Lauf klären, denn Briefing/Zusammenfassungen schicken Daten an Claude.
+
+**Gebaut:**
+- `shipping.py` + `scripts/build_shipping.py`: IMF PortWatch, tägliche Durchfahrten durch
+  28 Meerengen nach Schiffstyp, seit 2019-01-01, kein Schlüssel (ArcGIS-Dienst
+  `Daily_Chokepoints_Data`, 1.000 Zeilen je Seite). Erster Lauf 79.156 Zeilen in ~55 s,
+  Folgeläufe holen nur die letzten 30 Tage neu (PortWatch revidiert). Stand am
+  02.10.2026: neuester Tag 27.09.2026, also ~5 Tage Verzug.
+- Zwei Tabellen: `chokepoint_transits` (jeweils neuester Wert) und `chokepoint_first`
+  (erster gesehener Wert mit Datum, nie überschrieben — R13). Die Zeitpunkt-Treue beginnt
+  erst mit dem ersten Download; vorher tragen alle Zeilen dessen Datum. Nichts davon
+  fließt in einen Backtest.
+- COMMODITIES-Tab: 7-Tage-Schnitt Schiffe/Tag und Tanker/Tag, Veränderung gegen dieselbe
+  Woche ein Jahr früher (Saison fällt heraus), Chart je Schiffstyp. Eine Lücke ist eine
+  Lücke, keine null Schiffe (Test).
+- FRED, neue Gruppe „US transport“: Güterzug-Waggonladungen, Container auf der Schiene,
+  Fluggäste, Auslastung (BTS, monatlich, 2–3 Monate Verzug). Tägliche Zug- oder Flugzahlen
+  mit Historie gibt es kostenlos nicht; Eurocontrol (Europa, täglich) wäre ein späterer
+  Schritt.
+- `build_prices.py` aktualisiert PortWatch täglich, sobald es einmal gespeichert ist;
+  `copy_us` bringt beide Tabellen in den Welt-Bestand.
+
+**Gegen die Wirklichkeit geprüft:** Hormus fällt am 01.03.2026 von ~100 auf 0–4 Schiffe
+pro Tag (127 am 22.02., 57 am 28.02., 20, 4, 0 am 04.03.) — genau die öffentlich
+berichteten Zahlen nach den Angriffen von USA/Israel auf Iran am 28.02.2026. Stand
+27.09.2026: 3 Schiffe/Tag, −96 % zum Vorjahr; Bosporus −46 %; Kertsch 0.
+
+**Bekannte Grenzen:** Schiffe mit abgeschaltetem Transponder fehlen (Schattenflotte —
+Tanker durch Hormus und das Schwarze Meer systematisch zu niedrig). Ungeprüft: wie stark
+PortWatch alte Tage nachträglich ändert; `chokepoint_first` misst das ab jetzt.
+Nebenbei gefunden: FRED `LRHUTTTTEZM156S` (Euro-Arbeitslosigkeit) endet im Januar 2023,
+die Zeile im MACRO-Tab ist also veraltet.
+
 ## Geplant: Hebel und Derivate (vorgemerkt am 25.09.2026, noch nicht begonnen)
 
 Auf Frage des Nutzers („gibt es die Option für Derivate und Leverage?“) nur in den Plan

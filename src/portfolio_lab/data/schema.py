@@ -214,6 +214,35 @@ MARKET_MIGRATIONS: list[str] = [
         active     BOOLEAN NOT NULL
     );
     """,
+    # 024 — daily ship transits through the maritime chokepoints (shipping.py, IMF
+    # PortWatch). The latest published value; PortWatch revises recent days.
+    """
+    CREATE TABLE IF NOT EXISTS chokepoint_transits (
+        chokepoint       VARCHAR NOT NULL,
+        name             VARCHAR NOT NULL,
+        date             DATE    NOT NULL,
+        n_total          INTEGER,
+        n_tanker         INTEGER,
+        n_container      INTEGER,
+        n_dry_bulk       INTEGER,
+        n_cargo          INTEGER,
+        capacity         BIGINT,
+        capacity_tanker  BIGINT,
+        PRIMARY KEY (chokepoint, date)
+    );
+    """,
+    # 025 — the first value seen for each chokepoint-day, never overwritten, with the day
+    # it was seen: the point-in-time record (R13) that a later backtest would need.
+    """
+    CREATE TABLE IF NOT EXISTS chokepoint_first (
+        chokepoint  VARCHAR NOT NULL,
+        date        DATE    NOT NULL,
+        n_total     INTEGER,
+        n_tanker    INTEGER,
+        seen_on     DATE    NOT NULL,
+        PRIMARY KEY (chokepoint, date)
+    );
+    """,
 ]
 
 USER_MIGRATIONS: list[str] = [

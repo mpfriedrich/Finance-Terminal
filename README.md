@@ -82,7 +82,11 @@ uv run python scripts/build_fundamentals.py   # SEC XBRL facts
 uv run python scripts/build_prices.py --since=2010-01-01
 uv run python scripts/add_benchmark.py        # S&P 500 TR, the price index, SPY
 uv run python scripts/build_ticker_history.py # and how little of it can be recovered
+uv run python scripts/build_fred.py           # macro, rail and airline series (no key)
+uv run python scripts/build_shipping.py       # ships through the chokepoints (no key)
 ```
+
+`build_prices.py` keeps the FRED series and the ship counts current once they are stored.
 
 Then:
 

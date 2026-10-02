@@ -75,6 +75,7 @@ from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
 from portfolio_lab import alerts, comps, deals, export, fred, fts, insiders, paper, risk, world
+from portfolio_lab import shipping
 from portfolio_lab import wacc as W
 from portfolio_lab import summary as ai_summary
 
@@ -3307,6 +3308,54 @@ with tab_commodities:
                           color=[ui.AMBER, ui.CYAN, ui.UP, ui.DOWN, ui.MUTED][:len(chosen_c)])
             st.caption("All rebased to 100 at the start, so the lines compare movement.")
 
+    st.markdown("#### Ships through the chokepoints")
+    ship_board = shipping.dashboard(src.con)
+    if ship_board.empty:
+        st.info("No ship traffic stored yet. Run once: "
+                "`uv run python scripts/build_shipping.py` — IMF PortWatch needs no key, "
+                "and build_prices.py keeps it current.")
+    else:
+        key_only = st.toggle("Main chokepoints only", value=True, key="ship_key")
+        shown = ship_board[ship_board.chokepoint.isin(shipping.KEY)] if key_only \
+            else ship_board
+        st.markdown(ui.grid(pd.DataFrame({
+            "chokepoint": shown.chokepoint,
+            "ships/day": shown.ships_per_day.map(lambda v: ui.num(v, 0)),
+            "vs year ago": shown.vs_year_ago.map(lambda v: ui.pct(v, 0)),
+            "tankers/day": shown.tankers_per_day.map(lambda v: ui.num(v, 0)),
+            "tankers vs year ago": shown.tankers_vs_year_ago.map(lambda v: ui.pct(v, 0)),
+        }), numeric={"ships/day", "tankers/day"},
+            signed={"vs year ago", "tankers vs year ago"}, ticker_col="chokepoint"),
+            unsafe_allow_html=True)
+        s1, s2, s3 = st.columns([3, 1, 1])
+        ship_pick = s1.multiselect(
+            "Chokepoints", options=ship_board.chokepoint.tolist(),
+            default=shipping.KEY[:3], key="ship_pick", label_visibility="collapsed")
+        ship_field = s2.selectbox(
+            "Ships", ["n_total", "n_tanker", "n_container", "n_dry_bulk"],
+            format_func={"n_total": "all ships", "n_tanker": "tankers",
+                         "n_container": "container ships",
+                         "n_dry_bulk": "bulk carriers"}.get,
+            key="ship_field", label_visibility="collapsed")
+        ship_since = s3.selectbox("Since", ["1Y", "3Y", "7Y"], key="ship_since",
+                                  label_visibility="collapsed")
+        if ship_pick:
+            ship_lines = shipping.history(
+                src.con, ship_pick, ship_field,
+                dt.date.today() - dt.timedelta(days=365 * int(ship_since[:-1])))
+            if not ship_lines.empty:
+                st.line_chart(ship_lines, height=280,
+                              color=[ui.AMBER, ui.CYAN, ui.UP, ui.DOWN,
+                                     ui.MUTED][:len(ship_lines.columns)])
+        st.caption(
+            f"IMF PortWatch, ships passing each day as a seven-day average, as of "
+            f"{ship_board.as_of.max():%d.%m.%Y} (about five days behind). Compared with "
+            "the same week a year earlier, so seasons cancel out. Ships that switch off "
+            "their transponder are not counted — tankers carrying sanctioned oil often "
+            "do, so tanker counts through Hormuz and the Black Sea read low. Recent days "
+            "are revised by PortWatch.")
+
+    if rows:
         st.markdown("#### Which of your holdings move with them")
         watch_c = _watched()
         pick_c = st.text_input(

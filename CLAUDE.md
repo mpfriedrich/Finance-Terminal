@@ -54,7 +54,8 @@ uv run python scripts/morning_briefing.py # scheduled weekday job (install_sched
 
 First-time / after-schema-change build order for the free store:
 `build_fundamentals.py` (SEC companyfacts, long), `build_fx.py`,
-`build_listing_ratios.py`, `build_world.py`, `build_fred.py`, `warm_pit_cache.py`
+`build_listing_ratios.py`, `build_world.py`, `build_fred.py`, `build_shipping.py`,
+`warm_pit_cache.py`
 (long; needed again whenever `CACHE_VERSION` changes).
 
 World store (WRDS): `build_wrds.py`. See section 7.
@@ -89,6 +90,7 @@ src/portfolio_lab/
   comps.py wacc.py deals.py research.py   valuation tools
   world.py numeraire.py     market monitor, USD/gold unit
   risk.py alerts.py insiders.py fts.py fred.py export.py summary.py macro.py options.py
+  shipping.py               ship transits through 28 chokepoints (IMF PortWatch, no key)
 tests/                      one file per module; fixtures: paid_fixture.py (Sharadar layout),
                             wrds_fixture.py (Compustat Global), crsp_fixture.py (CRSP + NA)
 scripts/                    build_* and operational scripts
@@ -198,6 +200,13 @@ ticker; ended lines use their last CRSP ticker, with `-permno` appended on a col
   random walk in every variant (small/base, 5/20-day horizon), reversed every recent
   trend even on synthetic random walks, and its 80 % bands held 12–39 % of the time.
   Don't re-test from scratch; PLAN.md → „Geprüft und verworfen: Kronos“ has the numbers.
+- **Ship/train/flight data (02.10.2026):** live tracking (OpenSky, AISStream) has no
+  history; the useful free data is IMF PortWatch (daily chokepoint transits, in
+  `shipping.py`) and BTS rail/airline series via FRED. Hormuz fell from ~100 ships a
+  day to near 0 on 01.03.2026 (Iran war), so a −96 % is real, not a bug. **USYD's
+  database terms forbid feeding their content to generative AI**; whether that covers
+  CRSP via the USYD WRDS account is unresolved. Settle it before CRSP data can reach
+  `summary.py`/`briefing.py`. PLAN.md → „Schiffe, Züge, Flugzeuge“.
 - **TimesFM 3.0 and the Claude subagent „stock-price-movement-predictor“ were tested too
   (02.10.2026).** TimesFM tracks a random walk (no edge, bands slightly narrow); the
   agent restates 60-day volatility with coin-flip probabilities. Neither beats a 60-day

@@ -14,7 +14,7 @@ import time
 
 from portfolio_lab.config import MARKET_DB, WORLD_DB
 from portfolio_lab.data.schema import finish_rebuild, open_market_for_rebuild
-from portfolio_lab import fred, world
+from portfolio_lab import fred, shipping, world
 from portfolio_lab.data import history, prices as px, universe, wrds
 
 FULL_WINDOW_DAYS = 460
@@ -86,6 +86,13 @@ if con.execute("SELECT COUNT(*) FROM macro_series").fetchone()[0]:
             fred.store(con, fred.download(sid))
         except Exception:                                            # noqa: BLE001
             print(f"  FRED {sid}: not refreshed", flush=True)
+# Chokepoint transits (scripts/build_shipping.py), the same way: only once stored, and an
+# outage must not fail the price build.
+if shipping.last_date(con):
+    try:
+        print(f"  PortWatch: {shipping.update(con)} chokepoint-days refreshed", flush=True)
+    except Exception:                                                # noqa: BLE001
+        print("  PortWatch: not refreshed", flush=True)
 universe.observed_ranges(con)
 # ticker_history's price windows are what the universe is read from; keep them current.
 history.refresh_price_windows(con)
