@@ -244,3 +244,33 @@ def test_the_cone_agrees_with_the_single_expiry_calculation():
 def test_no_chain_means_no_cone_rather_than_a_flat_line():
     assert op.expected_move_cone(100.0, pd.DataFrame()).empty
     assert op.expected_move_cone(0.0, _term()).empty
+
+
+def _closed_chain():
+    """Yahoo's layout before the US open on 2026-10-02: no bids, open interest 0 everywhere."""
+    return pd.DataFrame({
+        "strike": [300.0, 330.0, 340.0, 350.0],
+        "lastPrice": [33.0, 6.0, 2.5, 0.9],
+        "bid": 0.0, "ask": 0.0,
+        "openInterest": [0, 0, 0, 0],
+        "volume": [40.0, 900.0, 2.0, np.nan],
+        "impliedVolatility": 0.00001,
+        "lastTradeDate": pd.to_datetime(["2026-09-24 18:21", "2026-10-01 19:59",
+                                         "2026-10-01 19:40", "2026-10-01 15:00"], utc=True),
+    })
+
+
+def test_a_closed_market_chain_without_open_interest_still_yields_contracts():
+    # 2026-10-02: every contract had open interest 0, so the old open-interest-only gate
+    # kept nothing and RESEARCH -> OPTIONS showed "no usable option contracts".
+    out = op._clean(_closed_chain(), spot=330.0, kind="call", t_years=30 / 365)
+    assert out.attrs["mode"].startswith("last traded")
+    # 300: traded, but last on 24.09 -> stale. 340: volume 2. 350: no volume at all.
+    assert out.strike.tolist() == [330.0]
+
+
+def test_a_few_leftover_bids_do_not_switch_the_chain_to_live_mode():
+    chain_ = _closed_chain()
+    chain_.loc[0, ["bid", "ask"]] = [32.0, 34.0]
+    out = op._clean(chain_, spot=330.0, kind="call", t_years=30 / 365)
+    assert out.attrs["mode"].startswith("last traded") and 330.0 in out.strike.tolist()
