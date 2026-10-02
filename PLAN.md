@@ -1071,12 +1071,64 @@ gestiegen)** — statistisch dünn, aber nirgends ein Vorteil.
 **Gesamtentscheidung (Nutzer, 02.10.2026):** keines der drei einbauen. Rangfolge
 TimesFM > Agent > Kronos, keines schlägt die einfachen Regeln. Für eine Bandbreite in
 RESEARCH ist das 60-Tage-Vol-Band die ehrliche Wahl (80–82 % bei 80 % Soll).
-**Technik, falls je wieder:** braucht PyTorch (~770 MB Umgebung) und GPU (MPS, M4).
+**Technik (Kronos), falls je wieder:** braucht PyTorch (~770 MB Umgebung) und GPU (MPS, M4).
 Kein KV-Cache — jeder Schritt rechnet den ganzen Verlauf neu: 800 Pfade auf einmal
 brauchten 40–75 min je Zeitpunkt, in Paketen à 100 nur ~4 min für 1.200. `base` mit
 400 T Vorlauf und Paketen à 100 belegte **13 GB** und lagerte aus (16-GB-Mac);
 Pakete à 20 plus `torch.mps.empty_cache()` hielten es bei ~2,4 GB. Einen Tokenizer
 nicht zwischen Geräten teilen (sein Rotary-Cache bleibt auf dem alten Gerät).
+
+## Umgesetzt: Risikospanne mit Log-HAR in RESEARCH (02.10.2026, lokale Sitzung)
+
+**Anlass:** Recherche „was lohnt sich wirklich“, danach drei vorhersagende Ansätze
+getestet (Risiko-Modell, Anomalien, Lazy Prices). Nur das Risiko-Modell hat klar
+bestanden; der Nutzer hat „integrier mal“ gesagt.
+
+**Was:** `volforecast.py` — Log-HAR nach Corsi plus Ein-Jahres-Term, *gepoolt* über ~200
+liquide US-Aktien (`sample_tickers`: kein `.`/`^`/`=`, Median-Umsatz 90 T > $5 Mio.,
+Kurs > $5, drei Jahre Historie, Auswahl per Hash des Tickers, also stabil), geschätzt
+nur mit Daten bis zum Stichtag. Zurück aus Logs mit Duans Smearing; die 80-%-Spanne nimmt
+den Multiplikator, der in den Schätzdaten 80 % der 20-Tage-Bewegungen hielt (statt 1,28).
+RESEARCH zeigt unter den Kennzahlen „VOL MODEL 20D“, „VOL 60D“ und „80% RANGE“, um den
+heutigen Schluss **zentriert** — Breite, nie Richtung. Nur für US-Linien (Ticker ohne
+Punkt); für `TIC.CTY` gibt es keine Zahl, weil dort nicht gemessen. Modell
+`st.cache_data` 1 h, Schätzung ~0,5–1 s.
+
+**Gemessen** (Forschungsskript, 200 Aktien der TimesFM-Auswahl, Ursprünge alle 5 Tage
+2013–2026, Neuschätzung alle 250 Tage nur auf Vergangenem, 126.480 Prognosen):
+
+| | QLIKE | Rangkorr. mit realisierter Varianz | 80-%-Band |
+|---|---|---|---|
+| 60-Tage-Vol (bisher) | 0,482 | 0,710 | 81 % |
+| EWMA (λ 0,94) | 0,478 | 0,683 | 79 % |
+| HAR/Log-HAR ohne Jahresterm | 0,507 / 0,402 | 0,640 / 0,650 | 86 / 84 % |
+| **Log-HAR + Jahresterm** | **0,397** | **0,736** | 83 %, kalibriert **78 %** |
+
+Ohne Jahresterm zieht das gepoolte Modell jede Aktie zum Marktmittel (schlechtere
+Rangfolge); genau eine Erweiterung (die in der Literatur übliche) wurde probiert, keine
+weitere, um nicht an die Testdaten anzupassen.
+
+**Das Modul selbst nachgeprüft** (jährlich mit `fit_from_store` auf Daten bis Vorjahresende,
+auf den 200 Testaktien, 122.550 Prognosen 2014–2026): QLIKE 0,382 gegenüber 0,483 für
+die 60-Tage-Vol (−21 %), Rangkorrelation 0,677 gegenüber 0,642, Spanne hält 78,3 %
+(je Jahr 75–83 %, auch 2020 und 2022).
+
+**Dabei gefunden:** eingefrorene Kurse. Eine Stichprobenlinie hatte 1.741 unveränderte
+Schlusskurse; auf dem `EPS`-Boden trieb deren Log-Varianz Duans Faktor auf 9,7 und jede
+Prognose auf das ~2,6-Fache (AAPL 74 % statt ~28 %). Fenster mit mehr als 5 unveränderten
+Schlüssen in 22 Tagen trainieren nicht und bekommen keine Prognose. Test
+`test_a_frozen_price_is_a_gap_not_calm` schlägt ohne diesen Schutz fehl (geprüft).
+
+**Ungetestet:** Nicht-US-Linien, andere Horizonte als 20 Tage, Schätzung auf dem
+Welt-Bestand (dort zieht die Auswahl dieselben US-Linien; geprüft: identische
+Koeffizienten wie im Free-Bestand).
+
+**Anomalien (Open Source Asset Pricing, Chen & Zimmermann), nur gemessen, nicht
+eingebaut:** 165 in der Originalstudie klar signifikante Signale, Long-Short bis 12/2024.
+Originalmethode: im Stichprobenzeitraum +0,75 %/Monat, nach Veröffentlichung +0,30 %
+(40 %), alle zusammen 2015–2024 +0,30 %, t 3,8. Wertgewichtete Dezile (realistischer):
++0,58 → +0,19 % (24 %), zusammen 2015–2024 +0,16 %/Monat, **t 1,7**, vor Kosten. Am
+stabilsten: Momentum 6 M, Analysten-Revisionen, Aktienausgabe, Optionssignale.
 
 ## Schiffe, Züge, Flugzeuge — reale Mengenströme (02.10.2026, lokale Sitzung)
 

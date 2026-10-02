@@ -78,6 +78,7 @@ from portfolio_lab import alerts, comps, deals, export, fred, fts, insiders, pap
 from portfolio_lab import shipping
 from portfolio_lab import wacc as W
 from portfolio_lab import summary as ai_summary
+from portfolio_lab import volforecast as vfc
 
 st.set_page_config(page_title="Portfolio Lab", page_icon="◫", layout="wide")
 st.markdown(ui.CSS, unsafe_allow_html=True)
@@ -142,6 +143,12 @@ def _yahoo_bars(symbol: str) -> pd.DataFrame:
 @st.cache_data(ttl=600)
 def _frame(asof: dt.date) -> pd.DataFrame:
     return _market_source().screening_frame(asof)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _vol_model(asof: dt.date) -> "vfc.Model | None":
+    """The pooled Log-HAR fit (volforecast.py) on data up to `asof`: ~1 s, once a day."""
+    return vfc.fit_from_store(_market_source().con, asof)
 
 
 @st.cache_data(ttl=3600)
@@ -1517,6 +1524,29 @@ with tab_research:
                             + f"{stats_now['days']} stored days to {stats_now['to']}. "
                             "Beta describes the past and is noisy on a short window."
                         )
+                    # Width of the next 20 sessions, never the direction (volforecast.py).
+                    # Measured on US shares only, so foreign lines (TIC.CTY) get no number.
+                    if "." not in ticker and not ticker.startswith("^"):
+                        vf_model = _vol_model(asof)
+                        vf_now = (vfc.for_ticker(src.con, vf_model, ticker)
+                                  if vf_model else None)
+                        if vf_now:
+                            st.markdown(ui.stats([
+                                ("VOL MODEL 20D", f"{vf_now['volatility']:.0%}", "amber"),
+                                ("VOL 60D", f"{vf_now['trailing_60d']:.0%}", ""),
+                                ("80% RANGE", f"{vf_now['low']:,.2f} – {vf_now['high']:,.2f}", ""),
+                            ]), unsafe_allow_html=True)
+                            st.caption(
+                                f"Range for the close 20 sessions after {vf_now['date']}, "
+                                "centred on today's close: it describes how far the price "
+                                "may move, not which way. Pooled Log-HAR on "
+                                f"{vf_model.series} US shares, fitted on data to "
+                                f"{vf_model.asof}. "
+                                "Measured 2014–2026 on 200 US shares, refitted yearly: "
+                                "21 % lower forecast error than the 60-day figure, and the "
+                                "range held 78 % of the time (75–83 % by year). A frozen "
+                                "price or under a year of history gives no number."
+                            )
 
             # -------------------------------------------------------------- financials
             with sections[1]:

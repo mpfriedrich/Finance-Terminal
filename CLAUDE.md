@@ -90,6 +90,8 @@ src/portfolio_lab/
   comps.py wacc.py deals.py research.py   valuation tools
   world.py numeraire.py     market monitor, USD/gold unit
   risk.py alerts.py insiders.py fts.py fred.py export.py summary.py macro.py options.py
+  volforecast.py            20-day risk range in RESEARCH: pooled Log-HAR on ~200 US
+                            shares, width only, never direction (PLAN.md)
   shipping.py               ship transits through 28 chokepoints (IMF PortWatch, no key)
 tests/                      one file per module; fixtures: paid_fixture.py (Sharadar layout),
                             wrds_fixture.py (Compustat Global), crsp_fixture.py (CRSP + NA)
