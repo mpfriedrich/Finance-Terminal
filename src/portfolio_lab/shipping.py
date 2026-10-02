@@ -38,6 +38,25 @@ COLUMNS = ["chokepoint", "name", "date", "n_total", "n_tanker", "n_container",
 # Shown first: the ones oil, container rates and grain prices react to.
 KEY = ["Strait of Hormuz", "Suez Canal", "Bab el-Mandeb Strait", "Cape of Good Hope",
        "Panama Canal", "Malacca Strait", "Bosporus Strait", "Taiwan Strait"]
+# Where PortWatch counts each chokepoint (lat, lon), from its PortWatch_chokepoints_database
+# service on 02.10.2026. Stored here rather than fetched, so the map works offline; a
+# chokepoint PortWatch adds later is left off the map until it is added here.
+COORDS: dict[str, tuple[float, float]] = {
+    "Suez Canal": (30.593, 32.437), "Panama Canal": (9.121, -79.767),
+    "Bosporus Strait": (41.169, 29.092), "Bab el-Mandeb Strait": (12.789, 43.350),
+    "Malacca Strait": (1.517, 102.665), "Strait of Hormuz": (26.297, 56.860),
+    "Cape of Good Hope": (-34.927, 20.883), "Gibraltar Strait": (35.942, -5.755),
+    "Dover Strait": (51.030, 1.506), "Oresund Strait": (55.508, 12.851),
+    "Taiwan Strait": (24.724, 119.831), "Korea Strait": (34.131, 129.209),
+    "Tsugaru Strait": (41.328, 140.353), "Luzon Strait": (20.489, 121.352),
+    "Lombok Strait": (-8.419, 115.801), "Ombai Strait": (-8.399, 125.091),
+    "Bohai Strait": (38.373, 120.900), "Torres Strait": (-9.863, 142.248),
+    "Sunda Strait": (-5.967, 105.775), "Makassar Strait": (0.352, 119.257),
+    "Magellan Strait": (-52.640, -69.595), "Yucatan Channel": (21.815, -85.647),
+    "Windward Passage": (19.986, -73.698), "Mona Passage": (18.449, -67.711),
+    "Balabac Strait": (7.414, 117.115), "Bering Strait": (65.966, -165.550),
+    "Mindoro Strait": (12.468, 120.403), "Kerch Strait": (45.267, 36.544),
+}
 
 
 def parse(payload: dict) -> pd.DataFrame:
@@ -147,6 +166,16 @@ def dashboard(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     board["_o"] = board.chokepoint.map(lambda n: order.get(n, len(KEY)))
     return (board.sort_values(["_o", "ships_per_day"], ascending=[True, False])
             .drop(columns="_o").reset_index(drop=True))
+
+
+def on_map(board: pd.DataFrame) -> pd.DataFrame:
+    """The board with each chokepoint's position; rows without a known position drop."""
+    if board.empty:
+        return board.assign(lat=pd.Series(dtype=float), lon=pd.Series(dtype=float))
+    placed = board[board.chokepoint.isin(COORDS)].copy()
+    placed["lat"] = placed.chokepoint.map(lambda n: COORDS[n][0])
+    placed["lon"] = placed.chokepoint.map(lambda n: COORDS[n][1])
+    return placed.reset_index(drop=True)
 
 
 def history(con: duckdb.DuckDBPyConnection, names: list[str], field: str,

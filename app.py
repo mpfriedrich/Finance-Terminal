@@ -3315,6 +3315,11 @@ with tab_commodities:
                 "`uv run python scripts/build_shipping.py` — IMF PortWatch needs no key, "
                 "and build_prices.py keeps it current.")
     else:
+        map_tankers = st.radio("Map", ["all ships", "tankers"], horizontal=True,
+                               key="ship_map", label_visibility="collapsed") == "tankers"
+        st.plotly_chart(
+            charts.chokepoint_map(shipping.on_map(ship_board), tankers=map_tankers),
+            use_container_width=True, key="ship_map_fig")
         key_only = st.toggle("Main chokepoints only", value=True, key="ship_key")
         shown = ship_board[ship_board.chokepoint.isin(shipping.KEY)] if key_only \
             else ship_board
@@ -3349,7 +3354,9 @@ with tab_commodities:
                                      ui.MUTED][:len(ship_lines.columns)])
         st.caption(
             f"IMF PortWatch, ships passing each day as a seven-day average, as of "
-            f"{ship_board.as_of.max():%d.%m.%Y} (about five days behind). Compared with "
+            f"{ship_board.as_of.max():%d.%m.%Y} (about five days behind). On the map the "
+            "circle's area is the count and its colour the change; hover for the "
+            "numbers. Compared with "
             "the same week a year earlier, so seasons cancel out. Ships that switch off "
             "their transponder are not counted — tankers carrying sanctioned oil often "
             "do, so tanker counts through Hormuz and the Black Sea read low. Recent days "

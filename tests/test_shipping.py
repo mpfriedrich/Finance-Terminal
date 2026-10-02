@@ -138,3 +138,43 @@ def test_history_returns_the_chosen_chokepoints_from_the_start_date():
     assert list(h.columns) == ["Strait of Hormuz"]
     assert h.index[0] >= pd.Timestamp("2026-09-01")
     assert h.iloc[-1, 0] == pytest.approx(5.0)
+
+
+def test_every_chokepoint_portwatch_counts_has_a_place_on_the_map():
+    # The 28 names the live service returned on 02.10.2026.
+    assert len(shipping.COORDS) == 28
+    assert all(-90 <= lat <= 90 and -180 <= lon <= 180
+               for lat, lon in shipping.COORDS.values())
+    assert set(shipping.KEY) <= set(shipping.COORDS)
+
+
+def test_the_map_places_known_chokepoints_and_drops_unknown_ones():
+    con = _store()
+    day = dt.date(2026, 9, 27)
+    rows = [_row(day - dt.timedelta(days=b), portid=p, name=n)
+            for b in range(7)
+            for p, n in (("chokepoint6", "Strait of Hormuz"), ("chokepoint99", "New Strait"))]
+    shipping.store(con, _frame(rows))
+    placed = shipping.on_map(shipping.dashboard(con))
+    assert placed.chokepoint.tolist() == ["Strait of Hormuz"]
+    assert (placed.lat.iloc[0], placed.lon.iloc[0]) == shipping.COORDS["Strait of Hormuz"]
+    assert shipping.on_map(pd.DataFrame()).empty
+
+
+def test_the_map_caps_the_colour_and_greys_a_missing_comparison():
+    from portfolio_lab import charts
+
+    placed = pd.DataFrame({
+        "chokepoint": ["Strait of Hormuz", "Suez Canal", "Bering Strait"],
+        "as_of": [dt.date(2026, 9, 27)] * 3,
+        "ships_per_day": [3.0, 40.0, 4.0], "vs_year_ago": [-0.96, 0.10, None],
+        "tankers_per_day": [1.0, 15.0, 2.0], "tankers_vs_year_ago": [-0.97, -0.11, None],
+        "lat": [26.3, 30.6, 66.0], "lon": [56.9, 32.4, -165.6]})
+    marker = charts.chokepoint_map(placed).data[0].marker
+    assert list(marker.color) == pytest.approx([-charts.MAP_COLOUR_CAP, 0.10, 0.0])
+    # Area carries the count: above the base size the diameter grows with the square root,
+    # so 40 ships against 4 is sqrt(10) times as wide.
+    assert (marker.size[1] - 5) / (marker.size[2] - 5) == pytest.approx(10 ** 0.5)
+    tank = charts.chokepoint_map(placed, tankers=True).data[0]
+    assert "15 tankers/day" in tank.hovertext[1]
+    assert "no year-earlier value" in tank.hovertext[2]

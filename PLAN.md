@@ -1114,6 +1114,12 @@ nicht zwischen Geräten teilen (sein Rotary-Cache bleibt auf dem alten Gerät).
   Schritt.
 - `build_prices.py` aktualisiert PortWatch täglich, sobald es einmal gespeichert ist;
   `copy_us` bringt beide Tabellen in den Welt-Bestand.
+- Weltkarte darüber (`charts.chokepoint_map`, Plotly `Scattergeo`): Kreisfläche = Schiffe
+  bzw. Tanker pro Tag, Farbe = Veränderung zum Vorjahr, bei ±50 % gekappt (sonst macht
+  Hormus mit −96 % alles andere grau). Plotlys eingebaute Küstenlinien, keine
+  Kartenkacheln von fremden Servern — läuft offline. Koordinaten fest in
+  `shipping.COORDS` (aus PortWatch, 02.10.2026). Feste Namensschilder wurden verworfen:
+  Suez/Bab el-Mandeb/Hormus und die Straßen um Taiwan überlappten; Namen per Hover.
 
 **Gegen die Wirklichkeit geprüft:** Hormus fällt am 01.03.2026 von ~100 auf 0–4 Schiffe
 pro Tag (127 am 22.02., 57 am 28.02., 20, 4, 0 am 04.03.) — genau die öffentlich
