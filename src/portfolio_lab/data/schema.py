@@ -253,6 +253,33 @@ MARKET_MIGRATIONS: list[str] = [
         PRIMARY KEY (taken_at, region)
     );
     """,
+    # 027 — tonnes loaded and unloaded per day at the ports markets watch, by ship type
+    # (shipping.PORTS, IMF PortWatch estimates). Quantities, not commodities.
+    """
+    CREATE TABLE IF NOT EXISTS port_trade (
+        port                VARCHAR NOT NULL,
+        date                DATE    NOT NULL,
+        portcalls           INTEGER,
+        import              DOUBLE,
+        export              DOUBLE,
+        import_tanker       DOUBLE,
+        import_container    DOUBLE,
+        import_dry_bulk     DOUBLE,
+        export_tanker       DOUBLE,
+        export_container    DOUBLE,
+        export_dry_bulk     DOUBLE,
+        PRIMARY KEY (port, date)
+    );
+    """,
+    # 028 — cargo airlines' aircraft in the air at each snapshot (aviation.py), by airline.
+    """
+    CREATE TABLE IF NOT EXISTS air_cargo (
+        taken_at  TIMESTAMP NOT NULL,
+        airline   VARCHAR   NOT NULL,
+        airborne  INTEGER   NOT NULL,
+        PRIMARY KEY (taken_at, airline)
+    );
+    """,
 ]
 
 USER_MIGRATIONS: list[str] = [

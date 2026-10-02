@@ -89,3 +89,31 @@ def test_the_aircraft_map_sizes_by_count():
     cells = pd.DataFrame({"lat": [52.5, 40.5], "lon": [7.5, -73.5], "aircraft": [100, 25]})
     marker = charts.aircraft_map(cells, dt.datetime(2026, 10, 2, 11, 11)).data[0].marker
     assert (marker.size[0] - 2) / (marker.size[1] - 2) == pytest.approx(2.0)
+
+
+def test_freighters_are_recognised_by_the_airline_in_their_callsign():
+    air = pd.DataFrame({"callsign": ["FDX1407", "UPS2984", "DLH400", "", None, "fdx9"],
+                        "lat": [40.0] * 6, "lon": [-80.0] * 6})
+    cargo = aviation.cargo_flights(air)
+    assert cargo.airline.tolist() == ["FedEx", "UPS", "FedEx"]
+    assert aviation.cargo_airline("RYR123") is None
+
+
+def test_a_snapshot_stores_freighters_by_airline_and_their_share():
+    con = _store()
+    payload = {"time": T, "states": [
+        _state("f1", 40.0, -80.0, callsign="FDX12"), _state("f2", 41.0, -81.0,
+                                                           callsign="FDX13"),
+        _state("u1", 50.0, 8.0, callsign="UPS7"), _state("p1", 50.0, 8.0),
+    ]}
+    aviation.snapshot(con, getter=lambda url: payload)
+    stored = dict(con.execute("SELECT airline, airborne FROM air_cargo").fetchall())
+    assert stored == {"FedEx": 2, "UPS": 1}
+    hist = aviation.cargo_history(con)
+    assert hist.freighters.iloc[0] == 3 and hist.share.iloc[0] == pytest.approx(0.75)
+
+
+def test_a_snapshot_without_freighters_reads_as_a_zero_share():
+    con = _store()
+    aviation.snapshot(con, getter=lambda url: {"time": T, "states": [_state("p1", 50, 8)]})
+    assert aviation.cargo_history(con).share.iloc[0] == 0.0
