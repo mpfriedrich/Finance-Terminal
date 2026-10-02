@@ -193,3 +193,27 @@ def test_saving_a_rule_replaces_the_previous_one(store):
     assert store.get_strategy(pid).signal == "mean_reversion"
     assert store.con.execute(
         "SELECT COUNT(*) FROM strategies WHERE portfolio_id = ?", [pid]).fetchone()[0] == 1
+
+
+def test_a_tracked_position_without_market_cap_pays_the_most_expensive_tier(store):
+    # R8. A NaN market cap used to fail every tier comparison and fall through to the
+    # cheapest spread (audit 02.10.2026); the screen hands NaN for names without shares.
+    import datetime as dt
+
+    import pandas as pd
+
+    from portfolio_lab.config import CostModel
+
+    costs = CostModel()
+    pid = store.create("Costs")
+    picks = pd.DataFrame({"ticker": ["SMALL", "UNKNOWN", "HUGE"], "weight": [1 / 3] * 3,
+                          "price": [10.0, 10.0, 10.0],
+                          "market_cap": [100e6, float("nan"), 500e9]})
+    store.start_tracking(pid, picks, dt.date(2026, 7, 1), "{}",
+                         cost_of=costs.round_trip_cost)
+    paid = dict(store.con.execute(
+        "SELECT ticker, entry_cost FROM tracked WHERE portfolio_id = ?", [pid]).fetchall())
+    assert paid["UNKNOWN"] == pytest.approx(costs.commission + costs.spread_tiers[0][1])
+    assert paid["UNKNOWN"] == pytest.approx(paid["SMALL"])
+    assert paid["HUGE"] < paid["SMALL"]
+    assert costs.spread_for(None) == costs.spread_tiers[0][1]

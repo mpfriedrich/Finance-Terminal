@@ -399,7 +399,12 @@ def price_stats(
     for label, days in (("1m", 21), ("3m", 63), ("6m", 126), ("1y", 252)):
         out[f"return_{label}"] = (s.iloc[-1] / s.iloc[-days] - 1.0) if len(s) > days else np.nan
 
-    out["volatility"] = rets.std() * np.sqrt(252) if len(rets) > 20 else np.nan
+    # Over the last year, not the whole stored history: that went back to 2009 for most
+    # shares, so "VOL" in RESEARCH was a 17-year average and the OPTIONS tab compared
+    # next month's implied volatility with it (found in the audit of 02.10.2026).
+    year = rets.tail(252)
+    out["volatility"] = year.std() * np.sqrt(252) if len(year) > 20 else np.nan
+    out["volatility_60d"] = rets.tail(60).std() * np.sqrt(252) if len(rets) >= 60 else np.nan
     running_max = s.cummax()
     out["max_drawdown"] = float((s / running_max - 1.0).min())
     out["high"] = float(s.max())
