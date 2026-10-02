@@ -1215,7 +1215,11 @@ Flugzeuge: Abdeckung folgt den freiwilligen Empfängern (dicht in Europa/Nordame
 dünn über Ozeanen, Afrika, Russland, China); Militär sendet oft nicht; ein Umbau des
 Empfängernetzes verschiebt die Zahlen. Ein Sprung in `air_traffic` ist zuerst verdächtig.
 Nebenbei gefunden: FRED `LRHUTTTTEZM156S` (Euro-Arbeitslosigkeit) endet im Januar 2023,
-die Zeile im MACRO-Tab ist also veraltet.
+die Zeile im MACRO-Tab war also veraltet. **Behoben 02.10.2026:** `fred.EUROSTAT` liest
+die Reihe direkt bei Eurostat (`une_rt_m`, saisonbereinigt, alle Altersgruppen). Alle
+OECD-Euro-Reihen auf FRED enden 2023; Eurostat führt die Eurozone seit 2026 als **EA21**
+(mit Bulgarien), `EA20` gibt es dort nicht mehr. Stand August 2026: 6,4 %. Wächst die
+Eurozone wieder, bleibt der Code stehen — die Spalte `period` im MACRO-Tab zeigt das.
 
 ## Geplant: Hebel und Derivate (vorgemerkt am 25.09.2026, noch nicht begonnen)
 
