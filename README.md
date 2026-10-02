@@ -91,6 +91,10 @@ uv run python scripts/build_air.py            # one count of aircraft in the air
 and stores one aircraft count per run. The live aircraft map comes from the OpenSky
 Network (non-commercial use, attribution shown in the app).
 
+Live single ships (optional): sign in with GitHub at https://aisstream.io/account,
+create a key and add `AISSTREAM_API_KEY=...` to `.env.local`. In COMMODITIES, pick
+"ships live", a region, and press Listen.
+
 Then:
 
 ```bash

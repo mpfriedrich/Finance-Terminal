@@ -13,7 +13,14 @@ port = 8501
 # reach the Mac. This is a home-network convenience, not a deployment: there is no
 # login, so anyone on that network can open it.
 address = "0.0.0.0"
-enableCORS = false
+# Only pages the app serves itself may talk to it. With CORS off (until 02.10.2026) any
+# website open in the same browser could have opened a WebSocket to the app and read
+# what it shows; there is no login to stop that.
+enableCORS = true
+# Host names the app answers to. Blocks DNS rebinding (a foreign domain re-pointed at
+# this Mac). ".local" names resolve only inside the home network, so a phone reaches the
+# app as http://<mac-name>.local:8501; a bare LAN IP is refused on purpose.
+allowedHosts = ["localhost", "127.0.0.1", "*.local"]
 enableXsrfProtection = true
 
 [browser]

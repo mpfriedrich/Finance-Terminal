@@ -99,6 +99,8 @@ src/portfolio_lab/
   shipping.py               ship transits through 28 chokepoints and cargo tonnes at 26
                             ports (IMF PortWatch, no key)
   aviation.py               aircraft in the air now (OpenSky, no key) + daily snapshots
+  ais.py                    single ships live (AISStream WebSocket, AISSTREAM_API_KEY);
+                            the MAP tab shows ships, ports and aircraft together
 tests/                      one file per module; fixtures: paid_fixture.py (Sharadar layout),
                             wrds_fixture.py (Compustat Global), crsp_fixture.py (CRSP + NA)
 scripts/                    build_* and operational scripts
@@ -134,6 +136,9 @@ if it makes a number look better.
 10. **No advice wording** in UI strings (R23): no "buy", "recommend", "you should" and similar.
 11. **The app has no login.** Never expose it to the internet. Phone access would go
     through Tailscale; the user hasn't decided on that yet.
+    `.streamlit/config.toml` keeps `enableCORS = true` and `allowedHosts` (localhost +
+    `*.local`): with CORS off any website in the same browser could open a WebSocket to
+    the app. From the phone use `http://<mac-name>.local:8501`; a bare IP is refused.
 
 ## 7. Data sources and keys
 

@@ -13,6 +13,7 @@ dependencies = [
     "psycopg2-binary>=2.9.10",
     "requests>=2.34.2",
     "streamlit>=1.64.0",
+    "websockets>=16.0",
     "yfinance>=1.7.0",
 ]
 
