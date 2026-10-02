@@ -1276,6 +1276,23 @@ eingebaut (das wäre Personen-Tracking). Gebaut wurde, was als Menge messbar ist
   dass eine fehlgeschlagene Verbindung weder Schlüssel noch Adresse zeigt
   (`raise … from None`). Grenzen laut AISStream: 3 Verbindungen je Konto und IP, Abo
   binnen 3 s, höchstens 1 Abo-Änderung pro Sekunde.
+- **Eigener Tab MAP** (Wunsch des Nutzers: „so nah an Bloomberg wie möglich“): Schiffe
+  und Flugzeuge raus aus COMMODITIES. Oben eine Kennzahlen-Leiste (Hormus, Suez,
+  Bab el-Mandeb, Kap, Panama in Schiffen/Tag mit Vorjahr; Häfen kt/Tag; Flugzeuge in der
+  Luft; Frachter), darunter die Karte mit Ebenen SHIPS / TANKERS / PORT CARGO / LIVE AIS /
+  AIR / FREIGHTERS, rechts „MOVERS vs 1Y“ (größte Veränderungen von Meerengen und Häfen),
+  unten Unterreiter mit den Detailtabellen. Movers-Filter zuerst falsch: „mindestens 5
+  Schiffe/Tag **heute**“ warf Hormus (3/Tag, vorher ~85) raus — jetzt heute ODER vor einem
+  Jahr.
+- **Erster echter Test 02.10.2026:** Rotterdam 60 s → 171 Nachrichten, **137 Schiffe**,
+  7 mit Ziel/Tiefgang (z. B. ein Tanker vom Feld Johan Castberg nach Rotterdam, 14,3 m
+  Tiefgang = beladen). Hormus 60 s → **nichts** außer der Abo-Bestätigung (keine
+  kostenlosen Empfänger im Golf, kaum Verkehr); die App sagt das jetzt ausdrücklich.
+  **Gefundener Fehler:** der Dienst schreibt `latitude`/`longitude` klein, die
+  Dokumentation groß — der erste Lauf zeichnete 0 von 137 Schiffen. Tests nutzen jetzt
+  die echte Form, beide Schreibweisen werden gelesen.
+- Statische Daten (Typ, Ziel, Tiefgang, IMO) bleiben in `data/cache/ais_static.json`
+  erhalten, damit jede App-Sitzung auf dem Gelernten aufbaut (atomar geschrieben).
 - Eigentümer bewusst nicht; die IMO-Nummer identifiziert das Schiff. Naheliegender
   nächster Schritt: Abgleich der IMO-Nummern mit der OFAC-Sanktionsliste (kostenlos).
 

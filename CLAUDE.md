@@ -95,7 +95,8 @@ src/portfolio_lab/
   shipping.py               ship transits through 28 chokepoints and cargo tonnes at 26
                             ports (IMF PortWatch, no key)
   aviation.py               aircraft in the air now (OpenSky, no key) + daily snapshots
-  ais.py                    single ships live (AISStream WebSocket, AISSTREAM_API_KEY)
+  ais.py                    single ships live (AISStream WebSocket, AISSTREAM_API_KEY);
+                            the MAP tab shows ships, ports and aircraft together
 tests/                      one file per module; fixtures: paid_fixture.py (Sharadar layout),
                             wrds_fixture.py (Compustat Global), crsp_fixture.py (CRSP + NA)
 scripts/                    build_* and operational scripts

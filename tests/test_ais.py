@@ -1,7 +1,9 @@
 """AISStream live ships: reading messages, the subscription, the listen loop — no network.
 
-Messages are hand-made in AISStream's layout (documentation, 02.10.2026): MessageType,
-MetaData {MMSI, ShipName, Latitude, Longitude, time_utc}, Message {<type>: {...}}.
+Messages are hand-made in the layout the live service sent on 02.10.2026: MessageType,
+MetaData {MMSI, MMSI_String, ShipName, latitude, longitude, time_utc} — lower-case
+latitude/longitude, although the documentation writes them capitalised — and
+Message {<type>: {...}}.
 """
 import json
 
@@ -15,8 +17,9 @@ KEY = "test-key-not-real-0123456789"
 
 def _pos(mmsi, lat, lon, name="ATLANTIC STAR@@@", sog=12.3, status=0):
     return {"MessageType": "PositionReport",
-            "MetaData": {"MMSI": mmsi, "ShipName": name, "Latitude": lat,
-                         "Longitude": lon, "time_utc": "2026-10-02 06:00:00"},
+            "MetaData": {"MMSI": mmsi, "MMSI_String": mmsi, "ShipName": name,
+                         "latitude": lat, "longitude": lon,
+                         "time_utc": "2026-10-02 05:56:54.018173445 +0000 UTC"},
             "Message": {"PositionReport": {"Sog": sog, "Cog": 90.0,
                                            "NavigationalStatus": status}}}
 
@@ -149,3 +152,28 @@ def test_the_live_map_draws_one_trace_per_ship_class():
     fig = charts.live_ship_map(ships, ais.REGIONS["Strait of Hormuz"])
     assert sorted(t.name for t in fig.data) == ["cargo", "other", "tanker"]
     assert "MMSI 3" in fig.data[[t.name for t in fig.data].index("other")].hovertext[0]
+
+
+def test_positions_read_in_the_documented_spelling_too():
+    # 02.10.2026: the first live listen heard 143 positions and drew none, because the
+    # service writes latitude/longitude in lower case and the reader expected Latitude.
+    documented = {"MessageType": "PositionReport",
+                  "MetaData": {"MMSI": 7, "ShipName": "X", "Latitude": 1.0,
+                               "Longitude": 2.0},
+                  "Message": {"PositionReport": {"Sog": 1.0}}}
+    body_only = {"MessageType": "PositionReport", "MetaData": {"MMSI": 8},
+                 "Message": {"PositionReport": {"Latitude": 3.0, "Longitude": 4.0}}}
+    ships, _ = ais.read([documented, body_only])
+    assert ships.set_index("mmsi")[["lat", "lon"]].to_dict("index") == {
+        7: {"lat": 1.0, "lon": 2.0}, 8: {"lat": 3.0, "lon": 4.0}}
+
+
+def test_static_data_survives_on_disk_between_app_sessions(tmp_path):
+    path = tmp_path / "cache" / "ais_static.json"
+    assert ais.load_static(path) == {}
+    _, static = ais.read([_static(211000001, type_code=80)])
+    ais.save_static(path, static)
+    again = ais.load_static(path)
+    assert again == static and isinstance(next(iter(again)), int)
+    path.write_text("{not json")
+    assert ais.load_static(path) == {}

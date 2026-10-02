@@ -92,6 +92,10 @@ def _text(value) -> str | None:
     return cleaned or None
 
 
+def _first(*values):
+    return next((v for v in values if v is not None), None)
+
+
 def read(messages: list[dict], static: dict[int, dict] | None = None
          ) -> tuple[pd.DataFrame, dict[int, dict]]:
     """Messages as AISStream sends them -> one row per ship (its latest position), plus the
@@ -118,7 +122,11 @@ def read(messages: list[dict], static: dict[int, dict] | None = None
                 "static_name": _text(body.get("Name")),
             }
         elif kind == "PositionReport":
-            lat, lon = meta.get("Latitude"), meta.get("Longitude")
+            # The live service writes latitude/longitude in lower case (02.10.2026),
+            # the documentation capitalised; the report itself carries them too.
+            lat = _first(meta.get("latitude"), meta.get("Latitude"), body.get("Latitude"))
+            lon = _first(meta.get("longitude"), meta.get("Longitude"),
+                         body.get("Longitude"))
             if lat is None or lon is None:
                 continue
             latest[mmsi] = {
@@ -199,3 +207,22 @@ def summary(ships: pd.DataFrame) -> pd.DataFrame:
 
 def listened_at() -> dt.datetime:
     return dt.datetime.now(dt.UTC).replace(tzinfo=None)
+
+
+def load_static(path) -> dict[int, dict]:
+    """Static data heard in earlier listens, kept on disk so a new app session does not
+    start blind: a ship's type, length and IMO number do not change, and its destination
+    and draught are the last ones it sent. Missing or unreadable file: start empty."""
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return {int(mmsi): info for mmsi, info in raw.items()}
+
+
+def save_static(path, static: dict[int, dict]) -> None:
+    """Write atomically, so a crash mid-write never leaves half a file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps({str(k): v for k, v in static.items()}))
+    tmp.replace(path)
