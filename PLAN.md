@@ -1259,6 +1259,72 @@ eingebaut (das wäre Personen-Tracking). Gebaut wurde, was als Menge messbar ist
   in Passagierflugzeugen (~die Hälfte der Luftfracht); manche Frachtgesellschaften
   fliegen auch Charter.
 
+### Einzelne Schiffe live (02.10.2026, lokale Sitzung)
+
+- `ais.py`: AISStream (WebSocket, kostenloser Schlüssel `AISSTREAM_API_KEY` in
+  `.env.local`). Keine Historie, kein Schnappschuss — die App **hört** auf Knopfdruck eine
+  von 12 kleinen Regionen 30 s bis 5 min ab (Hormus, Bab el-Mandeb, Suez, Yanbu, Singapur,
+  Bosporus, Rotterdam, Dover, Houston, Panama, Taiwan, Port Hedland) und zeigt jedes
+  gehörte Schiff: Name, Typ, Fahrt, Status, Ziel, Tiefgang, Länge, IMO-Nummer, auf einer
+  gezoomten Karte (Farbe nach Typ). Nichts wird gespeichert; die App bleibt lesend.
+- Warum nie vollständig: Positionen kommen alle paar Sekunden, Name/Typ/Ziel/Tiefgang aber
+  nur alle **6 Minuten** in einer eigenen Meldung. Nach 60 s haben viele Schiffe Position
+  und Namen, aber nur ein Teil Ziel und Tiefgang; was gehört wurde, bleibt für die
+  App-Sitzung gespeichert, mehrmaliges Hören füllt die Lücken. Nur Küstenempfänger;
+  dunkle Schiffe fehlen. Ziel und Tiefgang tippt die Besatzung ein.
+- Schlüssel (R24): nur in der Abo-Nachricht, nie in URL, Log oder Fehler; ein Test prüft,
+  dass eine fehlgeschlagene Verbindung weder Schlüssel noch Adresse zeigt
+  (`raise … from None`). Grenzen laut AISStream: 3 Verbindungen je Konto und IP, Abo
+  binnen 3 s, höchstens 1 Abo-Änderung pro Sekunde.
+- **Eigener Tab MAP** (Wunsch des Nutzers: „so nah an Bloomberg wie möglich“): Schiffe
+  und Flugzeuge raus aus COMMODITIES. Oben eine Kennzahlen-Leiste (Hormus, Suez,
+  Bab el-Mandeb, Kap, Panama in Schiffen/Tag mit Vorjahr; Häfen kt/Tag; Flugzeuge in der
+  Luft; Frachter), darunter die Karte mit Ebenen SHIPS / TANKERS / PORT CARGO / LIVE AIS /
+  AIR / FREIGHTERS, rechts „MOVERS vs 1Y“ (größte Veränderungen von Meerengen und Häfen),
+  unten Unterreiter mit den Detailtabellen. Movers-Filter zuerst falsch: „mindestens 5
+  Schiffe/Tag **heute**“ warf Hormus (3/Tag, vorher ~85) raus — jetzt heute ODER vor einem
+  Jahr.
+- **Erster echter Test 02.10.2026:** Rotterdam 60 s → 171 Nachrichten, **137 Schiffe**,
+  7 mit Ziel/Tiefgang (z. B. ein Tanker vom Feld Johan Castberg nach Rotterdam, 14,3 m
+  Tiefgang = beladen). Hormus 60 s → **nichts** außer der Abo-Bestätigung (keine
+  kostenlosen Empfänger im Golf, kaum Verkehr); die App sagt das jetzt ausdrücklich.
+  **Gefundener Fehler:** der Dienst schreibt `latitude`/`longitude` klein, die
+  Dokumentation groß — der erste Lauf zeichnete 0 von 137 Schiffen. Tests nutzen jetzt
+  die echte Form, beide Schreibweisen werden gelesen.
+- Statische Daten (Typ, Ziel, Tiefgang, IMO) bleiben in `data/cache/ais_static.json`
+  erhalten, damit jede App-Sitzung auf dem Gelernten aufbaut (atomar geschrieben).
+- Eigentümer bewusst nicht; die IMO-Nummer identifiziert das Schiff. Naheliegender
+  nächster Schritt: Abgleich der IMO-Nummern mit der OFAC-Sanktionsliste (kostenlos).
+
+### Ideen für MAP (vorgemerkt am 02.10.2026, nicht begonnen — Nutzer entscheidet)
+
+Daten, die es kostenlos gibt:
+1. **Sanktionsabgleich:** IMO-Nummern aus LIVE AIS gegen die OFAC-SDN-Liste (CSV,
+   kostenlos, enthält Schiffe mit IMO) — Treffer in der Tabelle markieren.
+2. **Störungen auf der Karte:** PortWatch hat eine eigene Störungs-Datenbank
+   (`portwatch_disruptions_database`, `gdacs_events`: Stürme, Erdbeben, Hafenschließungen)
+   — als Ebene über Häfen und Meerengen legen.
+3. **Handel je Land:** PortWatch `Daily_Trade_Data_*` schätzt Import/Export je Land und
+   Tag — z. B. Chinas Rohstoffimporte als Zeitreihe in MACRO.
+4. **Europas Flüge täglich:** Eurocontrol veröffentlicht tägliche Flugzahlen je Land mit
+   Historie (kostenlos) — anders als OpenSky mit Vergangenheit.
+5. **Frachtraten:** öffentliche Wochenindizes für Container (z. B. Drewry WCI, Freightos
+   FBX) — Lizenz vorher prüfen.
+
+Auswertungen aus dem, was schon da ist:
+6. **Beladen oder leer:** Tiefgang der Tanker in LIVE AIS gegen ihren Höchsttiefgang →
+   Anteil beladener Tanker je Region.
+7. **„Dunkel-Lücke“:** Häfen, deren PortWatch-Tonnen abrupt auf fast null fallen, während
+   Nachrichten weiter Verkehr melden (Yanbu 2026) — automatisch markieren statt nur im
+   Text erklären.
+8. **Eigene AIS-Historie:** der Morgen-Job hört täglich 2 Minuten auf feste Regionen und
+   speichert Schiffe je Typ — wie die OpenSky-Schnappschüsse, nur für Schiffe.
+9. **Alarme:** Meerenge oder Hafen fällt in einer Woche um mehr als X % → Hinweis über
+   `alerts.py` und im Morgen-Briefing (dort auch die MOVERS-Liste).
+10. **Verkehr gegen Kurse:** Hormus gegen Brent, Port Hedland gegen Erz-Minen,
+    Frachtflug-Anteil gegen FedEx/UPS — als Studie in RESEARCH, ehrlich mit Verzögerung
+    und außerhalb der Stichprobe geprüft; nichts davon als Signal formulieren (R23).
+
 ## Audit 02.10.2026 — das ganze Terminal (lokale Sitzung, Branch `claude/audit-review`)
 
 **Auftrag des Nutzers:** Logik, Kohärenz, Codefehler, Formatierung, Redundanzen. Gearbeitet
@@ -1459,3 +1525,17 @@ den Einsatz hinaus möglich sind.
       - Testreihe gegen die neue Quelle laufen lassen
       - Anleitung schreiben
       **Covers:** Austauschbarkeit aus Q5
+
+## Befund 02.10.2026: App war für fremde Webseiten offen
+
+`.streamlit/config.toml` hatte seit dem ersten Commit `enableCORS = false`. Streamlit 1.64
+warnt beim Start: dann nimmt die App WebSocket-Verbindungen von **jedem** Ursprung an. Eine
+fremde Webseite im selben Browser hätte also im Hintergrund mit der App sprechen und
+sehen können, was sie zeigt — die App hat keinen Login.
+
+Jetzt `enableCORS = true` und `allowedHosts = ["localhost", "127.0.0.1", "*.local"]`
+(gegen DNS-Rebinding). Gemessen mit curl auf einem Testport (verified):
+- WebSocket von fremdem Ursprung → 403; gleicher Ursprung (localhost) → 101.
+- DNS-Rebinding (Host und Origin `evil.example.com`) → 403.
+- Handy-Fall `moritzs-macbook-pro.local` → 101; nackte LAN-IP → 403 (gewollt, sie wechselt).
+- Ungeprüft: echter Aufruf vom iPhone über den `.local`-Namen.

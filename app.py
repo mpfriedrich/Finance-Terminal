@@ -73,7 +73,7 @@ from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
 from portfolio_lab import alerts, comps, deals, export, fred, fts, insiders, paper, risk, world
-from portfolio_lab import aviation, shipping
+from portfolio_lab import ais, aviation, shipping
 from portfolio_lab import wacc as W
 from portfolio_lab import summary as ai_summary
 from portfolio_lab import volforecast as vfc
@@ -542,9 +542,9 @@ def _paper_section(origin: str, key: str, opener, default_name: str,
 
 
 (tab_screen, tab_monitor, tab_research, tab_options, tab_strategy, tab_lab, tab_books,
- tab_deals, tab_macro, tab_commodities, tab_calendar, tab_news) = st.tabs(
+ tab_deals, tab_macro, tab_commodities, tab_map, tab_calendar, tab_news) = st.tabs(
     ["SCREEN", "MONITOR", "RESEARCH", "OPTIONS", "STRATEGY", "LAB", "BOOKS", "DEALS",
-     "MACRO", "COMMODITIES", "CALENDAR", "NEWS"]
+     "MACRO", "COMMODITIES", "MAP", "CALENDAR", "NEWS"]
 )
 
 with tab_screen:
@@ -3352,182 +3352,6 @@ with tab_commodities:
                           color=[ui.AMBER, ui.CYAN, ui.UP, ui.DOWN, ui.MUTED][:len(chosen_c)])
             st.caption("All rebased to 100 at the start, so the lines compare movement.")
 
-    # Anonymous OpenSky allows ~100 worldwide calls a day; holding each for 15 minutes
-    # keeps a long session well inside that.
-    @st.cache_data(ttl=900, show_spinner="Asking OpenSky …")
-    def _aircraft_now():
-        try:
-            return aviation.fetch()
-        except Exception:                                            # noqa: BLE001
-            return None
-
-    st.markdown("#### Ships and aircraft")
-    ship_board = shipping.dashboard(src.con)
-    port_now = shipping.port_board(src.con)
-    map_view = st.radio("Map", ["all ships", "tankers", "port cargo", "aircraft now"],
-                        horizontal=True, key="ship_map", label_visibility="collapsed")
-    if map_view == "port cargo":
-        if port_now.empty:
-            st.info("No port cargo stored yet. Run once: "
-                    "`uv run python scripts/build_shipping.py` (the first run takes "
-                    "about ten minutes; PortWatch answers port queries slowly).")
-        else:
-            st.plotly_chart(charts.port_map(port_now), width="stretch",
-                            key="port_map_fig")
-    if map_view == "aircraft now":
-        live = _aircraft_now()
-        if live is None:
-            st.info("OpenSky did not answer. Its anonymous allowance is about 100 "
-                    "worldwide calls a day; try again in a while.")
-        else:
-            air_at, air = live
-            regions_now = aviation.by_region(air)
-            freighters = aviation.cargo_flights(air)
-            only_cargo = st.toggle(
-                f"Freighters only ({len(freighters):,} of {len(air):,}, "
-                f"{len(freighters) / max(len(air), 1):.1%})", key="air_cargo_only")
-            st.plotly_chart(
-                charts.aircraft_map(aviation.grid(freighters), air_at, what="freighters",
-                                    colour=ui.AMBER) if only_cargo
-                else charts.aircraft_map(aviation.grid(air), air_at),
-                width="stretch", key="air_map_fig")
-            air_hist = aviation.history(src.con)
-            table_air = pd.DataFrame({"region": regions_now.index,
-                                      "airborne now": regions_now.map("{:,}".format)})
-            if not air_hist.empty:
-                last_stored = air_hist.iloc[-1]
-                table_air[f"stored {last_stored.name:%d.%m. %H:%M}"] = [
-                    f"{int(last_stored[r]):,}" if r in last_stored else "—"
-                    for r in regions_now.index]
-            st.markdown(ui.grid(table_air, numeric=set(table_air.columns) - {"region"},
-                                ticker_col="region"), unsafe_allow_html=True)
-            if len(air_hist) > 1:
-                st.line_chart(air_hist, height=240)
-            if not freighters.empty:
-                by_airline = freighters.airline.value_counts()
-                st.markdown(ui.grid(pd.DataFrame({
-                    "cargo airline": by_airline.index,
-                    "in the air now": by_airline.map("{:,}".format)}),
-                    numeric={"in the air now"}, ticker_col="cargo airline"),
-                    unsafe_allow_html=True)
-            cargo_hist = aviation.cargo_history(src.con)
-            if len(cargo_hist) > 1:
-                st.line_chart(cargo_hist[["share"]] * 100, height=200)
-                st.caption("Freighters as % of all aircraft in the air, per stored "
-                           "snapshot.")
-            st.caption(
-                f"{len(air):,} aircraft airborne at {air_at:%d.%m.%Y %H:%M} UTC, each "
-                "circle the count in a 3° cell. Data: "
-                f"{aviation.ATTRIBUTION}. Coverage follows volunteer receivers: dense "
-                "over Europe and North America, thin over oceans, Africa, Russia and "
-                "China — a low count there can mean no receiver, not no aircraft. "
-                "Military and some private aircraft do not broadcast. Freighters are "
-                "recognised by the cargo airline in their callsign (FedEx, UPS, DHL, "
-                "Cargolux, …); what they carry is never public, and passenger airlines' "
-                "belly cargo — about half of all air freight — is not counted. "
-                "Owners are not shown: for private aircraft they are people. The daily "
-                "price "
-                "build stores one count per region, at about the same time each weekday; "
-                "counts from different times of day do not compare.")
-    if ship_board.empty:
-        st.info("No ship traffic stored yet. Run once: "
-                "`uv run python scripts/build_shipping.py` — IMF PortWatch needs no key, "
-                "and build_prices.py keeps it current.")
-    else:
-        if map_view in ("all ships", "tankers"):
-            st.plotly_chart(
-                charts.chokepoint_map(shipping.on_map(ship_board),
-                                      tankers=map_view == "tankers"),
-                width="stretch", key="ship_map_fig")
-        st.markdown("**Ships through the chokepoints**")
-        key_only = st.toggle("Main chokepoints only", value=True, key="ship_key")
-        shown = ship_board[ship_board.chokepoint.isin(shipping.KEY)] if key_only \
-            else ship_board
-        st.markdown(ui.grid(pd.DataFrame({
-            "chokepoint": shown.chokepoint,
-            "ships/day": shown.ships_per_day.map(lambda v: ui.num(v, 0)),
-            "vs year ago": shown.vs_year_ago.map(lambda v: ui.pct(v, 0)),
-            "tankers/day": shown.tankers_per_day.map(lambda v: ui.num(v, 0)),
-            "tankers vs year ago": shown.tankers_vs_year_ago.map(lambda v: ui.pct(v, 0)),
-        }), numeric={"ships/day", "tankers/day"},
-            signed={"vs year ago", "tankers vs year ago"}, ticker_col="chokepoint"),
-            unsafe_allow_html=True)
-        s1, s2, s3 = st.columns([3, 1, 1])
-        ship_pick = s1.multiselect(
-            "Chokepoints", options=ship_board.chokepoint.tolist(),
-            default=shipping.KEY[:3], key="ship_pick", label_visibility="collapsed")
-        ship_field = s2.selectbox(
-            "Ships", ["n_total", "n_tanker", "n_container", "n_dry_bulk"],
-            format_func={"n_total": "all ships", "n_tanker": "tankers",
-                         "n_container": "container ships",
-                         "n_dry_bulk": "bulk carriers"}.get,
-            key="ship_field", label_visibility="collapsed")
-        ship_since = s3.selectbox("Since", ["1Y", "3Y", "7Y"], key="ship_since",
-                                  label_visibility="collapsed")
-        if ship_pick:
-            ship_lines = shipping.history(
-                src.con, ship_pick, ship_field,
-                dt.date.today() - dt.timedelta(days=365 * int(ship_since[:-1])))
-            if not ship_lines.empty:
-                st.line_chart(ship_lines, height=280,
-                              color=[ui.AMBER, ui.CYAN, ui.UP, ui.DOWN,
-                                     ui.MUTED][:len(ship_lines.columns)])
-        st.caption(
-            f"IMF PortWatch, ships passing each day as a seven-day average, as of "
-            f"{ship_board.as_of.max():%d.%m.%Y} (about five days behind). On the map the "
-            "circle's area is the count and its colour the change; hover for the "
-            "numbers. Compared with "
-            "the same week a year earlier, so seasons cancel out. Ships that switch off "
-            "their transponder are not counted — tankers carrying sanctioned oil often "
-            "do, so tanker counts through Hormuz and the Black Sea read low. Recent days "
-            "are revised by PortWatch.")
-
-    if not port_now.empty:
-        st.markdown("**Cargo through the ports**")
-        st.markdown(ui.grid(pd.DataFrame({
-            "port": port_now.port,
-            "known for": port_now.known_for,
-            "mostly (30d)": port_now.mostly.fillna("—"),
-            "out kt/day": port_now.export_t.map(lambda v: ui.num(v / 1e3, 0)),
-            "out vs year ago": port_now.export_vs_year_ago.map(lambda v: ui.pct(v, 0)),
-            "in kt/day": port_now.import_t.map(lambda v: ui.num(v / 1e3, 0)),
-            "in vs year ago": port_now.import_vs_year_ago.map(lambda v: ui.pct(v, 0)),
-        }), numeric={"out kt/day", "in kt/day"},
-            signed={"out vs year ago", "in vs year ago"}, ticker_col="port"),
-            unsafe_allow_html=True)
-        p1, p2, p3 = st.columns([3, 1, 1])
-        port_names = dict(zip(port_now.id, port_now.port))
-        port_pick = p1.multiselect(
-            "Ports", options=list(port_names), format_func=port_names.get,
-            default=[p for p in ("port955", "port1091", "port570") if p in port_names],
-            key="port_pick", label_visibility="collapsed")
-        port_field = p2.selectbox(
-            "Flow", ["export", "import", "export_tanker", "import_tanker",
-                     "export_dry_bulk", "import_dry_bulk", "export_container",
-                     "import_container"],
-            format_func=lambda f: f.replace("_", " ").replace("export", "out")
-            .replace("import", "in"),
-            key="port_field", label_visibility="collapsed")
-        port_since = p3.selectbox("Since", ["1Y", "3Y", "7Y"], key="port_since",
-                                  label_visibility="collapsed")
-        if port_pick:
-            port_lines = shipping.port_history(
-                src.con, port_pick, port_field,
-                dt.date.today() - dt.timedelta(days=365 * int(port_since[:-1])))
-            if not port_lines.empty:
-                st.line_chart(port_lines / 1e3, height=280, y_label="kt a day",
-                              color=[ui.AMBER, ui.CYAN, ui.UP, ui.DOWN,
-                                     ui.MUTED][:len(port_lines.columns)])
-        st.caption(
-            "IMF PortWatch estimates of the tonnes ships loaded (out) and unloaded (in) "
-            "each day, from each ship's size and the change in its draught; a "
-            "seven-day average in thousand tonnes, against the same week a year "
-            "earlier. Quantities and ship types, not commodities: tanker tonnes may be "
-            "crude or products, bulk tonnes ore or grain. Ships sailing dark are "
-            "missing — Saudi tankers at Yanbu have mostly switched off their "
-            "transponders since the Houthi blockade of July 2026, so Yanbu reads near "
-            "zero while Lloyd's List reports traffic down about a third.")
-
     if rows:
         st.markdown("#### Which of your holdings move with them")
         watch_c = _watched()
@@ -3561,6 +3385,339 @@ with tab_commodities:
                 )
             else:
                 st.info("Not enough overlapping history for those companies.")
+
+
+with tab_map:
+    # Laid out like a terminal map function: a strip of the numbers that moved, the map
+    # with its layers, the movers beside it, and the detail underneath.
+
+    # Anonymous OpenSky allows ~100 worldwide calls a day; holding each for 15 minutes
+    # keeps a long session well inside that.
+    @st.cache_data(ttl=900, show_spinner=False)
+    def _aircraft_now():
+        try:
+            return aviation.fetch()
+        except Exception:                                            # noqa: BLE001
+            return None
+
+    ship_board = shipping.dashboard(src.con)
+    port_now = shipping.port_board(src.con)
+    live_air = _aircraft_now()
+    ais_static_path = CACHE_DIR / "ais_static.json"
+
+    def _tone(v):
+        return "" if v is None or pd.isna(v) else ("up" if v > 0 else "down")
+
+    strip = []
+    if not ship_board.empty:
+        by_name = ship_board.set_index("chokepoint")
+        for name, short in (("Strait of Hormuz", "HORMUZ"), ("Suez Canal", "SUEZ"),
+                            ("Bab el-Mandeb Strait", "BAB EL-MANDEB"),
+                            ("Cape of Good Hope", "CAPE"), ("Panama Canal", "PANAMA")):
+            if name in by_name.index:
+                chg = by_name.at[name, "vs_year_ago"]
+                strip.append((f"{short} SHIPS/D",
+                              f"{by_name.at[name, 'ships_per_day']:.0f} {ui.pct(chg, 0)}",
+                              _tone(chg)))
+    if not port_now.empty:
+        known = port_now.dropna(subset=["total_vs_year_ago"])
+        then = (known.total_t / (1 + known.total_vs_year_ago)).sum()
+        chg = known.total_t.sum() / then - 1 if then else None
+        strip.append(("PORTS KT/D", (f"{port_now.total_t.sum() / 1e3:,.0f} "
+                                     f"{ui.pct(chg, 0)}"), _tone(chg)))
+    if live_air is not None:
+        air_at, air = live_air
+        freighters = aviation.cargo_flights(air)
+        strip.append(("AIRBORNE", f"{len(air):,}", ""))
+        strip.append(("FREIGHTERS", (f"{len(freighters):,} "
+                                     f"{len(freighters) / max(len(air), 1):.1%}"), "amber"))
+    if strip:
+        st.markdown(ui.stats(strip), unsafe_allow_html=True)
+
+    layer = st.radio("Layer", ["SHIPS", "TANKERS", "PORT CARGO", "LIVE AIS", "AIR",
+                               "FREIGHTERS"],
+                     horizontal=True, key="map_layer", label_visibility="collapsed")
+    c_map, c_side = st.columns([3, 1])
+
+    with c_map:
+        fig = None
+        if layer in ("SHIPS", "TANKERS"):
+            if ship_board.empty:
+                st.info("No ship traffic stored yet. Run once: "
+                        "`uv run python scripts/build_shipping.py` — IMF PortWatch needs "
+                        "no key, and build_prices.py keeps it current.")
+            else:
+                fig = charts.chokepoint_map(shipping.on_map(ship_board),
+                                            tankers=layer == "TANKERS")
+        elif layer == "PORT CARGO":
+            if port_now.empty:
+                st.info("No port cargo stored yet. Run once: "
+                        "`uv run python scripts/build_shipping.py` (the first run takes "
+                        "about ten minutes; PortWatch answers port queries slowly).")
+            else:
+                fig = charts.port_map(port_now)
+        elif layer in ("AIR", "FREIGHTERS"):
+            if live_air is None:
+                st.info("OpenSky did not answer. Its anonymous allowance is about 100 "
+                        "worldwide calls a day; try again in a while.")
+            elif layer == "FREIGHTERS":
+                fig = charts.aircraft_map(aviation.grid(freighters), air_at,
+                                          what="freighters", colour=ui.AMBER)
+            else:
+                fig = charts.aircraft_map(aviation.grid(air), air_at)
+        else:                                                        # LIVE AIS
+            ais_key = secret(ais.KEY_NAME)
+            if not ais_key:
+                st.info("Live ships need a free AISStream key: sign in with GitHub at "
+                        "aisstream.io/account, create a key, and add the line "
+                        f"`{ais.KEY_NAME}=…` to `.env.local` (open it with "
+                        "`open -e .env.local`). Restart the app afterwards.")
+            else:
+                l1, l2, l3 = st.columns([3, 1, 1])
+                ais_region = l1.selectbox("Region", list(ais.REGIONS), key="ais_region",
+                                          label_visibility="collapsed")
+                ais_seconds = l2.selectbox("Listen", [30, 60, 120, 300], index=1,
+                                           format_func=lambda s: f"{s} s",
+                                           key="ais_seconds", label_visibility="collapsed")
+                if l3.button("LISTEN", key="ais_listen"):
+                    with st.spinner(f"Listening to {ais_region} for {ais_seconds} s …"):
+                        try:
+                            heard = ais.listen(ais_key, ais_region, ais_seconds)
+                        except ais.ListenFailed as exc:
+                            st.warning(f"AISStream: {exc}. Check the key in .env.local, "
+                                       "or wait a minute (3 connections at most).")
+                            heard = None
+                    if heard is not None:
+                        prior = st.session_state.get("ais_static")
+                        if prior is None:
+                            prior = ais.load_static(ais_static_path)
+                        ships_now, ais_static = ais.read(heard, prior)
+                        ais.save_static(ais_static_path, ais_static)
+                        st.session_state["ais_static"] = ais_static
+                        st.session_state["ais_last"] = (ais_region, ais.listened_at(),
+                                                        ais_seconds, len(heard), ships_now)
+                last = st.session_state.get("ais_last")
+                if last is None:
+                    st.caption("Pick a region and press LISTEN. Nothing is fetched until "
+                               "then. Coverage is best near Europe, North America and "
+                               "East Asia.")
+                elif last[4].empty:
+                    # 02.10.2026, Hormuz: 60 s, nothing but the subscription confirmed.
+                    st.info(f"No ship heard in {last[0]} during {last[2]} s. Either no "
+                            "free coastal receiver covers it — the Persian Gulf and the "
+                            "Red Sea are thin — or no ship there is transmitting. That "
+                            "is not the same as no ships.")
+                else:
+                    fig = charts.live_ship_map(last[4], ais.REGIONS[last[0]])
+        if fig is not None:
+            fig.update_layout(height=520)
+            st.plotly_chart(fig, width="stretch", key="map_main_fig")
+
+    with c_side:
+        movers = []
+        if not ship_board.empty:
+            # Busy now OR a year ago: Hormuz at 3 ships a day (from ~85) is the biggest
+            # mover of 2026, and a filter on today's level alone dropped it.
+            year_ago = ship_board.ships_per_day / (1 + ship_board.vs_year_ago.astype(float))
+            busy = ship_board[(ship_board.ships_per_day >= 5) | (year_ago >= 5)]
+            movers += [{"where": r.chokepoint, "kind": "STRAIT", "chg": r.vs_year_ago}
+                       for r in busy.itertuples() if r.vs_year_ago is not None
+                       and not pd.isna(r.vs_year_ago)]
+        if not port_now.empty:
+            movers += [{"where": r.port, "kind": "PORT", "chg": r.total_vs_year_ago}
+                       for r in port_now.itertuples() if r.total_vs_year_ago is not None
+                       and not pd.isna(r.total_vs_year_ago) and r.mostly
+                       != "too little to tell"]
+        st.markdown("**MOVERS vs 1Y**")
+        if movers:
+            mv = pd.DataFrame(movers)
+            mv = mv.reindex(mv.chg.abs().sort_values(ascending=False).index).head(14)
+            st.markdown(ui.grid(pd.DataFrame({
+                "where": mv["where"], "": mv["kind"],
+                "chg": mv["chg"].map(lambda v: ui.pct(v, 0))}),
+                signed={"chg"}, ticker_col="where"), unsafe_allow_html=True)
+            st.caption("Seven-day average against the same week a year earlier: "
+                       "ships per day for straits, tonnes per day for ports. Straits "
+                       "under 5 ships a day both now and a year ago, and near-empty "
+                       "ports, are left out.")
+        else:
+            st.caption("Nothing stored yet.")
+
+    d_straits, d_ports, d_air, d_ais = st.tabs(
+        ["CHOKEPOINTS", "PORT CARGO", "AIR", "LIVE AIS"])
+
+    with d_straits:
+        if ship_board.empty:
+            st.caption("No ship traffic stored yet.")
+        else:
+            key_only = st.toggle("Main chokepoints only", value=True, key="ship_key")
+            shown = ship_board[ship_board.chokepoint.isin(shipping.KEY)] if key_only \
+                else ship_board
+            st.markdown(ui.grid(pd.DataFrame({
+                "chokepoint": shown.chokepoint,
+                "ships/day": shown.ships_per_day.map(lambda v: ui.num(v, 0)),
+                "vs year ago": shown.vs_year_ago.map(lambda v: ui.pct(v, 0)),
+                "tankers/day": shown.tankers_per_day.map(lambda v: ui.num(v, 0)),
+                "tankers vs year ago": shown.tankers_vs_year_ago.map(
+                    lambda v: ui.pct(v, 0)),
+            }), numeric={"ships/day", "tankers/day"},
+                signed={"vs year ago", "tankers vs year ago"}, ticker_col="chokepoint"),
+                unsafe_allow_html=True)
+            s1, s2, s3 = st.columns([3, 1, 1])
+            ship_pick = s1.multiselect(
+                "Chokepoints", options=ship_board.chokepoint.tolist(),
+                default=shipping.KEY[:3], key="ship_pick", label_visibility="collapsed")
+            ship_field = s2.selectbox(
+                "Ships", ["n_total", "n_tanker", "n_container", "n_dry_bulk"],
+                format_func={"n_total": "all ships", "n_tanker": "tankers",
+                             "n_container": "container ships",
+                             "n_dry_bulk": "bulk carriers"}.get,
+                key="ship_field", label_visibility="collapsed")
+            ship_since = s3.selectbox("Since", ["1Y", "3Y", "7Y"], key="ship_since",
+                                      label_visibility="collapsed")
+            if ship_pick:
+                ship_lines = shipping.history(
+                    src.con, ship_pick, ship_field,
+                    dt.date.today() - dt.timedelta(days=365 * int(ship_since[:-1])))
+                if not ship_lines.empty:
+                    st.line_chart(ship_lines, height=280,
+                                  color=[ui.AMBER, ui.CYAN, ui.UP, ui.DOWN,
+                                         ui.MUTED][:len(ship_lines.columns)])
+            st.caption(
+                f"IMF PortWatch, ships passing each day as a seven-day average, as of "
+                f"{ship_board.as_of.max():%d.%m.%Y} (about five days behind). On the map "
+                "the circle's area is the count and its colour the change; hover for the "
+                "numbers. Compared with the same week a year earlier, so seasons cancel "
+                "out. Ships that switch off their transponder are not counted — tankers "
+                "carrying sanctioned oil often do, so tanker counts through Hormuz and "
+                "the Black Sea read low. Recent days are revised by PortWatch.")
+
+    with d_ports:
+        if port_now.empty:
+            st.caption("No port cargo stored yet.")
+        else:
+            st.markdown(ui.grid(pd.DataFrame({
+                "port": port_now.port,
+                "known for": port_now.known_for,
+                "mostly (30d)": port_now.mostly.fillna("—"),
+                "out kt/day": port_now.export_t.map(lambda v: ui.num(v / 1e3, 0)),
+                "out vs year ago": port_now.export_vs_year_ago.map(
+                    lambda v: ui.pct(v, 0)),
+                "in kt/day": port_now.import_t.map(lambda v: ui.num(v / 1e3, 0)),
+                "in vs year ago": port_now.import_vs_year_ago.map(lambda v: ui.pct(v, 0)),
+            }), numeric={"out kt/day", "in kt/day"},
+                signed={"out vs year ago", "in vs year ago"}, ticker_col="port"),
+                unsafe_allow_html=True)
+            p1, p2, p3 = st.columns([3, 1, 1])
+            port_names = dict(zip(port_now.id, port_now.port))
+            port_pick = p1.multiselect(
+                "Ports", options=list(port_names), format_func=port_names.get,
+                default=[p for p in ("port955", "port1091", "port570") if p in port_names],
+                key="port_pick", label_visibility="collapsed")
+            port_field = p2.selectbox(
+                "Flow", ["export", "import", "export_tanker", "import_tanker",
+                         "export_dry_bulk", "import_dry_bulk", "export_container",
+                         "import_container"],
+                format_func=lambda f: f.replace("_", " ").replace("export", "out")
+                .replace("import", "in"),
+                key="port_field", label_visibility="collapsed")
+            port_since = p3.selectbox("Since", ["1Y", "3Y", "7Y"], key="port_since",
+                                      label_visibility="collapsed")
+            if port_pick:
+                port_lines = shipping.port_history(
+                    src.con, port_pick, port_field,
+                    dt.date.today() - dt.timedelta(days=365 * int(port_since[:-1])))
+                if not port_lines.empty:
+                    st.line_chart(port_lines / 1e3, height=280, y_label="kt a day",
+                                  color=[ui.AMBER, ui.CYAN, ui.UP, ui.DOWN,
+                                         ui.MUTED][:len(port_lines.columns)])
+            st.caption(
+                "IMF PortWatch estimates of the tonnes ships loaded (out) and unloaded "
+                "(in) each day, from each ship's size and the change in its draught; a "
+                "seven-day average in thousand tonnes, against the same week a year "
+                "earlier. Quantities and ship types, not commodities: tanker tonnes may "
+                "be crude or products, bulk tonnes ore or grain. Ships sailing dark are "
+                "missing — Saudi tankers at Yanbu have mostly switched off their "
+                "transponders since the Houthi blockade of July 2026, so Yanbu reads "
+                "near zero while Lloyd's List reports traffic down about a third.")
+
+    with d_air:
+        if live_air is None:
+            st.caption("OpenSky did not answer; no aircraft right now.")
+        else:
+            regions_now = aviation.by_region(air)
+            air_hist = aviation.history(src.con)
+            a1, a2 = st.columns(2)
+            table_air = pd.DataFrame({"region": regions_now.index,
+                                      "airborne now": regions_now.map("{:,}".format)})
+            if not air_hist.empty:
+                last_stored = air_hist.iloc[-1]
+                table_air[f"stored {last_stored.name:%d.%m. %H:%M}"] = [
+                    f"{int(last_stored[r]):,}" if r in last_stored else "—"
+                    for r in regions_now.index]
+            a1.markdown(ui.grid(table_air, numeric=set(table_air.columns) - {"region"},
+                                ticker_col="region"), unsafe_allow_html=True)
+            if not freighters.empty:
+                by_airline = freighters.airline.value_counts()
+                a2.markdown(ui.grid(pd.DataFrame({
+                    "cargo airline": by_airline.index,
+                    "in the air now": by_airline.map("{:,}".format)}),
+                    numeric={"in the air now"}, ticker_col="cargo airline"),
+                    unsafe_allow_html=True)
+            if len(air_hist) > 1:
+                st.line_chart(air_hist, height=240)
+            cargo_hist = aviation.cargo_history(src.con)
+            if len(cargo_hist) > 1:
+                st.line_chart(cargo_hist[["share"]] * 100, height=200)
+                st.caption("Freighters as % of all aircraft in the air, per stored "
+                           "snapshot.")
+            st.caption(
+                f"{len(air):,} aircraft airborne at {air_at:%d.%m.%Y %H:%M} UTC, each "
+                "circle the count in a 3° cell. Data: "
+                f"{aviation.ATTRIBUTION}. Coverage follows volunteer receivers: dense "
+                "over Europe and North America, thin over oceans, Africa, Russia and "
+                "China — a low count there can mean no receiver, not no aircraft. "
+                "Military and some private aircraft do not broadcast. Freighters are "
+                "recognised by the cargo airline in their callsign (FedEx, UPS, DHL, "
+                "Cargolux, …); what they carry is never public, and passenger airlines' "
+                "belly cargo — about half of all air freight — is not counted. "
+                "Owners are not shown: for private aircraft they are people. The daily "
+                "price build stores one count per region, at about the same time each "
+                "weekday; counts from different times of day do not compare.")
+
+    with d_ais:
+        last = st.session_state.get("ais_last")
+        if last is None:
+            st.caption("Choose the LIVE AIS layer above, a region, and press LISTEN.")
+        else:
+            region_l, at_l, secs_l, n_msgs, ships_l = last
+            st.markdown(ui.grid(ais.summary(ships_l), numeric={
+                "ships", "under way", "mean speed kn"}, ticker_col="type"),
+                unsafe_allow_html=True)
+            shown_l = ships_l.sort_values(["type", "name"], na_position="last")
+            st.markdown(ui.grid(pd.DataFrame({
+                "ship": shown_l["name"].fillna("—"),
+                "type": shown_l["type"],
+                "kn": shown_l["speed_kn"].map(lambda v: ui.num(v, 1)),
+                "status": shown_l["status"].replace("", "—"),
+                "destination": shown_l["destination"].fillna("—"),
+                "draught m": shown_l["draught_m"].map(lambda v: ui.num(v, 1)),
+                "length m": shown_l["length_m"].map(lambda v: ui.num(v, 0)),
+                "IMO": shown_l["imo"].map(
+                    lambda v: "—" if v is None or pd.isna(v) else str(int(v))),
+            }), numeric={"kn", "draught m", "length m"}, ticker_col="ship"),
+                unsafe_allow_html=True)
+            with_type = (ships_l["type"] != "unknown").sum()
+            st.caption(
+                f"{len(ships_l)} ships heard in {region_l} during {secs_l} s at "
+                f"{at_l:%d.%m.%Y %H:%M} UTC ({n_msgs:,} messages), via AISStream "
+                f"(coastal receivers). {with_type} of them with type, destination and "
+                "draught known — ships send those only every six minutes; what was "
+                "heard is kept on this Mac, so every listen fills more gaps. Destination "
+                "and draught are typed in by the crew and often stale; a deep draught "
+                "on a tanker usually means it is loaded. Ships with their transponder "
+                "off are not here — in 2026 many tankers around Hormuz and Yanbu. "
+                "Owners are not shown; the IMO number identifies the ship.")
 
 
 with tab_calendar:

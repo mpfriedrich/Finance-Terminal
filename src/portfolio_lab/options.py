@@ -102,8 +102,19 @@ def expiries(symbol: str) -> list[str]:
         return []
 
 
-# Open interest required when the market is shut and there are no live quotes to lean on.
+# Evidence required when the market is shut and there are no live quotes to lean on:
+# open interest OR last session's volume. On 2026-09-21 open interest was filled before
+# the open; on 2026-10-02 at 10:25 UTC Yahoo reported 0 open interest for every AAPL,
+# MSFT and SPY contract while volume was filled, and the OPTIONS section went empty.
 MIN_OPEN_INTEREST_CLOSED = 10
+MIN_VOLUME_CLOSED = 10
+# A last price older than this (behind the newest trade in the chain) belongs to another
+# spot price. AAPL's 290 call on 2026-10-02 still showed a trade from 24.09.
+MAX_STALE_DAYS_CLOSED = 4
+# Live mode needs most of the chain quoted. A handful of leftover bids before the open
+# (SPY, 7 of 219, 2026-10-02) would otherwise switch the whole expiry to live mode and
+# throw away every contract with only a last price.
+MIN_QUOTED_SHARE = 0.5
 
 
 def _clean(frame: pd.DataFrame, spot: float, kind: str, t_years: float,
@@ -130,7 +141,7 @@ def _clean(frame: pd.DataFrame, spot: float, kind: str, t_years: float,
     df["moneyness"] = df.strike / spot if spot else np.nan
     df["kind"] = kind
 
-    quoted = ((df.bid > 0) & (df.ask > 0)).any()
+    quoted = ((df.bid > 0) & (df.ask > 0)).mean() >= MIN_QUOTED_SHARE
     if quoted:
         df["mid"] = (df.bid + df.ask) / 2.0
         df["spread"] = np.where(df.mid > 0, (df.ask - df.bid) / df.mid, np.nan)
@@ -143,10 +154,13 @@ def _clean(frame: pd.DataFrame, spot: float, kind: str, t_years: float,
     else:
         df["mid"] = df.lastPrice
         df["spread"] = np.nan
-        keep = (
-            (df.lastPrice > 0)
-            & (df.openInterest.fillna(0) >= MIN_OPEN_INTEREST_CLOSED)
-        )
+        traded = ((df.openInterest.fillna(0) >= MIN_OPEN_INTEREST_CLOSED)
+                  | (df.volume.fillna(0) >= MIN_VOLUME_CLOSED))
+        keep = (df.lastPrice > 0) & traded
+        when = pd.to_datetime(df.get("lastTradeDate"), errors="coerce", utc=True)
+        if isinstance(when, pd.Series) and when.notna().any():
+            fresh = when >= when.max() - pd.Timedelta(days=MAX_STALE_DAYS_CLOSED)
+            keep = keep & fresh.fillna(False)
         mode = "last traded prices (market closed)"
 
     keep = keep & df.moneyness.between(*MONEYNESS_BAND)
