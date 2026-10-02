@@ -979,6 +979,55 @@ unbereinigten Reihe, aus der die Kerzen gezeichnet werden.
 Migrationen übersprungen. Solange nie eine Spalte dazukam, fiel das nicht auf; der erste
 Aufbau auf einer Kopie hätte gegen die alte Tabelle geschrieben und wäre gescheitert.
 
+## Geprüft und verworfen: Kronos als Kursprognose (02.10.2026, lokale Sitzung)
+
+**Anlass:** Ein Instagram-Reel („$24,000/year terminal vs. a free model“) stellte ein
+freies Prognosemodell vor. Nach den Einblendungen (Open Source, Kerzen, „45 global
+exchanges“, Fächer möglicher Pfade) ist es **Kronos** (`shiyu-coder/Kronos`, MIT,
+Tsinghua, AAAI 2026; Modelle `NeoQuasar/Kronos-mini|small|base`, `large` nicht frei).
+Kommentare tippten auf TimesFM (Google) — unwahrscheinlich: TimesFM ist ein allgemeines
+Zeitreihenmodell, nicht auf Börsenkerzen trainiert.
+
+**Test, außerhalb des Projekts (Zwischenordner, nichts eingebaut):** Kronos'
+Vortraining endet im **Juni 2024**, also nur Prognosen ab Juli 2024. Kurse aus
+`market.duckdb` (Free), Auswahl der Aktien zum 28.06.2024 (Kurs > $5, Median-Umsatz
+60 T > $20 Mio., 40 zufällig, Seed 7; nur Überlebende — Free-Bestand). Pfade einzeln
+gezogen (`predict_batch` mit `sample_count=1`; `predict` *mittelt* die Pfade intern).
+Vergleich gegen „bleibt wie heute“ (Random Walk), „immer aufwärts“, Momentum, und ein
+Band aus der 60-Tage-Volatilität (log-normal, √h).
+
+* **Haupttest** (small, 256 T Vorlauf, 20 T Horizont, 20 Pfade, 9 Zeitpunkte
+  07/2024–10/2025, 350 Prognosen): Richtung 46 % (immer aufwärts 58 %), MAE 14,4 %
+  (Random Walk 7,6 %), RankIC −0,05 (t −0,7), 80-%-Band hält 23 % (Vol-Band 82 %).
+* **Gegenprobe** (20 Aktien × 6 Zeitpunkte bzw. 120 künstliche Random Walks, 10 Pfade):
+
+  | Variante | nach Anstieg: Prognose (tats.) | nach Fall | MAE Kronos / RW | 80-%-Band (Vol-Band) |
+  |---|---|---|---|---|
+  | Zufall, small, 256/20 | −11,2 % (−1,5 %) | +5,1 % (+1,3 %) | 11,7 / 7,1 % | 20 % (79 %) |
+  | Zufall, base, 256/20 | −9,2 % (−1,5 %) | +9,9 % (+1,3 %) | 14,3 / 7,1 % | 12 % (79 %) |
+  | echt, small, 400/20 | −13,3 % (+1,4 %) | +3,9 % (−4,5 %) | 13,6 / 9,3 % | 34 % (74 %) |
+  | echt, small, 400/5 | −8,0 % (+0,7 %) | −0,2 % (−1,9 %) | 7,9 / 4,4 % | 39 % (79 %) |
+  | echt, base, 400/20 | −11,1 % (+1,4 %) | +12,8 % (−4,5 %) | 20,2 / 9,3 % | 12 % (74 %) |
+  | echt, base, 400/5 | −8,1 % (+0,7 %) | +6,8 % (−1,9 %) | 14,5 / 4,4 % | 21 % (79 %) |
+
+**Befund:** Kronos kehrt jeden jüngsten Trend um und ist viel zu selbstsicher — auch auf
+reinen Zufallskursen, wo „im Mittel unverändert“ richtig ist. Es liegt also am Modell,
+nicht an unseren Daten; der Aufbau entspricht dem offiziellen Tagesbeispiel
+(`examples/prediction_cn_markets_day.py`, 400 T Vorlauf, `amount = Kurs × Volumen`).
+Das größere `base` ist schlechter als `small`. Kein Horizont, kein Vorlauf schlägt den
+Random Walk. **Entscheidung (Nutzer, 02.10.2026): nicht einbauen.** Wer eine Bandbreite
+in RESEARCH will: das Band aus der 60-Tage-Volatilität trifft sein Soll (74–82 % bei
+80 %), ohne PyTorch.
+
+**Nicht geprüft:** chinesische/asiatische Börsen und Intraday-Daten, auf denen das Paper
+misst; Feinabstimmung (Fine-Tuning) auf US-Daten; Kronos-mini.
+**Technik, falls je wieder:** braucht PyTorch (~770 MB Umgebung) und GPU (MPS, M4).
+Kein KV-Cache — jeder Schritt rechnet den ganzen Verlauf neu: 800 Pfade auf einmal
+brauchten 40–75 min je Zeitpunkt, in Paketen à 100 nur ~4 min für 1.200. `base` mit
+400 T Vorlauf und Paketen à 100 belegte **13 GB** und lagerte aus (16-GB-Mac);
+Pakete à 20 plus `torch.mps.empty_cache()` hielten es bei ~2,4 GB. Einen Tokenizer
+nicht zwischen Geräten teilen (sein Rotary-Cache bleibt auf dem alten Gerät).
+
 ## Geplant: Hebel und Derivate (vorgemerkt am 25.09.2026, noch nicht begonnen)
 
 Auf Frage des Nutzers („gibt es die Option für Derivate und Leverage?“) nur in den Plan

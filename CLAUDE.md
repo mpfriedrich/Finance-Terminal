@@ -193,6 +193,11 @@ ticker; ended lines use their last CRSP ticker, with `-permno` appended on a col
 - Every screening frame has `country`: the ISO-3 code of the market where the line
   trades (USA for SEC/CRSP lines, the Compustat country otherwise). It is filterable in
   chat and in the sidebar.
+- **Kronos (price-forecast foundation model) was tested and rejected on 02.10.2026.**
+  Out of sample (after its June 2024 training cutoff) on US daily stocks it lost to a
+  random walk in every variant (small/base, 5/20-day horizon), reversed every recent
+  trend even on synthetic random walks, and its 80 % bands held 12–39 % of the time.
+  Don't re-test from scratch; PLAN.md → „Geprüft und verworfen: Kronos“ has the numbers.
 
 ## 9. How to work here
 
