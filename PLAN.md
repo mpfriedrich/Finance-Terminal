@@ -1479,3 +1479,17 @@ den Einsatz hinaus möglich sind.
       - Testreihe gegen die neue Quelle laufen lassen
       - Anleitung schreiben
       **Covers:** Austauschbarkeit aus Q5
+
+## Befund 02.10.2026: App war für fremde Webseiten offen
+
+`.streamlit/config.toml` hatte seit dem ersten Commit `enableCORS = false`. Streamlit 1.64
+warnt beim Start: dann nimmt die App WebSocket-Verbindungen von **jedem** Ursprung an. Eine
+fremde Webseite im selben Browser hätte also im Hintergrund mit der App sprechen und
+sehen können, was sie zeigt — die App hat keinen Login.
+
+Jetzt `enableCORS = true` und `allowedHosts = ["localhost", "127.0.0.1", "*.local"]`
+(gegen DNS-Rebinding). Gemessen mit curl auf einem Testport (verified):
+- WebSocket von fremdem Ursprung → 403; gleicher Ursprung (localhost) → 101.
+- DNS-Rebinding (Host und Origin `evil.example.com`) → 403.
+- Handy-Fall `moritzs-macbook-pro.local` → 101; nackte LAN-IP → 403 (gewollt, sie wechselt).
+- Ungeprüft: echter Aufruf vom iPhone über den `.local`-Namen.

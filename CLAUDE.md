@@ -132,6 +132,9 @@ if it makes a number look better.
 10. **No advice wording** in UI strings (R23): no "buy", "recommend", "you should" and similar.
 11. **The app has no login.** Never expose it to the internet. Phone access would go
     through Tailscale; the user hasn't decided on that yet.
+    `.streamlit/config.toml` keeps `enableCORS = true` and `allowedHosts` (localhost +
+    `*.local`): with CORS off any website in the same browser could open a WebSocket to
+    the app. From the phone use `http://<mac-name>.local:8501`; a bare IP is refused.
 
 ## 7. Data sources and keys
 
