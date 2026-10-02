@@ -1296,6 +1296,35 @@ eingebaut (das wäre Personen-Tracking). Gebaut wurde, was als Menge messbar ist
 - Eigentümer bewusst nicht; die IMO-Nummer identifiziert das Schiff. Naheliegender
   nächster Schritt: Abgleich der IMO-Nummern mit der OFAC-Sanktionsliste (kostenlos).
 
+### Ideen für MAP (vorgemerkt am 02.10.2026, nicht begonnen — Nutzer entscheidet)
+
+Daten, die es kostenlos gibt:
+1. **Sanktionsabgleich:** IMO-Nummern aus LIVE AIS gegen die OFAC-SDN-Liste (CSV,
+   kostenlos, enthält Schiffe mit IMO) — Treffer in der Tabelle markieren.
+2. **Störungen auf der Karte:** PortWatch hat eine eigene Störungs-Datenbank
+   (`portwatch_disruptions_database`, `gdacs_events`: Stürme, Erdbeben, Hafenschließungen)
+   — als Ebene über Häfen und Meerengen legen.
+3. **Handel je Land:** PortWatch `Daily_Trade_Data_*` schätzt Import/Export je Land und
+   Tag — z. B. Chinas Rohstoffimporte als Zeitreihe in MACRO.
+4. **Europas Flüge täglich:** Eurocontrol veröffentlicht tägliche Flugzahlen je Land mit
+   Historie (kostenlos) — anders als OpenSky mit Vergangenheit.
+5. **Frachtraten:** öffentliche Wochenindizes für Container (z. B. Drewry WCI, Freightos
+   FBX) — Lizenz vorher prüfen.
+
+Auswertungen aus dem, was schon da ist:
+6. **Beladen oder leer:** Tiefgang der Tanker in LIVE AIS gegen ihren Höchsttiefgang →
+   Anteil beladener Tanker je Region.
+7. **„Dunkel-Lücke“:** Häfen, deren PortWatch-Tonnen abrupt auf fast null fallen, während
+   Nachrichten weiter Verkehr melden (Yanbu 2026) — automatisch markieren statt nur im
+   Text erklären.
+8. **Eigene AIS-Historie:** der Morgen-Job hört täglich 2 Minuten auf feste Regionen und
+   speichert Schiffe je Typ — wie die OpenSky-Schnappschüsse, nur für Schiffe.
+9. **Alarme:** Meerenge oder Hafen fällt in einer Woche um mehr als X % → Hinweis über
+   `alerts.py` und im Morgen-Briefing (dort auch die MOVERS-Liste).
+10. **Verkehr gegen Kurse:** Hormus gegen Brent, Port Hedland gegen Erz-Minen,
+    Frachtflug-Anteil gegen FedEx/UPS — als Studie in RESEARCH, ehrlich mit Verzögerung
+    und außerhalb der Stichprobe geprüft; nichts davon als Signal formulieren (R23).
+
 ## Geplant: Hebel und Derivate (vorgemerkt am 25.09.2026, noch nicht begonnen)
 
 Auf Frage des Nutzers („gibt es die Option für Derivate und Leverage?“) nur in den Plan
