@@ -200,3 +200,42 @@ def aircraft_map(cells: pd.DataFrame, taken_at, what: str = "aircraft",
     ))
     _world_geo(fig)
     return fig
+
+
+# Ship classes on the live map; anything else is grey.
+SHIP_COLOURS = {"tanker": ui.DOWN, "cargo": ui.AMBER, "passenger": ui.CYAN}
+
+
+def live_ship_map(ships: pd.DataFrame, box) -> go.Figure:
+    """Ships heard in one listen (ais.read), zoomed to the region `box`
+    ((lat south, lon west), (lat north, lon east)): colour by type, hover for the rest."""
+    fig = go.Figure()
+    for kind, group in ships.groupby(ships["type"].where(
+            ships["type"].isin(list(SHIP_COLOURS)), "other")):
+        hover = [
+            f"<b>{n or 'name not yet heard'}</b> — {t}<br>"
+            f"{_num(s, ' kn')} · {st or 'status —'}<br>"
+            f"to {d or '—'} · draught {_num(dr, ' m')}<br>"
+            f"MMSI {m}" + (f" · IMO {i}" if i and not pd.isna(i) else "")
+            for n, t, s, st, d, dr, m, i in zip(
+                group["name"], group["type"], group["speed_kn"], group["status"],
+                group["destination"], group["draught_m"], group["mmsi"], group["imo"])
+        ]
+        fig.add_trace(go.Scattergeo(
+            lat=group.lat, lon=group.lon, mode="markers", name=kind,
+            hovertext=hover, hoverinfo="text",
+            marker=dict(size=7, color=SHIP_COLOURS.get(kind, ui.MUTED), opacity=0.9,
+                        line=dict(width=0.5, color=ui.BG)),
+        ))
+    (lat0, lon0), (lat1, lon1) = box
+    _world_geo(fig)
+    fig.update_geos(projection_type="mercator", lataxis_range=[lat0, lat1],
+                    lonaxis_range=[lon0, lon1], showcountries=True,
+                    resolution=50)
+    fig.update_layout(showlegend=True, legend=dict(orientation="h", y=1.02, x=0,
+                                                   font=dict(color=ui.MUTED)))
+    return fig
+
+
+def _num(value, unit: str) -> str:
+    return "—" if value is None or pd.isna(value) else f"{value:g}{unit}"

@@ -1259,6 +1259,26 @@ eingebaut (das wäre Personen-Tracking). Gebaut wurde, was als Menge messbar ist
   in Passagierflugzeugen (~die Hälfte der Luftfracht); manche Frachtgesellschaften
   fliegen auch Charter.
 
+### Einzelne Schiffe live (02.10.2026, lokale Sitzung)
+
+- `ais.py`: AISStream (WebSocket, kostenloser Schlüssel `AISSTREAM_API_KEY` in
+  `.env.local`). Keine Historie, kein Schnappschuss — die App **hört** auf Knopfdruck eine
+  von 12 kleinen Regionen 30 s bis 5 min ab (Hormus, Bab el-Mandeb, Suez, Yanbu, Singapur,
+  Bosporus, Rotterdam, Dover, Houston, Panama, Taiwan, Port Hedland) und zeigt jedes
+  gehörte Schiff: Name, Typ, Fahrt, Status, Ziel, Tiefgang, Länge, IMO-Nummer, auf einer
+  gezoomten Karte (Farbe nach Typ). Nichts wird gespeichert; die App bleibt lesend.
+- Warum nie vollständig: Positionen kommen alle paar Sekunden, Name/Typ/Ziel/Tiefgang aber
+  nur alle **6 Minuten** in einer eigenen Meldung. Nach 60 s haben viele Schiffe Position
+  und Namen, aber nur ein Teil Ziel und Tiefgang; was gehört wurde, bleibt für die
+  App-Sitzung gespeichert, mehrmaliges Hören füllt die Lücken. Nur Küstenempfänger;
+  dunkle Schiffe fehlen. Ziel und Tiefgang tippt die Besatzung ein.
+- Schlüssel (R24): nur in der Abo-Nachricht, nie in URL, Log oder Fehler; ein Test prüft,
+  dass eine fehlgeschlagene Verbindung weder Schlüssel noch Adresse zeigt
+  (`raise … from None`). Grenzen laut AISStream: 3 Verbindungen je Konto und IP, Abo
+  binnen 3 s, höchstens 1 Abo-Änderung pro Sekunde.
+- Eigentümer bewusst nicht; die IMO-Nummer identifiziert das Schiff. Naheliegender
+  nächster Schritt: Abgleich der IMO-Nummern mit der OFAC-Sanktionsliste (kostenlos).
+
 ## Geplant: Hebel und Derivate (vorgemerkt am 25.09.2026, noch nicht begonnen)
 
 Auf Frage des Nutzers („gibt es die Option für Derivate und Leverage?“) nur in den Plan

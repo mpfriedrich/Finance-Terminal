@@ -75,7 +75,7 @@ from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
 from portfolio_lab import alerts, comps, deals, export, fred, fts, insiders, paper, risk, world
-from portfolio_lab import aviation, shipping
+from portfolio_lab import ais, aviation, shipping
 from portfolio_lab import wacc as W
 from portfolio_lab import summary as ai_summary
 from portfolio_lab import volforecast as vfc
@@ -3350,8 +3350,72 @@ with tab_commodities:
     st.markdown("#### Ships and aircraft")
     ship_board = shipping.dashboard(src.con)
     port_now = shipping.port_board(src.con)
-    map_view = st.radio("Map", ["all ships", "tankers", "port cargo", "aircraft now"],
+    map_view = st.radio("Map", ["all ships", "tankers", "port cargo", "ships live",
+                                "aircraft now"],
                         horizontal=True, key="ship_map", label_visibility="collapsed")
+    if map_view == "ships live":
+        ais_key = secret(ais.KEY_NAME)
+        if not ais_key:
+            st.info("Live ships need a free AISStream key: sign in with GitHub at "
+                    "aisstream.io/account, create a key, and add the line "
+                    f"`{ais.KEY_NAME}=…` to `.env.local` (open it with "
+                    "`open -e .env.local`). Restart the app afterwards.")
+        else:
+            l1, l2, l3 = st.columns([3, 1, 1])
+            ais_region = l1.selectbox("Region", list(ais.REGIONS), key="ais_region",
+                                      label_visibility="collapsed")
+            ais_seconds = l2.selectbox("Listen", [30, 60, 120, 300], index=1,
+                                       format_func=lambda s: f"{s} s", key="ais_seconds",
+                                       label_visibility="collapsed")
+            if l3.button("Listen", key="ais_listen"):
+                with st.spinner(f"Listening to {ais_region} for {ais_seconds} s …"):
+                    try:
+                        heard = ais.listen(ais_key, ais_region, ais_seconds)
+                    except ais.ListenFailed as exc:
+                        st.warning(f"AISStream: {exc}. Check the key in .env.local, "
+                                   "or wait a minute (3 connections at most).")
+                        heard = None
+                if heard is not None:
+                    ships_now, ais_static = ais.read(
+                        heard, st.session_state.get("ais_static"))
+                    st.session_state["ais_static"] = ais_static
+                    st.session_state["ais_last"] = (ais_region, ais.listened_at(),
+                                                    ais_seconds, len(heard), ships_now)
+            last = st.session_state.get("ais_last")
+            if last is None:
+                st.caption("Pick a region and press Listen. Nothing is fetched until "
+                           "then.")
+            else:
+                region_l, at_l, secs_l, n_msgs, ships_l = last
+                st.plotly_chart(charts.live_ship_map(ships_l, ais.REGIONS[region_l]),
+                                width="stretch", key="ais_map_fig")
+                st.markdown(ui.grid(ais.summary(ships_l), numeric={
+                    "ships", "under way", "mean speed kn"}, ticker_col="type"),
+                    unsafe_allow_html=True)
+                shown_l = ships_l.sort_values(["type", "name"], na_position="last")
+                st.markdown(ui.grid(pd.DataFrame({
+                    "ship": shown_l["name"].fillna("—"),
+                    "type": shown_l["type"],
+                    "kn": shown_l["speed_kn"].map(lambda v: ui.num(v, 1)),
+                    "status": shown_l["status"].replace("", "—"),
+                    "destination": shown_l["destination"].fillna("—"),
+                    "draught m": shown_l["draught_m"].map(lambda v: ui.num(v, 1)),
+                    "length m": shown_l["length_m"].map(lambda v: ui.num(v, 0)),
+                    "IMO": shown_l["imo"].map(
+                        lambda v: "—" if v is None or pd.isna(v) else str(int(v))),
+                }), numeric={"kn", "draught m", "length m"}, ticker_col="ship"),
+                    unsafe_allow_html=True)
+                with_dest = ships_l["destination"].notna().sum()
+                st.caption(
+                    f"{len(ships_l)} ships heard in {region_l} during {secs_l} s at "
+                    f"{at_l:%d.%m.%Y %H:%M} UTC ({n_msgs:,} messages), via AISStream "
+                    f"(coastal receivers). {with_dest} of them sent destination and "
+                    "draught so far — ships send those only every six minutes, and "
+                    "what was heard is kept for this session, so listening again fills "
+                    "the gaps. Destination and draught are typed in by the crew and "
+                    "often stale. Ships with their transponder off are not here — in "
+                    "2026 many tankers around Hormuz and Yanbu. Owners are not shown; "
+                    "the IMO number identifies the ship.")
     if map_view == "port cargo":
         if port_now.empty:
             st.info("No port cargo stored yet. Run once: "
