@@ -262,10 +262,10 @@ ticker; ended lines use their last CRSP ticker, with `-permno` appended on a col
 
 ## 10. Status and open items (as of 02.10.2026)
 
-**Done and merged** (PRs #1–#6, last 02.10.2026): phases 1–10, the Stage B reviews,
+**Done and merged** (PRs #1–#7, last 02.10.2026): phases 1–10, the Stage B reviews,
 world stages 1–3 (Compustat Global, the CRSP US half, CIZ, the second WRDS account),
 the gold toggle, memory-safe ingest, analyst tools 1–12, the pit-cache re-warm, the
-20-day risk range (volforecast.py), ship/aircraft data (PortWatch, OpenSky) and euro
+20-day risk range (volforecast.py), ship/aircraft data (PortWatch, OpenSky; port tonnes and freighters in PR #7) and euro
 unemployment from Eurostat. Forecast models tested and rejected: PLAN.md → „Geprüft und
 verworfen“.
 
