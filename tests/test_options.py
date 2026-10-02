@@ -244,3 +244,122 @@ def test_the_cone_agrees_with_the_single_expiry_calculation():
 def test_no_chain_means_no_cone_rather_than_a_flat_line():
     assert op.expected_move_cone(100.0, pd.DataFrame()).empty
     assert op.expected_move_cone(0.0, _term()).empty
+
+
+# --- what the prices imply: the distribution and the put-call spread (02.10.2026) -----
+
+def _otm(spot=100.0, days=30, r=0.04, smile=lambda m: 0.30, strikes=range(70, 131, 5)):
+    """An out-of-the-money chain priced from a known smile, the layout surface() keeps."""
+    rows = []
+    for k in strikes:
+        kind = "put" if k < spot else "call"
+        rows.append({"strike": float(k), "moneyness": k / spot, "kind": kind,
+                     "iv": smile(k / spot)})
+    return pd.DataFrame(rows)
+
+
+def test_a_flat_smile_gives_back_the_bell_curve():
+    # one volatility at every strike IS the lognormal; the density must reproduce it
+    d = op.implied_distribution(_otm(), 100.0, 30, r=0.04)
+    for p in (10, 25, 50, 75, 90):
+        assert d["quantiles"][p] == pytest.approx(d["ref_quantiles"][p], rel=0.004)
+    assert d["mean"] == pytest.approx(d["forward"], rel=0.002)
+    assert d["p_down_10"] == pytest.approx(d["ref_p_down_10"], abs=0.003)
+    assert d["negative_mass"] < 1e-3
+
+
+def test_a_smirk_puts_more_weight_on_a_fall_than_the_bell_curve():
+    smile = lambda m: 0.30 + 0.6 * max(1.0 - m, 0.0)        # noqa: E731
+    d = op.implied_distribution(_otm(smile=smile), 100.0, 30, r=0.04)
+    assert d["p_down_10"] > d["ref_p_down_10"]
+    assert d["quantiles"][5] < d["ref_quantiles"][5]
+    # Independent check: P(S_T < K) = e^{rT} dPut/dK, straight from Black-Scholes put
+    # prices with the smile's own volatility at each strike (no density involved).
+    T, h, K = 30 / 365, 0.5, 90.0
+    put = lambda k: op.black_scholes(100.0, k, T, 0.04, smile(k / 100.0), 0.0, "put")  # noqa: E731
+    digital = math.exp(0.04 * T) * (put(K + h) - put(K - h)) / (2 * h)
+    assert d["p_down_10"] == pytest.approx(digital, abs=0.006)
+
+
+def test_a_thin_chain_gives_no_distribution():
+    assert op.implied_distribution(_otm(strikes=(90, 95, 105)), 100.0, 30) == {}
+    assert op.implied_distribution(pd.DataFrame(), 100.0, 30) == {}
+
+
+def _full(put_iv, call_iv, spot=100.0, strikes=(95, 100, 105), days=30, priced_at=None):
+    """A full chain whose mids are Black-Scholes prices; `priced_at` is the share price
+    the options were really quoted against, when it differs from the `spot` on hand."""
+    T, true = days / 365, priced_at or spot
+    rows = [{"strike": float(k), "moneyness": k / spot, "kind": kind, "days": days,
+             "iv": put_iv if kind == "put" else call_iv,
+             "mid": op.black_scholes(true, k, T, 0.04,
+                                     put_iv if kind == "put" else call_iv, 0.0, kind)}
+            for k in strikes for kind in ("call", "put")]
+    return pd.DataFrame(rows)
+
+
+def test_put_call_spread_by_hand():
+    pc = op.put_call_spread(_full(0.33, 0.30))
+    assert pc["spread"] == pytest.approx(0.03) and pc["pairs"] == 3
+    # strikes outside the at-the-money band do not count
+    assert op.put_call_spread(_full(0.33, 0.30, strikes=(80, 120))) == {}
+
+
+def test_a_stale_share_price_gives_no_spread():
+    # SXI, 02.10.2026: the chain was quoted against ~305, the price on hand was 273, and
+    # the "spread" came out at -83 volatility points. Parity exposes the mismatch.
+    stale = op.put_call_spread(_full(0.30, 0.30, spot=100.0, priced_at=112.0))
+    assert "rejected" in stale and stale["parity_gap"] > 0.05
+    assert op.smile_slope([(30, _full(0.30, 0.30, priced_at=112.0))]).get("rejected")
+    # a genuine spread of a few volatility points stays well inside the tolerance
+    assert abs(op.put_call_spread(_full(0.33, 0.30))["parity_gap"]) < 0.01
+
+
+def test_no_spread_from_last_traded_prices():
+    closed = _full(0.33, 0.30)
+    closed.attrs["mode"] = "last traded prices (market closed)"
+    assert "rejected" in op.put_call_spread(closed)
+
+
+def test_smile_slope_interpolates_to_thirty_days():
+    s = op.smile_slope([(20, _full(0.32, 0.30, days=20)), (40, _full(0.34, 0.30, days=40))])
+    assert s["value"] == pytest.approx(0.03) and s["days"] == 30
+    # the last week is skipped, and nothing within 10-60 days means no number
+    assert op.smile_slope([(5, _full(0.40, 0.30, days=5))]) == {}
+    assert op.smile_slope([(90, _full(0.40, 0.30, days=90))]) == {}
+    one = op.smile_slope([(45, _full(0.31, 0.30, days=45))])
+    assert one["value"] == pytest.approx(0.01) and one["days"] == 45
+
+
+def test_a_dividend_solved_as_zero_makes_puts_look_dear():
+    # Why the yield goes into the solver: prices of a 3 % payer, solved with q = 0,
+    # show a put-call spread that is nothing but the dividend.
+    S, K, T, r, sigma, q = 100.0, 100.0, 30 / 365, 0.04, 0.30, 0.03
+    call = op.black_scholes(S, K, T, r, sigma, q, "call")
+    put = op.black_scholes(S, K, T, r, sigma, q, "put")
+    wrong = (op.implied_volatility(put, S, K, T, r, 0.0, "put")
+             - op.implied_volatility(call, S, K, T, r, 0.0, "call"))
+    right = (op.implied_volatility(put, S, K, T, r, q, "put")
+             - op.implied_volatility(call, S, K, T, r, q, "call"))
+    assert wrong > 0.005 and abs(right) < 1e-4
+
+
+def test_trailing_dividend_yield_from_the_adjusted_close():
+    import duckdb
+
+    from portfolio_lab.data.schema import MARKET_MIGRATIONS, _apply
+
+    c = duckdb.connect(":memory:")
+    _apply(c, MARKET_MIGRATIONS)
+    days = pd.bdate_range("2025-06-02", periods=300)
+    # one 3 % dividend half a year ago: adjusted closes before it sit 3 % lower
+    c.executemany("INSERT INTO prices (ticker, date, close, close_adj) VALUES ('D', ?, ?, ?)",
+                  [(d.date(), 100.0, 100.0 * (0.97 if i < 170 else 1.0))
+                   for i, d in enumerate(days)])
+    assert op.trailing_dividend_yield(c, "D") == pytest.approx(1 / 0.97 - 1, rel=1e-6)
+    assert op.trailing_dividend_yield(c, "NONE") == 0.0
+
+
+def test_percentile_needs_a_cross_section():
+    assert op.percentile(0.02, pd.Series([0.01] * 10)) is None
+    assert op.percentile(0.02, pd.Series(np.linspace(0, 0.04, 41))) == pytest.approx(21 / 41)

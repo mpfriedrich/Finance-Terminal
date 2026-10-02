@@ -194,6 +194,20 @@ WRDS_CRSP_PASSWORD=...
 on hand-made files in the Compustat Global and CRSP layouts. Check the counts the first
 build prints — per country, and the number of US listings that ended.
 
+## Options snapshots (optional)
+
+The OPTIONS section of RESEARCH shows the put-call volatility spread, a signal that held
+up in published data but has not been tested on this app's own data. Yahoo only serves
+today's option chain, so the only way to test it later is to record it every day:
+
+```bash
+./scripts/install_options_snapshot.sh
+```
+
+It runs Tuesday to Saturday at 05:00 Sydney time, which is inside the US trading
+session (the spread needs live quotes) and records ~200 liquid US shares to
+`data/cache/options/`. Remove it with `./scripts/install_options_snapshot.sh --remove`.
+
 ## Tests
 
 ```bash
