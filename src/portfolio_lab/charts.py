@@ -141,6 +141,12 @@ def chokepoint_map(placed: pd.DataFrame, tankers: bool = False) -> go.Figure:
                 tickfont=dict(color=ui.MUTED, size=9), outlinewidth=0),
         ),
     ))
+    _world_geo(fig)
+    return fig
+
+
+def _world_geo(fig: go.Figure) -> None:
+    """The dark world the traffic maps share: built-in coastlines, no tiles fetched."""
     fig.update_geos(
         projection_type="natural earth", showframe=False, bgcolor=ui.BG,
         showland=True, landcolor=ui.PANEL, showocean=True, oceancolor=ui.BG,
@@ -151,4 +157,18 @@ def chokepoint_map(placed: pd.DataFrame, tankers: bool = False) -> go.Figure:
         height=400, margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor=ui.BG,
         font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
     )
+
+
+def aircraft_map(cells: pd.DataFrame, taken_at) -> go.Figure:
+    """Airborne aircraft per grid cell (aviation.grid): circle area for the count."""
+    count = cells["aircraft"].astype(float)
+    fig = go.Figure(go.Scattergeo(
+        lat=cells.lat, lon=cells.lon, mode="markers",
+        hovertext=[f"{int(n)} aircraft in this cell<br>{taken_at:%d.%m.%Y %H:%M} UTC"
+                   for n in count],
+        hoverinfo="text",
+        marker=dict(size=2 + 1.6 * count ** 0.5, sizemode="diameter", color=ui.CYAN,
+                    opacity=0.6, line=dict(width=0)),
+    ))
+    _world_geo(fig)
     return fig

@@ -84,9 +84,12 @@ uv run python scripts/add_benchmark.py        # S&P 500 TR, the price index, SPY
 uv run python scripts/build_ticker_history.py # and how little of it can be recovered
 uv run python scripts/build_fred.py           # macro, rail and airline series (no key)
 uv run python scripts/build_shipping.py       # ships through the chokepoints (no key)
+uv run python scripts/build_air.py            # one count of aircraft in the air (no key)
 ```
 
-`build_prices.py` keeps the FRED series and the ship counts current once they are stored.
+`build_prices.py` keeps the FRED series and the ship counts current once they are stored,
+and stores one aircraft count per run. The live aircraft map comes from the OpenSky
+Network (non-commercial use, attribution shown in the app).
 
 Then:
 

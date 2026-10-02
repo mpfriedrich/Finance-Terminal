@@ -93,6 +93,7 @@ src/portfolio_lab/
   volforecast.py            20-day risk range in RESEARCH: pooled Log-HAR on ~200 US
                             shares, width only, never direction (PLAN.md)
   shipping.py               ship transits through 28 chokepoints (IMF PortWatch, no key)
+  aviation.py               aircraft in the air now (OpenSky, no key) + daily snapshots
 tests/                      one file per module; fixtures: paid_fixture.py (Sharadar layout),
                             wrds_fixture.py (Compustat Global), crsp_fixture.py (CRSP + NA)
 scripts/                    build_* and operational scripts
@@ -209,6 +210,10 @@ ticker; ended lines use their last CRSP ticker, with `-permno` appended on a col
   database terms forbid feeding their content to generative AI**; whether that covers
   CRSP via the USYD WRDS account is unresolved. Settle it before CRSP data can reach
   `summary.py`/`briefing.py`. PLAN.md → „Schiffe, Züge, Flugzeuge“.
+- **Aircraft (`aviation.py`)** come live from OpenSky (anonymous, ~100 worldwide calls a
+  day); the only history is our own `air_traffic` snapshots, one per daily build. Counts
+  swing several-fold with the time of day, and the Mac runs on Sydney time — compare
+  snapshots taken at the same hour only. Unix time 1790910689 is 03:11 UTC, not 11:11.
 - **TimesFM 3.0 and the Claude subagent „stock-price-movement-predictor“ were tested too
   (02.10.2026).** TimesFM tracks a random walk (no edge, bands slightly narrow); the
   agent restates 60-day volatility with coin-flip probabilities. Neither beats a 60-day

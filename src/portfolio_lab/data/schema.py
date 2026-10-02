@@ -243,6 +243,16 @@ MARKET_MIGRATIONS: list[str] = [
         PRIMARY KEY (chokepoint, date)
     );
     """,
+    # 026 — airborne aircraft per region at each stored snapshot (aviation.py, OpenSky).
+    # OpenSky keeps no free history, so this table is the history, from its first run.
+    """
+    CREATE TABLE IF NOT EXISTS air_traffic (
+        taken_at  TIMESTAMP NOT NULL,
+        region    VARCHAR   NOT NULL,
+        airborne  INTEGER   NOT NULL,
+        PRIMARY KEY (taken_at, region)
+    );
+    """,
 ]
 
 USER_MIGRATIONS: list[str] = [

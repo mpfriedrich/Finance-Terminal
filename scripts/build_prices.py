@@ -14,7 +14,7 @@ import time
 
 from portfolio_lab.config import MARKET_DB, WORLD_DB
 from portfolio_lab.data.schema import finish_rebuild, open_market_for_rebuild
-from portfolio_lab import fred, shipping, world
+from portfolio_lab import aviation, fred, shipping, world
 from portfolio_lab.data import history, prices as px, universe, wrds
 
 FULL_WINDOW_DAYS = 460
@@ -93,6 +93,12 @@ if shipping.last_date(con):
         print(f"  PortWatch: {shipping.update(con)} chokepoint-days refreshed", flush=True)
     except Exception:                                                # noqa: BLE001
         print("  PortWatch: not refreshed", flush=True)
+# One count of the aircraft in the air per run (aviation.py). OpenSky keeps no free
+# history, so these snapshots are it; 4 of the 400 anonymous daily credits.
+try:
+    print(f"  OpenSky: {aviation.snapshot(con):,} aircraft airborne", flush=True)
+except Exception:                                                    # noqa: BLE001
+    print("  OpenSky: no snapshot", flush=True)
 universe.observed_ranges(con)
 # ticker_history's price windows are what the universe is read from; keep them current.
 history.refresh_price_windows(con)

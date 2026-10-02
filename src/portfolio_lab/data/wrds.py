@@ -688,7 +688,8 @@ def _fundamentals(con, cols: dict[str, set[str]]) -> None:
 # separately. When CRSP supplies the US prices (data/crsp.py), the companies it covers
 # keep their CRSP lines and take only their SEC fundamentals from the free store.
 US_BY_CIK = ("ticker_history", "shares_outstanding")
-US_WHOLE = ("listing_ratios", "macro_series", "chokepoint_transits", "chokepoint_first")
+US_WHOLE = ("listing_ratios", "macro_series", "chokepoint_transits", "chokepoint_first",
+            "air_traffic")
 
 
 def copy_us(con: duckdb.DuckDBPyConnection, market_db: Path, log=_quiet) -> dict[str, int]:

@@ -75,7 +75,7 @@ from portfolio_lab import research as rs
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
 from portfolio_lab import alerts, comps, deals, export, fred, fts, insiders, paper, risk, world
-from portfolio_lab import shipping
+from portfolio_lab import aviation, shipping
 from portfolio_lab import wacc as W
 from portfolio_lab import summary as ai_summary
 from portfolio_lab import volforecast as vfc
@@ -3338,18 +3338,61 @@ with tab_commodities:
                           color=[ui.AMBER, ui.CYAN, ui.UP, ui.DOWN, ui.MUTED][:len(chosen_c)])
             st.caption("All rebased to 100 at the start, so the lines compare movement.")
 
-    st.markdown("#### Ships through the chokepoints")
+    # Anonymous OpenSky allows ~100 worldwide calls a day; holding each for 15 minutes
+    # keeps a long session well inside that.
+    @st.cache_data(ttl=900, show_spinner="Asking OpenSky …")
+    def _aircraft_now():
+        try:
+            return aviation.fetch()
+        except Exception:                                            # noqa: BLE001
+            return None
+
+    st.markdown("#### Ships and aircraft")
     ship_board = shipping.dashboard(src.con)
+    map_view = st.radio("Map", ["all ships", "tankers", "aircraft now"], horizontal=True,
+                        key="ship_map", label_visibility="collapsed")
+    if map_view == "aircraft now":
+        live = _aircraft_now()
+        if live is None:
+            st.info("OpenSky did not answer. Its anonymous allowance is about 100 "
+                    "worldwide calls a day; try again in a while.")
+        else:
+            air_at, air = live
+            regions_now = aviation.by_region(air)
+            st.plotly_chart(charts.aircraft_map(aviation.grid(air), air_at),
+                            use_container_width=True, key="air_map_fig")
+            air_hist = aviation.history(src.con)
+            table_air = pd.DataFrame({"region": regions_now.index,
+                                      "airborne now": regions_now.map("{:,}".format)})
+            if not air_hist.empty:
+                last_stored = air_hist.iloc[-1]
+                table_air[f"stored {last_stored.name:%d.%m. %H:%M}"] = [
+                    f"{int(last_stored[r]):,}" if r in last_stored else "—"
+                    for r in regions_now.index]
+            st.markdown(ui.grid(table_air, numeric=set(table_air.columns) - {"region"},
+                                ticker_col="region"), unsafe_allow_html=True)
+            if len(air_hist) > 1:
+                st.line_chart(air_hist, height=240)
+            st.caption(
+                f"{len(air):,} aircraft airborne at {air_at:%d.%m.%Y %H:%M} UTC, each "
+                "circle the count in a 3° cell. Data: "
+                f"{aviation.ATTRIBUTION}. Coverage follows volunteer receivers: dense "
+                "over Europe and North America, thin over oceans, Africa, Russia and "
+                "China — a low count there can mean no receiver, not no aircraft. "
+                "Military and some private aircraft do not broadcast. The daily price "
+                "build stores one count per region, at about the same time each weekday; "
+                "counts from different times of day do not compare.")
     if ship_board.empty:
         st.info("No ship traffic stored yet. Run once: "
                 "`uv run python scripts/build_shipping.py` — IMF PortWatch needs no key, "
                 "and build_prices.py keeps it current.")
     else:
-        map_tankers = st.radio("Map", ["all ships", "tankers"], horizontal=True,
-                               key="ship_map", label_visibility="collapsed") == "tankers"
-        st.plotly_chart(
-            charts.chokepoint_map(shipping.on_map(ship_board), tankers=map_tankers),
-            use_container_width=True, key="ship_map_fig")
+        if map_view != "aircraft now":
+            st.plotly_chart(
+                charts.chokepoint_map(shipping.on_map(ship_board),
+                                      tankers=map_view == "tankers"),
+                use_container_width=True, key="ship_map_fig")
+        st.markdown("**Ships through the chokepoints**")
         key_only = st.toggle("Main chokepoints only", value=True, key="ship_key")
         shown = ship_board[ship_board.chokepoint.isin(shipping.KEY)] if key_only \
             else ship_board

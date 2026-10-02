@@ -1191,6 +1191,17 @@ hätte trotzdem sichtbar sein müssen.
   Kartenkacheln von fremden Servern — läuft offline. Koordinaten fest in
   `shipping.COORDS` (aus PortWatch, 02.10.2026). Feste Namensschilder wurden verworfen:
   Suez/Bab el-Mandeb/Hormus und die Straßen um Taiwan überlappten; Namen per Hover.
+- **Flugzeuge** (`aviation.py`, `scripts/build_air.py`): dritte Kartenansicht „aircraft
+  now“ — alle Flugzeuge in der Luft von OpenSky (anonym, kein Schlüssel, ~3 s, 4 von
+  400 Tages-Credits je weltweitem Abruf; die App hält einen Abruf 15 min vor), als
+  Dichte in 3°-Zellen statt 6.000 Einzelpunkten. Dazu eine Tabelle nach groben Regionen
+  (Kästen, erster Treffer gewinnt — Naher Osten vor Afrika/Asien). OpenSky hat keine
+  kostenlose Historie, deshalb speichert `build_prices.py` je Lauf einen Schnappschuss
+  pro Region (`air_traffic`, auch in den Welt-Bestand kopiert). Erster Schnappschuss
+  02.10.2026 03:14 UTC: 6.358 in der Luft — Nordamerika 3.533, Asien-Pazifik 1.668,
+  Europa 812 (Nacht in Europa). **Die Tageszeit verändert die Zahlen um ein Mehrfaches**;
+  nur Schnappschüsse zur gleichen Uhrzeit sind vergleichbar. Der Mac läuft auf
+  Sydney-Zeit, der Morgen-Job um 10:00 trifft also ~00:00 UTC.
 
 **Gegen die Wirklichkeit geprüft:** Hormus fällt am 01.03.2026 von ~100 auf 0–4 Schiffe
 pro Tag (127 am 22.02., 57 am 28.02., 20, 4, 0 am 04.03.) — genau die öffentlich
@@ -1200,6 +1211,9 @@ berichteten Zahlen nach den Angriffen von USA/Israel auf Iran am 28.02.2026. Sta
 **Bekannte Grenzen:** Schiffe mit abgeschaltetem Transponder fehlen (Schattenflotte —
 Tanker durch Hormus und das Schwarze Meer systematisch zu niedrig). Ungeprüft: wie stark
 PortWatch alte Tage nachträglich ändert; `chokepoint_first` misst das ab jetzt.
+Flugzeuge: Abdeckung folgt den freiwilligen Empfängern (dicht in Europa/Nordamerika,
+dünn über Ozeanen, Afrika, Russland, China); Militär sendet oft nicht; ein Umbau des
+Empfängernetzes verschiebt die Zahlen. Ein Sprung in `air_traffic` ist zuerst verdächtig.
 Nebenbei gefunden: FRED `LRHUTTTTEZM156S` (Euro-Arbeitslosigkeit) endet im Januar 2023,
 die Zeile im MACRO-Tab ist also veraltet.
 
