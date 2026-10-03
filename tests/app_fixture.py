@@ -52,6 +52,31 @@ def _no_network(*args, **kwargs):
     raise ConnectionError("network is blocked in tests")
 
 
+def _failed_download(tickers, *args, **kwargs):
+    """What yf.download returns when Yahoo cannot be reached: an empty frame, the
+    failure only logged ("1 Failed download")."""
+    import logging
+
+    logging.getLogger("yfinance").error("1 Failed download: network is blocked in tests")
+    return pd.DataFrame()
+
+
+class _OfflineTicker:
+    """yf.Ticker with Yahoo unreachable. `dividends` is None and `history` empty, as in
+    yfinance 1.7; every other attribute raises, as the strict research calls do."""
+
+    dividends = None
+
+    def __init__(self, symbol, *args, **kwargs):
+        self.ticker = symbol
+
+    def history(self, *args, **kwargs):
+        return pd.DataFrame()
+
+    def __getattr__(self, name):
+        raise ConnectionError("network is blocked in tests")
+
+
 def run(monkeypatch, data: Path, query: dict | None = None,
         state: dict | None = None, timeout: float = 60) -> AppTest:
     """Run the app once against `data`, with the network blocked."""
@@ -72,8 +97,13 @@ def run(monkeypatch, data: Path, query: dict | None = None,
     import requests
     import yfinance
 
-    monkeypatch.setattr(yfinance, "Ticker", _no_network)
-    monkeypatch.setattr(yfinance, "download", _no_network)
+    # yf.download and Ticker.dividends do not raise when Yahoo is down: the download
+    # is an empty frame and the dividends are None (yfinance 1.7). The fakes do the
+    # same — a fake that raised hid that the app used to cache that as "no data"
+    # (review F6). The probe that tells the two apart (prices.yahoo_answers) then
+    # meets the blocked curl session below and raises.
+    monkeypatch.setattr(yfinance, "Ticker", _OfflineTicker)
+    monkeypatch.setattr(yfinance, "download", _failed_download)
     monkeypatch.setattr(requests.Session, "request", _no_network)
     try:
         from curl_cffi import requests as curl

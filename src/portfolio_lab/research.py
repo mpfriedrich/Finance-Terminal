@@ -653,13 +653,25 @@ def holders(symbol: str, strict: bool = False) -> pd.DataFrame:
     return h if h is not None else pd.DataFrame()
 
 
-def dividend_history(symbol: str, years: int = 10, strict: bool = False) -> pd.DataFrame:
+def dividend_history(symbol: str, years: int = 10, strict: bool = False,
+                     probe=None) -> pd.DataFrame:
+    """Dividends of the last `years` years. Empty: none paid (or no such symbol).
+
+    yfinance 1.7 does not raise when Yahoo is unreachable: `dividends` is then None —
+    and None too for a symbol Yahoo does not know. In strict mode None is followed by
+    `probe` (default `prices.yahoo_answers`), which raises YahooUnreachable when Yahoo
+    did not answer, so a cache never keeps the failure (review F6). An empty Series is
+    an answer: a share that pays nothing."""
     try:
         d = _ticker(symbol).dividends
     except Exception:
         if strict:
             raise
         return pd.DataFrame()
+    if d is None and strict:
+        from .data import prices
+
+        (probe or prices.yahoo_answers)(symbol)
     if d is None or not len(d):
         return pd.DataFrame()
     df = d.reset_index()
