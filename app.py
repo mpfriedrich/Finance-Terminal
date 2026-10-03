@@ -85,7 +85,10 @@ from portfolio_lab import wacc as W
 from portfolio_lab import summary as ai_summary
 from portfolio_lab import volforecast as vfc
 
-st.set_page_config(page_title="Portfolio Lab", page_icon="◫", layout="wide")
+# The sidebar starts closed: it holds the portfolio list, the watchlist and the unit,
+# and the screen's filters moved into SCREEN (02.10.2026). » at the top left opens it.
+st.set_page_config(page_title="Portfolio Lab", page_icon="◫", layout="wide",
+                   initial_sidebar_state="collapsed")
 st.markdown(ui.CSS, unsafe_allow_html=True)
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
