@@ -111,6 +111,21 @@ def fed_funds_expectation(con: duckdb.DuckDBPyConnection) -> dict:
     return out
 
 
+def _closes(con, ticker: str, prices: pd.DataFrame | None) -> pd.DataFrame:
+    """(date, close_adj) of `ticker`: the stored ones, or `prices` when given — bars
+    fetched for a symbol outside the store (a Yahoo-only index or fund). Until the review
+    of 03.10.2026 only stored shares reached the rate and event measures (F5)."""
+    if prices is not None:
+        if prices.empty or "close_adj" not in prices:
+            return pd.DataFrame(columns=["date", "close_adj"])
+        return prices[["date", "close_adj"]].dropna().sort_values("date").reset_index(
+            drop=True)
+    return con.execute(
+        "SELECT date, close_adj FROM prices WHERE upper(ticker) = upper(?) ORDER BY date",
+        [ticker],
+    ).fetch_df()
+
+
 def event_study(
     con: duckdb.DuckDBPyConnection,
     ticker: str,
@@ -119,6 +134,7 @@ def event_study(
     estimation_days: int = 120,
     gap_days: int = 10,
     window: tuple[int, int] = (-5, 5),
+    prices: pd.DataFrame | None = None,
 ) -> dict:
     """What this share did around an event, net of the market.
 
@@ -133,11 +149,11 @@ def event_study(
       * The window is symmetric by default. Choosing it after seeing the result — moving
         the boundary until the number looks good — is the classic way this method gets
         abused, so the window is stated up front and reported with the answer.
+
+    `prices` replaces the stored closes of `ticker` (see _closes); the benchmark is
+    always the stored one.
     """
-    px = con.execute(
-        "SELECT date, close_adj FROM prices WHERE upper(ticker) = upper(?) ORDER BY date",
-        [ticker],
-    ).fetch_df()
+    px = _closes(con, ticker, prices)
     bm = con.execute(
         "SELECT date, close_adj FROM prices WHERE ticker = ? ORDER BY date", [benchmark]
     ).fetch_df()
@@ -205,18 +221,17 @@ def event_study(
 
 
 def rate_sensitivity(
-    con: duckdb.DuckDBPyConnection, ticker: str, min_days: int = 120
+    con: duckdb.DuckDBPyConnection, ticker: str, min_days: int = 120,
+    prices: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """How the share has moved on days when rates moved.
 
     Regressed on the CHANGE in each yield, not its level: a share does not care that the
     ten-year is at 5%, it cares that it went from 4.9 to 5.0 today. Levels would produce
-    a spurious relationship from two series that merely trend together.
+    a spurious relationship from two series that merely trend together. `prices`
+    replaces the stored closes of `ticker` (see _closes).
     """
-    px = con.execute(
-        "SELECT date, close_adj FROM prices WHERE upper(ticker) = upper(?) ORDER BY date",
-        [ticker],
-    ).fetch_df()
+    px = _closes(con, ticker, prices)
     if len(px) < min_days:
         return pd.DataFrame()
     px["date"] = pd.to_datetime(px["date"])

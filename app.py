@@ -355,7 +355,14 @@ def _spot(ticker: str) -> tuple[float | None, str]:
     if quote and quote.get("price"):
         return float(quote["price"]), "live quote"
     close = _last_close(ticker)
-    return (close, "last stored close") if close else (None, "")
+    if close:
+        return close, "last stored close"
+    # A symbol outside the store (SPY, QQQ): Yahoo's last daily close, so the position
+    # builder works on it too (review 03.10.2026, F2).
+    bars, _ = ac.attempt(ac.yahoo_bars, ticker.upper())
+    if bars is not None and not bars.empty and pd.notna(bars["close"].iloc[-1]):
+        return float(bars["close"].iloc[-1]), f"Yahoo close of {bars['date'].iloc[-1]}"
+    return None, ""
 
 
 # Size bands in billions. "Any" leaves the screen alone; the rest write a filter that
@@ -2821,8 +2828,19 @@ def _view_options_builder(default_under: str = "") -> None:
                         picked = side_ch[side_ch.strike == strike_b].iloc[0]
                         price_b, iv_b = float(picked.mid), float(picked.iv)
 
+                # One position, one underlying: its payoff is drawn against one price.
+                # Until 03.10.2026 a leg on a second share was added without a word and
+                # valued at the first one's price (review F1).
+                held = sorted(set(store.legs(chosen).underlying) - {under})
+                if held:
+                    st.caption(
+                        f"The saved position is on {', '.join(held)}. A leg on {under} "
+                        "cannot share its payoff chart, which is drawn against one "
+                        "price: clear the position first, or build this one in another "
+                        "portfolio.")
                 if strike_b is not None and st.button(
-                    "Add leg", type="primary", width="stretch", key="opt_b_add"
+                    "Add leg", type="primary", width="stretch", key="opt_b_add",
+                    disabled=bool(held),
                 ):
                     store.add_leg(
                         chosen, under, kind_b, strike_b, exp_b,
@@ -2832,7 +2850,13 @@ def _view_options_builder(default_under: str = "") -> None:
                     st.rerun()
 
                 st.markdown("#### Presets")
-                pc = st.columns(3)
+                # A preset deletes the saved legs first; with legs saved it asks, like
+                # every other delete (F12d).
+                n_saved = len(store.legs(chosen))
+                holder = (st.popover(f"Presets — replace the {n_saved} saved legs",
+                                     width="stretch") if n_saved else st.container())
+                with holder:
+                    pc = st.columns(3)
                 for i, (name, spec_legs) in enumerate(op.PRESETS.items()):
                     if pc[i % 3].button(name, key=f"preset_{i}", width="stretch"):
                         store.clear_legs(chosen)
@@ -2863,7 +2887,7 @@ def _view_options_builder(default_under: str = "") -> None:
             st.info("No legs yet. Add one above, or start from a preset.")
         else:
             st.markdown("#### Position")
-            legs_obj = [
+            every_leg = [
                 op.Leg(kind=r.kind, strike=float(r.strike), expiry=r.expiry,
                        quantity=float(r.quantity), entry_price=float(r.entry_price),
                        iv=float(r.iv) if pd.notna(r.iv) else 0.25,
@@ -2871,19 +2895,36 @@ def _view_options_builder(default_under: str = "") -> None:
                 for r in saved.itertuples()
             ]
             st.markdown(ui.grid(pd.DataFrame({
-                "leg": [l.describe() for l in legs_obj],
-                "iv": [f"{l.iv:.0%}" if l.kind != "share" else "—" for l in legs_obj],
-                "cost": [ui.money(l.entry_price * l.multiplier) for l in legs_obj],
-            }), numeric={"iv", "cost"}, ticker_col="leg"), unsafe_allow_html=True)
+                "underlying": saved.underlying.astype(str).tolist(),
+                "leg": [l.describe() for l in every_leg],
+                "iv": [f"{l.iv:.0%}" if l.kind != "share" else "—" for l in every_leg],
+                "cost": [ui.money(l.entry_price * l.multiplier) for l in every_leg],
+            }), numeric={"iv", "cost"}, ticker_col="underlying"), unsafe_allow_html=True)
 
-            if st.button("Clear position", key="opt_b_clear", width="stretch"):
-                store.clear_legs(chosen)
-                st.rerun()
+            with st.popover("Clear position", width="stretch"):
+                st.caption(f"Deletes the {len(saved)} saved legs of this portfolio.")
+                if st.button("Delete the legs", type="primary", key="opt_b_clear"):
+                    store.clear_legs(chosen)
+                    st.rerun()
 
             # The SAVED legs' underlying, not whatever is typed above: until 02.10.2026
             # a position in one share was valued at the price of the next one typed in,
-            # and an underlying without a stored close raised a TypeError.
-            under_b = saved.underlying.iloc[0]
+            # and an underlying without a stored close raised a TypeError. A position
+            # saved before 03.10.2026 can hold legs on several underlyings: each set is
+            # valued at its own price, one at a time (F1).
+            unders = sorted(saved.underlying.astype(str).unique())
+            under_b = unders[0]
+            if len(unders) > 1:
+                under_b = st.segmented_control(
+                    "Value the legs on", unders, default=unders[0],
+                    key="opt_b_value_on") or unders[0]
+                st.warning(
+                    f"These legs are on {len(unders)} underlyings. A payoff is drawn "
+                    "against one price, so the figures below are for the legs on "
+                    f"{under_b} only, at {under_b}'s own price.")
+            mine = (saved.underlying.astype(str) == under_b).tolist()
+            legs_obj = [leg for leg, keep in zip(every_leg, mine) if keep]
+            saved = saved[mine]
             spot_use, spot_src = _spot(under_b)
             if not spot_use:
                 st.warning(f"No price for {under_b}, so the position cannot be valued.")
@@ -3653,11 +3694,13 @@ def _view_rates() -> None:
                           color=[ui.AMBER, ui.CYAN, ui.UP, ui.MUTED][:len(wide.columns)])
 
 
-def _rate_exposure(ticker: str) -> None:
-    """Rate sensitivity and an event study for one share — in MACRO until 02.10.2026,
-    with its own ticker box (default AAPL); now part of the security's EXPOSURE."""
-    st.markdown("#### What a company does when rates move")
-    rate_links = mc.rate_sensitivity(src.con, ticker)
+def _rate_exposure(ticker: str, bars: pd.DataFrame | None = None) -> None:
+    """Rate sensitivity and an event study for one security — in MACRO until 02.10.2026,
+    with its own ticker box (default AAPL); now part of the security's EXPOSURE, and of
+    the page of an index, a commodity or a Yahoo-only symbol (review 03.10.2026, F5).
+    `bars` are fetched bars for a symbol the store does not hold."""
+    st.markdown("#### What it does when rates move")
+    rate_links = mc.rate_sensitivity(src.con, ticker, prices=bars)
     if rate_links.empty:
         st.info("Not enough overlapping history with the Treasury yields.")
     else:
@@ -3687,9 +3730,9 @@ def _rate_exposure(ticker: str) -> None:
     ev_win = e3.slider("Window, days either side", 1, 20, 5, key="ev_window")
     if st.button("Measure", key=f"ev_run_{ticker}", width="stretch"):
         res_ev = mc.event_study(src.con, ticker, ev_date,
-                                window=(-ev_win, ev_win))
+                                window=(-ev_win, ev_win), prices=bars)
         if not res_ev:
-            st.warning("No price history for that company.")
+            st.warning(f"No price history for {ticker}.")
         elif "error" in res_ev:
             st.warning(res_ev["error"])
         else:
@@ -4708,8 +4751,43 @@ def _sections(tab: str, views: dict, *args) -> None:
                 _guarded(label, views[label], *args)
 
 
+def _lazy_box(label: str, code: str, view, *args) -> None:
+    """An expander whose view runs only while it is open, opened by its function code.
+
+    The key carries whether the command line asked for it, so `AAPL OMON` opens it even
+    after it was closed by hand."""
+    focus = st.session_state.get("cmd_focus") == code
+    box = st.expander(label, expanded=focus, key=f"box_{code}_{int(focus)}",
+                      on_change="rerun")
+    with box:
+        if box.open:
+            _guarded(label, view, *args)
+
+
+def _exposure_any(symbol: str) -> None:
+    """HRA for a security without filings: the stored series, else Yahoo's bars."""
+    stored = src.con.execute(
+        "SELECT 1 FROM prices WHERE upper(ticker) = upper(?) LIMIT 1", [symbol]).fetchone()
+    bars = None
+    if not stored:
+        bars, err = ac.attempt(ac.yahoo_bars, symbol.upper())
+        if err:
+            st.warning(f"Yahoo could not be reached for {symbol}'s prices ({err}). "
+                       "Try again in a moment.")
+            return
+        if bars is None or bars.empty:
+            st.info(f"No price history for {symbol}.")
+            return
+    _rate_exposure(symbol, bars)
+
+
 def _tab_security() -> None:
-    """DES … CF on the loaded security."""
+    """DES … CF on the loaded security.
+
+    The option position builder (OMON), precedent deals (MA) and what a security moved
+    with (HRA) were reachable only from a company in the store until the review of
+    03.10.2026 (F2, F4, F5): with nothing loaded, or SPY, an index or gold loaded, the
+    command opened a page without them, and saved legs were nowhere to be seen."""
     sec = _ctx()
     if not sec:
         st.markdown("#### No security loaded")
@@ -4719,15 +4797,21 @@ def _tab_security() -> None:
         with st.expander("Precedent transactions (MA)",
                          expanded=st.session_state.get("cmd_focus") == "MA"):
             _view_deals()
+        _lazy_box("Build an options position (OMON)", "OMON", _view_options_builder)
         return
     if rs.profile(src.con, sec):
         _equity_page(sec)
-    else:
-        # A price-only series (index, commodity, crypto) or a Yahoo symbol.
-        _security_page(sec)
-        with st.expander("Price table (HP)",
-                         expanded=st.session_state.get("cmd_focus") == "HP"):
-            _sec_prices(SimpleNamespace(ticker=sec))
+        return
+    # A price-only series (index, commodity, crypto) or a Yahoo symbol.
+    _security_page(sec)
+    with st.expander("Price table (HP)",
+                     expanded=st.session_state.get("cmd_focus") == "HP"):
+        _sec_prices(SimpleNamespace(ticker=sec))
+    _lazy_box("What it moved with: rates and one event (HRA)", "HRA", _exposure_any, sec)
+    _lazy_box("Build an options position (OMON)", "OMON", _view_options_builder, sec)
+    with st.expander("Precedent transactions (MA)",
+                     expanded=st.session_state.get("cmd_focus") == "MA"):
+        _view_deals()
 
 
 def _tab_screen() -> None:
