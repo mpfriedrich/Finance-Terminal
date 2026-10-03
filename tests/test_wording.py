@@ -12,7 +12,7 @@ import pytest
 from portfolio_lab import wording
 
 ROOT = Path(__file__).resolve().parents[1]
-UI_FILES = [ROOT / "app.py"] + [
+UI_FILES = [ROOT / "app.py", ROOT / "src" / "portfolio_lab" / "command.py"] + [
     p for p in sorted((ROOT / "src" / "portfolio_lab").rglob("*.py"))
     if "__pycache__" not in str(p)
 ]
