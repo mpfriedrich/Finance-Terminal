@@ -30,29 +30,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 # ------------------------------------------------------------------- tabs, sections
-SECURITY = "SECURITY"
-SCREEN = "SCREEN & BACKTEST"
-PORTFOLIOS = "PORTFOLIOS"
-MARKETS = "MARKETS & MACRO"
-WORLD = "WORLD & LOGISTICS"
-EVENTS = "EVENTS & NEWS"
-TAB_LABELS = [SECURITY, SCREEN, PORTFOLIOS, MARKETS, WORLD, EVENTS]
-
-SECTIONS: dict[str, list[str]] = {
-    SECURITY: ["OVERVIEW", "PRICES", "FINANCIALS", "VALUATION", "OPTIONS", "EXPOSURE",
-               "ANALYSTS", "OWNERSHIP", "RELATIONSHIPS", "NEWS & FILINGS"],
-    SCREEN: ["SCREEN", "BACKTEST", "RULE", "SAVINGS PLAN"],
-    PORTFOLIOS: ["BOOKS", "TRACKING", "WATCHLIST & ALERTS", "COMMODITY LINKS"],
-    MARKETS: ["BOARDS", "COMPARE", "ECONOMY", "RATES"],
-    WORLD: [],
-    EVENTS: ["BRIEFING", "CALENDAR", "FILING SEARCH"],
-}
-MAIN_KEY = "main_tab"
-
-
-def section_key(tab: str) -> str:
-    """The session key of a tab's own row of sections."""
-    return "sub_" + re.sub(r"[^a-z]+", "_", tab.lower()).strip("_")
+from .layout import (EVENTS, MAIN_KEY, MARKETS, PORTFOLIOS, SCREEN, SECTIONS,  # noqa: E402,F401
+                     SECURITY, TAB_LABELS, WORLD, section_key)
 
 
 @dataclass(frozen=True)
@@ -71,7 +50,7 @@ def _f(code, tab, section, label, needs=False):
 FUNCTIONS: dict[str, Function] = dict([
     _f("DES", SECURITY, "OVERVIEW", "description, price, return and risk", True),
     _f("GP", SECURITY, "OVERVIEW", "price chart", True),
-    _f("HP", SECURITY, "PRICES", "historical price table", True),
+    _f("HP", SECURITY, "OVERVIEW", "historical price table", True),
     _f("FA", SECURITY, "FINANCIALS", "financials as first filed", True),
     _f("ERN", SECURITY, "FINANCIALS", "earnings and the next report", True),
     _f("RV", SECURITY, "VALUATION", "relative value: own history and peers", True),
@@ -86,7 +65,7 @@ FUNCTIONS: dict[str, Function] = dict([
     _f("INS", SECURITY, "OWNERSHIP", "insider trades (Form 4)", True),
     _f("HDS", SECURITY, "OWNERSHIP", "institutional holders", True),
     _f("DVD", SECURITY, "OWNERSHIP", "dividends", True),
-    _f("SPLC", SECURITY, "RELATIONSHIPS", "counterparties named in the 10-K", True),
+    _f("SPLC", SECURITY, "NEWS & FILINGS", "counterparties named in the 10-K", True),
     _f("CN", SECURITY, "NEWS & FILINGS", "company headlines", True),
     _f("CF", SECURITY, "NEWS & FILINGS", "company filings", True),
     _f("MA", SECURITY, "VALUATION", "precedent transactions"),
