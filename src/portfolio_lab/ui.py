@@ -16,6 +16,7 @@ current web taste:
 from __future__ import annotations
 
 import html
+import re
 
 import pandas as pd
 
@@ -277,6 +278,28 @@ def grid(
         f'<thead><tr>{head}</tr></thead><tbody>{"".join(rows)}</tbody>'
         "</table></div>"
     )
+
+
+_URL = re.compile(r"\b(?:https?|wss?|postgres(?:ql)?)://\S+", re.IGNORECASE)
+_SECRETISH = re.compile(r"(?i)\b(api[_-]?key|token|password|passwd|secret|apikey)=\S+")
+
+
+def markdown_text(text: str) -> str:
+    """Model or third-party text made safe for st.markdown: every HTML character is an
+    entity, so a tag in a headline shows as text and never runs (the briefing was
+    rendered with unsafe_allow_html until 02.10.2026). Markdown emphasis still works."""
+    return html.escape(str(text or ""), quote=False)
+
+
+def error_text(exc: BaseException, limit: int = 160) -> str:
+    """What an error may show on screen: its type and message, with every URL and
+    anything shaped like `key=value` for a credential cut out (R24). A connection error
+    from requests or yfinance carries the full URL, query string included, and the
+    message is the first thing a person copies into a chat."""
+    message = _SECRETISH.sub(r"\1=…", _URL.sub("<address>", str(exc))).strip()
+    if len(message) > limit:
+        message = message[: limit - 1] + "…"
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
 
 
 def num(value, digits: int = 2) -> str:

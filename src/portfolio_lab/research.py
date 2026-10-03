@@ -19,6 +19,9 @@ Three things here are deliberate and not what a commercial terminal would show:
 from __future__ import annotations
 
 import datetime as dt
+import functools
+import threading
+from pathlib import Path
 
 import duckdb
 import numpy as np
@@ -343,13 +346,17 @@ def _finite(joined: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- live quote
-def live_quote(ticker: str) -> dict | None:
+def live_quote(ticker: str, strict: bool = False) -> dict | None:
     """Fetch the current price for ONE company, on demand.
 
     Deliberately not used by the screener. A screen has to value every company at the
     same moment or the comparison is meaningless — mixing a live quote for one name with
     Friday's close for the rest would quietly rank that one differently. Research looks
     at a single company, so there is nothing to keep comparable.
+
+    `strict=True` raises when Yahoo cannot be reached instead of answering None, so a
+    cache in front of it (appcache.py) never keeps "unreachable" as if it were "no
+    price". The same flag on the other network calls below does the same.
     """
     try:
         import yfinance as yf
@@ -367,6 +374,8 @@ def live_quote(ticker: str) -> dict | None:
             "currency": info.get("currency"),
         }
     except Exception:
+        if strict:
+            raise
         return None
     if not out.get("price"):
         return None
@@ -435,6 +444,51 @@ FILING_LABELS = {
 }
 
 
+class _Archive:
+    """One open submissions.zip with its member names, shared by every caller.
+
+    The real archive is 1.56 GB with close to a million members. Opening it means
+    reading the whole central directory, and every lookup used to do that again: the
+    RESEARCH overview, its filing list and the 10-K finder each once, and the earnings
+    calendar once per ticker (audit 02.10.2026). Opened once per file version instead;
+    a lock serialises reads, because the app answers several browser tabs at once and a
+    ZipFile has one file position.
+    """
+
+    def __init__(self, path: str):
+        import zipfile
+
+        self.zip = zipfile.ZipFile(path)
+        self.names = frozenset(self.zip.namelist())
+        self.lock = threading.Lock()
+
+
+@functools.lru_cache(maxsize=2)
+def _archive(path: str, mtime_ns: int, size: int) -> _Archive:
+    """Keyed by modification time and size, so a rebuilt archive is opened afresh
+    rather than read through a handle on the replaced file."""
+    del mtime_ns, size
+    return _Archive(path)
+
+
+def submission(zip_path, cik: int) -> dict | None:
+    """One filer's submissions JSON out of the local archive, or None when the archive
+    or the filer is missing or unreadable."""
+    import json
+    import zipfile
+
+    member = f"CIK{int(cik):010d}.json"
+    try:
+        stat = Path(zip_path).stat()
+        archive = _archive(str(zip_path), stat.st_mtime_ns, stat.st_size)
+        if member not in archive.names:
+            return None
+        with archive.lock, archive.zip.open(member) as fh:
+            return json.load(fh)
+    except (OSError, zipfile.BadZipFile, json.JSONDecodeError, KeyError):
+        return None
+
+
 def filings(
     zip_path, cik: int, forms: list[str] | None = None, limit: int = 40
 ) -> pd.DataFrame:
@@ -444,17 +498,8 @@ def filings(
     company looked like, the filing list tells you what it has been doing lately —
     a shelf registration, a sudden run of insider sales, an activist stake.
     """
-    import json
-    import zipfile
-
-    member = f"CIK{int(cik):010d}.json"
-    try:
-        with zipfile.ZipFile(zip_path) as zf:
-            if member not in set(zf.namelist()):
-                return pd.DataFrame()
-            with zf.open(member) as fh:
-                doc = json.load(fh)
-    except (OSError, zipfile.BadZipFile, json.JSONDecodeError):
+    doc = submission(zip_path, cik)
+    if doc is None:
         return pd.DataFrame()
 
     recent = (doc.get("filings") or {}).get("recent") or {}
@@ -482,17 +527,8 @@ def filings(
 
 def company_details(zip_path, cik: int) -> dict:
     """Registration facts the price data cannot tell you."""
-    import json
-    import zipfile
-
-    member = f"CIK{int(cik):010d}.json"
-    try:
-        with zipfile.ZipFile(zip_path) as zf:
-            if member not in set(zf.namelist()):
-                return {}
-            with zf.open(member) as fh:
-                doc = json.load(fh)
-    except (OSError, zipfile.BadZipFile, json.JSONDecodeError):
+    doc = submission(zip_path, cik)
+    if doc is None:
         return {}
     fy = doc.get("fiscalYearEnd") or ""
     return {
@@ -547,11 +583,13 @@ def _ticker(symbol: str):
     return yf.Ticker(symbol)
 
 
-def news(symbol: str, limit: int = 12) -> pd.DataFrame:
+def news(symbol: str, limit: int = 12, strict: bool = False) -> pd.DataFrame:
     """Recent headlines. Titles and links only — the article text is not ours to copy."""
     try:
         raw = _ticker(symbol).news or []
     except Exception:
+        if strict:
+            raise
         return pd.DataFrame()
     rows = []
     for item in raw[:limit]:
@@ -569,7 +607,7 @@ def news(symbol: str, limit: int = 12) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def analyst_view(symbol: str) -> dict:
+def analyst_view(symbol: str, strict: bool = False) -> dict:
     """What the sell side currently says. Opinions, not facts — labelled as such."""
     out: dict = {}
     t = _ticker(symbol)
@@ -586,34 +624,41 @@ def analyst_view(symbol: str) -> dict:
             }
             out["ratings_period"] = str(latest.get("period", ""))
     except Exception:
-        pass
+        if strict:
+            raise
     try:
         out["targets"] = t.analyst_price_targets or {}
     except Exception:
-        pass
+        if strict:
+            raise
     try:
         ud = t.upgrades_downgrades
         if ud is not None and len(ud):
             recent = ud.sort_index(ascending=False).head(8).reset_index()
             out["changes"] = recent
     except Exception:
-        pass
+        if strict:
+            raise
     return out
 
 
-def holders(symbol: str) -> pd.DataFrame:
+def holders(symbol: str, strict: bool = False) -> pd.DataFrame:
     """Largest institutional positions, as last filed with the SEC."""
     try:
         h = _ticker(symbol).institutional_holders
     except Exception:
+        if strict:
+            raise
         return pd.DataFrame()
     return h if h is not None else pd.DataFrame()
 
 
-def dividend_history(symbol: str, years: int = 10) -> pd.DataFrame:
+def dividend_history(symbol: str, years: int = 10, strict: bool = False) -> pd.DataFrame:
     try:
         d = _ticker(symbol).dividends
     except Exception:
+        if strict:
+            raise
         return pd.DataFrame()
     if d is None or not len(d):
         return pd.DataFrame()
@@ -624,7 +669,7 @@ def dividend_history(symbol: str, years: int = 10) -> pd.DataFrame:
     return df[df.date >= cutoff].sort_values("date")
 
 
-def earnings_history(symbol: str, limit: int = 12) -> pd.DataFrame:
+def earnings_history(symbol: str, limit: int = 12, strict: bool = False) -> pd.DataFrame:
     """Reported earnings against what was expected.
 
     The surprise column is the part a screen cannot see: a company can beat every quarter
@@ -633,6 +678,8 @@ def earnings_history(symbol: str, limit: int = 12) -> pd.DataFrame:
     try:
         e = _ticker(symbol).earnings_dates
     except Exception:
+        if strict:
+            raise
         return pd.DataFrame()
     if e is None or not len(e):
         return pd.DataFrame()
@@ -768,17 +815,8 @@ def next_report_estimate(zip_path, cik: int) -> dict | None:
     Needs no network and works for every filer in the archive, which is what makes a
     calendar over thousands of companies possible at all.
     """
-    import json
-    import zipfile
-
-    member = f"CIK{int(cik):010d}.json"
-    try:
-        with zipfile.ZipFile(zip_path) as zf:
-            if member not in set(zf.namelist()):
-                return None
-            with zf.open(member) as fh:
-                doc = json.load(fh)
-    except (OSError, zipfile.BadZipFile, json.JSONDecodeError):
+    doc = submission(zip_path, cik)
+    if doc is None:
         return None
 
     recent = (doc.get("filings") or {}).get("recent") or {}
@@ -814,11 +852,13 @@ def next_report_estimate(zip_path, cik: int) -> dict | None:
     }
 
 
-def confirmed_report_date(symbol: str) -> dict | None:
+def confirmed_report_date(symbol: str, strict: bool = False) -> dict | None:
     """The date the company has actually announced, where one exists."""
     try:
         cal = _ticker(symbol).calendar or {}
     except Exception:
+        if strict:
+            raise
         return None
     raw = cal.get("Earnings Date")
     if not raw:
@@ -846,6 +886,7 @@ def earnings_calendar(
     weeks: int = 6,
     confirm: bool = True,
     confirm_limit: int = 40,
+    strict: bool = False,
 ) -> pd.DataFrame:
     """Who reports in the next `weeks`, for a given list of companies.
 
@@ -884,7 +925,7 @@ def earnings_calendar(
 
     if confirm:
         for i, r in enumerate(out.head(confirm_limit).itertuples()):
-            actual = confirmed_report_date(r.ticker)
+            actual = confirmed_report_date(r.ticker, strict=strict)
             if not actual:
                 continue
             idx = out.index[out.ticker == r.ticker]

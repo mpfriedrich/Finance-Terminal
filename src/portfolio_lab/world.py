@@ -51,6 +51,7 @@ MONITOR: dict[str, list[tuple[str, str]]] = {
     "Commodities": [
         ("GC=F", "Gold"), ("SI=F", "Silver"), ("CL=F", "Crude oil WTI"),
         ("BZ=F", "Crude oil Brent"), ("NG=F", "Natural gas"), ("HG=F", "Copper"),
+        ("ZW=F", "Wheat"), ("ZC=F", "Corn"),
     ],
     "Crypto": [("BTC-USD", "Bitcoin"), ("ETH-USD", "Ether")],
 }

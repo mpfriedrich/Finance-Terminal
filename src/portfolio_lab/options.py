@@ -93,13 +93,24 @@ MAX_SPREAD_FRACTION = 0.75   # bid/ask wider than this means nobody agrees on a 
 MONEYNESS_BAND = (0.70, 1.30)  # strikes far outside this are thin and add only noise
 
 
-def expiries(symbol: str) -> list[str]:
+def expiries(symbol: str, strict: bool = False) -> list[str]:
+    """Listed expiry dates. `strict=True` raises when Yahoo cannot be reached, so a
+    cache in front of it (appcache.py) never stores "unreachable" as "no options"."""
     try:
         import yfinance as yf
 
         return list(yf.Ticker(symbol).options or [])
     except Exception:
+        if strict:
+            raise
         return []
+
+
+def fetch_chain(symbol: str, expiry: str):
+    """The raw chain from Yahoo: an object with `.calls` and `.puts`. Raises on failure."""
+    import yfinance as yf
+
+    return yf.Ticker(symbol).option_chain(expiry)
 
 
 # Evidence required when the market is shut and there are no live quotes to lean on:
@@ -182,13 +193,17 @@ def _clean(frame: pd.DataFrame, spot: float, kind: str, t_years: float,
 
 
 def chain(symbol: str, expiry: str, spot: float, risk_free: float = 0.04,
-          dividend_yield: float = 0.0) -> pd.DataFrame:
-    """One expiry, cleaned, calls and puts together."""
-    try:
-        import yfinance as yf
+          dividend_yield: float = 0.0, fetch=None, strict: bool = False) -> pd.DataFrame:
+    """One expiry, cleaned, calls and puts together.
 
-        raw = yf.Ticker(symbol).option_chain(expiry)
+    `fetch(symbol, expiry)` replaces the download (the app passes a cached one: the raw
+    quotes do not depend on the spot, the cleaning does). `strict=True` raises on a
+    failed download instead of returning an empty frame."""
+    try:
+        raw = (fetch or fetch_chain)(symbol, expiry)
     except Exception:
+        if strict:
+            raise
         return pd.DataFrame()
     days = max((pd.Timestamp(expiry) - pd.Timestamp(dt.date.today())).days, 0)
     t_years = max(days / 365.0, 1 / 365)
@@ -206,7 +221,8 @@ def chain(symbol: str, expiry: str, spot: float, risk_free: float = 0.04,
 
 
 def surface(symbol: str, spot: float, max_expiries: int = 8,
-            risk_free: float = 0.04, dividend_yield: float = 0.0) -> pd.DataFrame:
+            risk_free: float = 0.04, dividend_yield: float = 0.0, fetch=None,
+            listed=None, strict: bool = False) -> pd.DataFrame:
     """Implied volatility across strikes and expiries — the surface, as a long table.
 
     Only out-of-the-money contracts are kept per side (calls above spot, puts below).
@@ -214,10 +230,10 @@ def surface(symbol: str, spot: float, max_expiries: int = 8,
     their value as intrinsic value, so their implied volatility is a small residual on a
     big number and is correspondingly unstable.
     """
-    dates = expiries(symbol)[:max_expiries]
+    dates = (listed(symbol) if listed else expiries(symbol, strict=strict))[:max_expiries]
     frames, discarded, mode = [], 0, "unknown"
     for e in dates:
-        c = chain(symbol, e, spot, risk_free, dividend_yield)
+        c = chain(symbol, e, spot, risk_free, dividend_yield, fetch=fetch, strict=strict)
         if c.empty:
             continue
         discarded += c.attrs.get("discarded", 0)
