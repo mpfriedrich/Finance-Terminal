@@ -109,7 +109,7 @@ def _market():
     return source, path, path.stat().st_ino
 
 
-def _market_source():
+def _market_source(rerun: bool = True):
     """The market connection, reopened if the file underneath it was replaced.
 
     A price rebuild that ran while this app was open swaps a freshly built file into
@@ -132,7 +132,14 @@ def _market_source():
             source.con.close()
             _market.clear()
             st.cache_data.clear()
-            st.rerun()
+            # In the body of the script the page may already show old figures, so it
+            # starts again. A widget callback runs before anything is drawn: there the
+            # store is just reopened. st.rerun() inside the command line's callback
+            # threw the command away, so the first command after every price build did
+            # nothing (review 03.10.2026, F10).
+            if rerun:
+                st.rerun()
+            source = _market()[0]
     except OSError:
         pass  # Mid-swap. The next rerun will see the new file.
     return per_thread(source)
@@ -4542,32 +4549,61 @@ def _open(tab: str, section: str | None) -> None:
         st.session_state[layout.section_key(tab)] = section
 
 
-def _execute(text: str) -> None:
-    """Run one command: load the security it names, open the tab its function lives in."""
-    st.session_state.pop("cmd_choices", None)
-    parsed, found, action = command.run(_market_source().con, text, _ctx())
-    st.session_state["cmd_msg"] = action.message
+def _apply(parsed, found, action, con) -> None:
+    """Carry out a dispatched command: load its security, open its tab and section."""
+    code = parsed.function or "DES"
     if action.tab is None:
+        st.session_state["cmd_msg"] = action.message
         if found.choices:
             st.session_state["cmd_choices"] = (list(found.choices), parsed.function)
         return
+    equity = bool(action.symbol and rs.profile(con, action.symbol))
+    st.session_state["cmd_msg"] = layout.status_line(
+        action.message, code, command.FUNCTIONS[code].label, action.symbol, equity,
+        action.tab)
     command.push(st.session_state, action.symbol)
-    code = parsed.function or "DES"
     st.session_state["cmd_focus"] = code
     _open(action.tab, action.section or layout.SUB_SECTION.get(code))
 
 
+def _execute(text: str) -> None:
+    """Run one command: load the security it names, open the tab its function lives in.
+
+    Called from widget callbacks, which run before the page is drawn: the store is
+    reopened there without a rerun if a build replaced it (F10, _market_source)."""
+    st.session_state.pop("cmd_choices", None)
+    con = _market_source(rerun=False).con
+    parsed, found, action = command.run(con, text, _ctx())
+    _apply(parsed, found, action, con)
+
+
 def _on_command() -> None:
-    _execute(st.session_state.get("cmd_input", ""))
+    """Enter in the line, or GO. Both fire when GO is clicked straight after typing:
+    the first runs the text and empties the line, and the second found it empty and
+    replaced the answer with "Type a symbol…" (review 03.10.2026, F9). An empty line
+    does nothing."""
+    text = st.session_state.get("cmd_input", "")
     st.session_state["cmd_input"] = ""
+    if text.strip():
+        _execute(text)
 
 
 def _pick_choice(ticker: str, function: str | None) -> None:
-    _execute(f"{ticker} {function or ''}")
+    """A button under 'Several matches'. The ticker is a store line already, so it is
+    loaded as it is and not parsed again: a share whose ticker is a function code (MA,
+    HP, GP, TOP …) opened that function instead of the company (F11)."""
+    st.session_state.pop("cmd_choices", None)
+    con = _market_source(rerun=False).con
+    parsed = command.Parsed(symbol=ticker, function=function)
+    found = command.Resolution(ticker, source="store")
+    _apply(parsed, found, command.dispatch(parsed, found, _ctx()), con)
 
 
 def _go_back() -> None:
     previous = command.back(st.session_state)
+    # The match buttons belong to the command that produced them, not to the
+    # security one goes back to (F12c).
+    st.session_state.pop("cmd_choices", None)
     if previous is not None:
         st.session_state["cmd_msg"] = f"Back to {previous}."
         _open(layout.SECURITY, None)
@@ -4608,7 +4644,8 @@ def _command_bar() -> None:
         st.markdown(ui.grid(pd.DataFrame(
             [(code, t.tab + (f" → {t.section or layout.SUB_SECTION.get(code, '')}"
                              if (t.section or code in layout.SUB_SECTION) else ""),
-              t.label) for code, t in command.FUNCTIONS.items()],
+              layout.LABELS.get(code, t.label))
+             for code, t in command.FUNCTIONS.items()],
             columns=["code", "opens", "what"]), ticker_col="code"),
             unsafe_allow_html=True)
         st.caption("A security alone opens its description. A market after the ticker "
