@@ -1499,6 +1499,44 @@ Fragmente (`st.fragment`) aus dem Audit sind nicht umgesetzt — Lazy-Tabs und C
 nehmen den größten Teil davon weg; CACS/MMAP/SEAG nicht gebaut; Telefonansicht der
 neuen Kommandozeile nicht geprüft.
 
+### Gegencheck 03.10.2026 (unabhängige Prüfung von f8d2c8f, Branches `claude/bloomberg-fixes-core` und `-app`)
+
+**Gefunden und behoben** (je ein Test, der auf f8d2c8f fehlschlägt; App-Tests in
+`tests/test_app_review.py`): F1 der Options-Baukasten bewertete alle gespeicherten Beine
+zum Kurs des ersten Basiswerts und nahm ein Bein auf einen zweiten Wert ohne Hinweis an
+→ ein Basiswert je Position („Add leg“ gesperrt mit Erklärung), Spalte `underlying`,
+alte gemischte Positionen je Basiswert einzeln bewertet. F2/F4/F5 Baukasten, MA und
+Zins-/Ereignisstudie waren nur bei einer Aktie aus dem Bestand erreichbar → auch ohne
+geladenes Wertpapier und bei Index/Rohstoff/Yahoo-Symbol (SPY), als Klappboxen, die nur
+geöffnet rechnen; `macro.rate_sensitivity`/`event_study` nehmen dafür geholte Kurse
+(`prices=`). F3 (core) SPY, QQQ, `SPY US` und nackte Compustat-Ticker (DMA → DMA.DEU)
+fanden nichts. F6 (core + App) yfinance meldet einen Netzausfall nicht als Fehler (leerer
+Frame, Dividenden None), das wurde eine Stunde bis einen halben Tag als „keine Daten“
+gecacht → `prices.yahoo_answers` prüft nach, `YahooUnreachable` verhindert das Cachen, und
+Kurstabelle, Regel, Regel-Chart, Dividenden und Yahoo-Seite sagen „could not be reached“.
+F7 HP zeigte den gehandelten Schluss neben split-bereinigtem Hoch/Tief → alles auf einer
+Basis (`research.price_table`), „close as traded“ als eigene Spalte, bei Yahoo keine. F8
+Schlagzeilen ungeschützt in `unsafe_allow_html` → `ui.headline` (escaped, nur
+http(s)-Links). F9 GO nach Enter überschrieb die Antwort; F10 der erste Befehl nach einem
+Neubau ging verloren (`st.rerun()` im Callback); F11 eine Auswahl wie der Ticker MA
+öffnete die Funktion MA; F12 Beschriftung SPLC/HRA (in `layout.LABELS`, command.py
+unverändert), rohe `{exc}`-Texte (4 Stellen) → `ui.error_text`, BACK leert die
+Auswahlknöpfe, Löschen der Beine und Vorlagen nur über Popover, MAP-Ebene und
+RULE-Eingaben überleben den Tabwechsel, „nicht verfügbar“ statt „Financial statements“
+bei Kurs-only-Symbolen, Options-Snapshot-Cache mit Dateizeit. F13 (Entscheidung Moritz)
+DCF-Wachstum wieder eigene Eingabe mit 3 %, getrennt beschriftet vom Screen-Wachstum
+(0 %); „ewiges Wachstum“ startet weiter beim Screen.
+
+**Gemessen:** Testsuite 840 bestanden, 15 übersprungen (f8d2c8f: 801); im Browser auf Port 8633 mit Fixture-Daten geprüft
+(GC=F OMON mit zwei Basiswerten, HRA-Box, GO nach Tippen, HP-Spalten).
+
+**Offen:** ein Ausfall, auf den schnell wieder eine Antwort folgt, liest sich bei Yahoo
+weiterhin als „keine Daten“ (die Nachprüfung kommt dann durch) — selten, aber nicht
+unterscheidbar. Die Labels von SPLC/HRA sollten bei Gelegenheit in command.py selbst
+korrigiert werden (jetzt in `layout.LABELS` überschrieben). Nichts davon gegen die echten
+Daten geprüft; Ketten von SPY und Indizes über den Baukasten nur mit gefälschter Kette
+im Test.
+
 ## Geplant: Hebel und Derivate (vorgemerkt am 25.09.2026, noch nicht begonnen)
 
 Auf Frage des Nutzers („gibt es die Option für Derivate und Leverage?“) nur in den Plan

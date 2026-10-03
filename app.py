@@ -3932,8 +3932,9 @@ def _view_map() -> None:
                         try:
                             heard = ais.listen(ais_key, ais_region, ais_seconds)
                         except ais.ListenFailed as exc:
-                            st.warning(f"AISStream: {ui.error_text(exc)}. Check the key in .env.local, "
-                                       "or wait a minute (3 connections at most).")
+                            st.warning(f"AISStream: {ui.error_text(exc)}. Check the key "
+                                       "in .env.local, or wait a minute (3 connections "
+                                       "at most).")
                             heard = None
                     if heard is not None:
                         prior = st.session_state.get("ais_static")
