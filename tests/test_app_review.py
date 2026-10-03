@@ -6,10 +6,33 @@ its finding (F1 … F13, PLAN.md → „Gegencheck 03.10.2026“) and fails on f
 import shutil
 
 import duckdb
+import pytest
 
 from portfolio_lab import command, layout
-from tests.app_fixture import run, texts
-from tests.test_app import _store, data, fresh  # noqa: F401  (fixtures)
+from tests.app_fixture import build_data, run, texts
+
+
+@pytest.fixture(scope="module")
+def data(tmp_path_factory):
+    return build_data(tmp_path_factory.mktemp("appdata") / "data")
+
+
+def _store(path):
+    from portfolio_lab.data.schema import open_user
+    from portfolio_lab.store import Store
+
+    return Store(open_user(path / "user.duckdb"))
+
+
+@pytest.fixture()
+def fresh(data, tmp_path):
+    """A private copy of the demo data with one portfolio, 'Demo' (as in test_app)."""
+    copy = tmp_path / "data"
+    shutil.copytree(data, copy)
+    store = _store(copy)
+    store.create("Demo")
+    store.con.close()
+    return copy
 
 
 def _add_security(path, ticker: str, name: str, cik: int = 1000000077) -> None:
@@ -205,6 +228,45 @@ def test_the_map_layer_and_the_rule_inputs_survive_another_tab(monkeypatch, fres
     on(layout.WORLD).run()
     assert not at.exception, at.exception
     assert find("radio", "Layer").value == "PORT CARGO"
+
+
+# ------------------------------------------- Yahoo not reached is not "no data" (F6)
+def test_an_unreachable_yahoo_is_not_shown_as_no_data(monkeypatch, fresh):
+    """F6, app side. The fixture fakes yfinance as it behaves offline (an empty frame,
+    dividends None); appcache raises YahooUnreachable, and each view says "could not be
+    reached" instead of "no price history" / nothing at all."""
+    at = run(monkeypatch, fresh, state={command.HISTORY_KEY: ["SPY"], "cmd_focus": "HP",
+                                        layout.MAIN_KEY: layout.SECURITY})
+    assert not at.exception, at.exception
+    shown = texts(at)
+    assert "Yahoo could not be reached" in shown            # the page and HP
+    assert "No price history for SPY" not in shown
+    assert "Nothing matches" not in shown
+
+    at = run(monkeypatch, fresh, state={command.HISTORY_KEY: ["AAA"],
+                                        layout.MAIN_KEY: layout.SECURITY,
+                                        layout.section_key(layout.SECURITY): "FINANCIALS"})
+    assert not at.exception, at.exception
+    assert "Dividend history could not be reached" in texts(at)
+
+
+def test_a_rule_on_an_unreachable_yahoo_symbol_says_so(monkeypatch, fresh):
+    """F6: the rule on a Yahoo-only ticker reported "no overlapping price history"."""
+    at = run(monkeypatch, fresh, state={layout.MAIN_KEY: layout.SCREEN,
+                                        layout.section_key(layout.SCREEN): "RULE"})
+    next(r for r in at.radio if r.label == "Test the rule on").set_value("Single stock")
+    at.session_state[layout.MAIN_KEY] = layout.SCREEN
+    at.run()
+    next(t for t in at.text_input if t.label == "Ticker").input("SPY")
+    at.session_state[layout.MAIN_KEY] = layout.SCREEN
+    at.run()
+    next(b for b in at.button if b.label == "Run rule").click()
+    at.session_state[layout.MAIN_KEY] = layout.SCREEN
+    at.run()
+    assert not at.exception, at.exception
+    shown = texts(at)
+    assert "Yahoo could not be reached" in shown
+    assert "No overlapping price history" not in shown
 
 
 def _blocks(node, inside=False):

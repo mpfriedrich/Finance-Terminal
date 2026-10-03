@@ -547,11 +547,13 @@ def _need_portfolio(what: str) -> bool:
     return False
 
 
-def _yahoo_bars(symbol: str) -> pd.DataFrame:
-    """Bars for a symbol outside the store; empty when Yahoo has none or was not
-    reached (the cache keeps only answers, see appcache.py)."""
-    bars, _ = ac.attempt(ac.yahoo_bars, symbol)
-    return bars if bars is not None else pd.DataFrame()
+def _yahoo_bars(symbol: str) -> tuple[pd.DataFrame, str | None]:
+    """(bars, None) for a symbol outside the store — empty when Yahoo has none — or
+    (empty, error text) when Yahoo was not reached. The two read differently on screen:
+    until the review of 03.10.2026 (F6) both came back as an empty frame, and a dropped
+    connection was shown, and cached, as "no price history"."""
+    bars, err = ac.attempt(ac.yahoo_bars, symbol)
+    return (bars if bars is not None else pd.DataFrame()), err
 
 
 # ------------------------------------------------------------- shared view helpers
@@ -684,7 +686,10 @@ def _lab_price_chart(con, ticker: str, result, rule) -> None:
     if px_rule.empty:
         # A Yahoo ticker outside the store: the same bars the rule ran on, on the same
         # adjusted basis, so the markers sit on the line.
-        yb = _yahoo_bars(ticker)
+        yb, y_err = _yahoo_bars(ticker)
+        if y_err:
+            st.caption(f"The chart of {ticker} needs Yahoo, which could not be reached "
+                       f"({y_err}).")
         if not yb.empty:
             factor = yb["close_adj"] / yb["close"].where(yb["close"] != 0)
             px_rule = pd.DataFrame({
@@ -2447,8 +2452,11 @@ def _sec_ownership(c) -> None:
 def _sec_dividends(c) -> None:
     """DVD: what the company paid, from Yahoo."""
     ticker, quote = c.ticker, c.quote
-    div, _ = ac.attempt(ac.dividend_history, ticker)
-    if div is not None and not div.empty:
+    div, div_err = ac.attempt(ac.dividend_history, ticker)
+    if div_err:
+        # Not "pays none": Yahoo did not answer (F6). Nothing is cached.
+        st.caption(f"Dividend history could not be reached ({div_err}).")
+    elif div is not None and not div.empty:
         st.markdown("#### Dividends")
         st.bar_chart(div.set_index("date")[["dividend"]], height=170,
                      color=[ui.AMBER])
@@ -4307,6 +4315,7 @@ def _view_lab(default_ticker: str = "") -> None:
                     max(dt.date(2011, 1, 3), asof - dt.timedelta(days=365 * 10))))
         go_lab = c2.button("Run rule", width="stretch", key=f"lab_go_{chosen}")
 
+        y_err = None
         if go_lab:
             bars = src.con.execute(
                 """
@@ -4321,7 +4330,7 @@ def _view_lab(default_ticker: str = "") -> None:
             ).fetch_df()
             if bars.empty and lab_single:
                 # Not in the store: any Yahoo ticker (BHP.AX, SAP.DE), fetched on demand.
-                yb = _yahoo_bars(lab_ticker)
+                yb, y_err = _yahoo_bars(lab_ticker)
                 if not yb.empty:
                     yb = yb[pd.to_datetime(yb.date) >= pd.Timestamp(lab_start)]
                     bars = yb[["ticker", "date", "open_adj", "close_adj"]].dropna()
@@ -4359,7 +4368,10 @@ def _view_lab(default_ticker: str = "") -> None:
 
         out = st.session_state.get(lab_key)
         base = st.session_state.get(lab_key + "_base")
-        if out is None and go_lab:
+        if out is None and go_lab and y_err:
+            st.warning(f"{lab_ticker} is not stored, and Yahoo could not be reached for "
+                       f"its prices ({y_err}). Nothing was kept; run it again later.")
+        elif out is None and go_lab:
             st.info("No overlapping price history for these names in that window.")
         elif out is not None:
             m = out.metrics

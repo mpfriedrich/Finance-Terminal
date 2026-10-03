@@ -15,6 +15,7 @@ def _store(days: pd.DatetimeIndex, moves: np.ndarray, market: np.ndarray):
     rows = ([("^TNX", d.date(), t, t) for d, t in zip(days, tnx)]
             + [("^SP500TR", d.date(), b, b) for d, b in zip(days, bench)])
     frame = pd.DataFrame(rows, columns=["ticker", "date", "close", "close_adj"])
+    con.register("frame", frame)
     con.execute("CREATE TABLE prices AS SELECT * FROM frame")
     return con
 
