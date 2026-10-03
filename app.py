@@ -45,7 +45,7 @@ import plotly.graph_objects as go
 
 from portfolio_lab import charts, ui
 from portfolio_lab import appcache as ac
-from portfolio_lab import command
+from portfolio_lab import command, layout
 from portfolio_lab import config as cfg
 from portfolio_lab.config import CostModel, Settings, secret
 from portfolio_lab.data import history as data_history, industry
@@ -2343,8 +2343,8 @@ def _sec_analysts(c) -> None:
 
 
 def _sec_ownership(c) -> None:
-    """INS, HDS and DVD: insiders, institutions, dividends."""
-    ticker, cik, quote = c.ticker, c.cik, c.quote
+    """INS and HDS: insiders and institutions."""
+    ticker, cik = c.ticker, c.cik
     st.markdown("#### Insider transactions (Form 4)")
     if is_compustat(cik):
         st.info("A Compustat Global company files with its home regulator, "
@@ -2406,6 +2406,10 @@ def _sec_ownership(c) -> None:
             "From quarterly 13F filings, so positions are as of the report "
             "date and up to a quarter stale by the time you read them.")
 
+
+def _sec_dividends(c) -> None:
+    """DVD: what the company paid, from Yahoo."""
+    ticker, quote = c.ticker, c.quote
     div, _ = ac.attempt(ac.dividend_history, ticker)
     if div is not None and not div.empty:
         st.markdown("#### Dividends")
@@ -2702,6 +2706,17 @@ def _equity_page(ticker: str) -> None:
                          expanded=st.session_state.get("cmd_focus") == "OMON"):
             _view_options_builder(c.ticker)
 
+    def _financials(c) -> None:
+        _sec_financials(c)
+        _sec_dividends(c)
+
+    def _exposure(c) -> None:
+        _sec_exposure(c)
+        # SPLC: who the company says it depends on, read out of its own 10-K.
+        with st.expander("Suppliers and customers named in the 10-K",
+                         expanded=st.session_state.get("cmd_focus") == "SPLC"):
+            _sec_relationships(c)
+
     def _overview(c) -> None:
         _sec_overview(c)
         with st.expander("Price table (HP)",
@@ -2712,16 +2727,13 @@ def _equity_page(ticker: str) -> None:
         _sec_news(c)
         st.markdown("#### Filings")
         _sec_filings(c)
-        # SPLC: who the company says it depends on, read out of this 10-K.
-        with st.expander("Relationships named in the 10-K (SPLC)",
-                         expanded=st.session_state.get("cmd_focus") == "SPLC"):
-            _sec_relationships(c)
+
 
     # Lazy and isolated: only the open section runs, and one that fails (a chain that
     # does not parse, a filing that cannot be read) leaves the others standing.
     _sections(command.SECURITY, {
-        "OVERVIEW": _overview, "FINANCIALS": _sec_financials,
-        "VALUATION": _valuation, "OPTIONS": _options, "EXPOSURE": _sec_exposure,
+        "OVERVIEW": _overview, "FINANCIALS": _financials,
+        "VALUATION": _valuation, "OPTIONS": _options, "EXPOSURE": _exposure,
         "ANALYSTS": _sec_analysts, "OWNERSHIP": _sec_ownership,
         "NEWS & FILINGS": _news_and_filings,
     }, c)
@@ -4505,14 +4517,10 @@ def _view_briefing() -> None:
 # One security is "loaded" at a time, as on a terminal: every single-ticker field (the
 # security tab, the option builder, a rule, a savings plan, compare, precedent deals,
 # the filing search) starts at it. Typed into the line at the top: `AAPL US FA`.
-def _ctx():
-    """The loaded security (command.Security) or None."""
-    return st.session_state.get("sec")
-
-
-def _ctx_symbol() -> str:
-    sec = _ctx()
-    return sec.symbol if sec else ""
+# Parsing, resolution and routing are command.py (pure, tested); this is the wiring.
+def _ctx() -> str | None:
+    """The loaded security's symbol, or None."""
+    return command.current(st.session_state)
 
 
 def _in_store(ticker: str) -> bool:
@@ -4520,57 +4528,30 @@ def _in_store(ticker: str) -> bool:
         "SELECT 1 FROM securities WHERE ticker = ? LIMIT 1", [ticker]).fetchone())
 
 
-def _is_price_only(symbol: str) -> bool:
-    return symbol.upper() in set(_price_only(DATA_KEY).symbol.str.upper())
-
-
-def _find_names(text: str) -> list[tuple[str, str]]:
-    hits = rs.find_ticker(_market_source().con, text)
-    return [(str(r.ticker), str(r.name)) for r in hits.itertuples()]
-
-
-def _load(sec) -> None:
-    st.session_state["sec"] = sec
-    st.session_state["sec_history"] = command.push(
-        st.session_state.get("sec_history", ()), sec)
+def _ctx_symbol() -> str:
+    return _ctx() or ""
 
 
 def _open(tab: str, section: str | None) -> None:
     """Select a tab (and its section) before the tabs are drawn on this run."""
-    st.session_state[command.MAIN_KEY] = tab
+    st.session_state[layout.MAIN_KEY] = tab
     if section:
-        st.session_state[command.section_key(tab)] = section
-
-
-def _say(kind: str, text: str) -> None:
-    st.session_state["cmd_msg"] = (kind, text)
+        st.session_state[layout.section_key(tab)] = section
 
 
 def _execute(text: str) -> None:
     """Run one command: load the security it names, open the tab its function lives in."""
-    st.session_state.pop("cmd_candidates", None)
-    st.session_state.pop("cmd_msg", None)
-    parsed = command.parse(text)
-    if parsed.error:
-        _say("error", parsed.error)
+    st.session_state.pop("cmd_choices", None)
+    parsed, found, action = command.run(_market_source().con, text, _ctx())
+    st.session_state["cmd_msg"] = action.message
+    if action.tab is None:
+        if found.choices:
+            st.session_state["cmd_choices"] = (list(found.choices), parsed.function)
         return
-    if parsed.symbol or parsed.name:
-        found = command.resolve(parsed, _in_store, _is_price_only, _find_names)
-        if found.error:
-            _say("error", found.error)
-            return
-        if found.candidates:
-            st.session_state["cmd_candidates"] = (found.candidates, parsed.function)
-            _say("info", (found.note or "Several match.") + " Pick one.")
-            return
-        _load(command.Security(found.symbol, found.kind))
-        if found.note:
-            _say("info", found.note)
-    elif command.FUNCTIONS[parsed.function].needs_security and _ctx() is None:
-        _say("info", f"{parsed.function} works on a security: type one first, e.g. "
-                     f"AAPL US {parsed.function}.")
-    st.session_state["cmd_focus"] = parsed.function or "DES"
-    _open(*command.target(parsed.function))
+    command.push(st.session_state, action.symbol)
+    code = parsed.function or "DES"
+    st.session_state["cmd_focus"] = code
+    _open(action.tab, action.section or layout.SUB_SECTION.get(code))
 
 
 def _on_command() -> None:
@@ -4578,20 +4559,15 @@ def _on_command() -> None:
     st.session_state["cmd_input"] = ""
 
 
-def _pick_candidate(ticker: str, function: str | None) -> None:
-    st.session_state.pop("cmd_candidates", None)
-    st.session_state.pop("cmd_msg", None)
-    _load(command.Security(ticker, "store"))
-    st.session_state["cmd_focus"] = function or "DES"
-    _open(*command.target(function))
+def _pick_choice(ticker: str, function: str | None) -> None:
+    _execute(f"{ticker} {function or ''}")
 
 
 def _go_back() -> None:
-    rest, previous = command.back(st.session_state.get("sec_history", ()))
+    previous = command.back(st.session_state)
     if previous is not None:
-        st.session_state["sec_history"] = rest
-        st.session_state["sec"] = previous
-        _open(command.SECURITY, None)
+        st.session_state["cmd_msg"] = f"Back to {previous}."
+        _open(layout.SECURITY, None)
 
 
 def _command_bar() -> None:
@@ -4603,10 +4579,10 @@ def _command_bar() -> None:
     c1, c2, c3, c4 = st.columns([6, 0.8, 0.9, 2.6], vertical_alignment="center")
     c1.text_input(
         "Command", key="cmd_input", on_change=_on_command, label_visibility="collapsed",
-        placeholder="AAPL US FA <GO>  ·  SAP GR DES  ·  SPX GP  ·  EQS  ·  MA  ·  WEI  "
-                    "— Enter runs it")
+        placeholder="AAPL US FA <GO>  ·  SAP GR DES  ·  SPX INDEX GP  ·  EQS  ·  MA  ·  "
+                    "WEI — Enter runs it")
     c2.button("GO", key="cmd_go", on_click=_on_command, width="stretch")
-    history = st.session_state.get("sec_history", ())
+    history = st.session_state.get(command.HISTORY_KEY) or []
     c3.button("◀ BACK", key="cmd_back", on_click=_go_back, width="stretch",
               disabled=len(history) < 2,
               help="The security before this one (the last ten are kept).")
@@ -4614,28 +4590,29 @@ def _command_bar() -> None:
     c4.markdown(
         f"<span style='color:{ui.MUTED};font-size:0.7rem'>LOADED</span> "
         f"<span style='color:{ui.AMBER};font-weight:600'>"
-        f"{html.escape(sec.symbol) if sec else '—'}</span>"
-        + (f" <span style='color:{ui.MUTED};font-size:0.68rem'>"
-           f"{html.escape(sec.kind.replace('_', ' '))}</span>" if sec else ""),
-        unsafe_allow_html=True)
+        f"{html.escape(sec) if sec else '—'}</span>", unsafe_allow_html=True)
     msg = st.session_state.get("cmd_msg")
     if msg:
-        (st.error if msg[0] == "error" else st.caption)(msg[1])
-    picks = st.session_state.get("cmd_candidates")
+        st.caption(msg)
+    picks = st.session_state.get("cmd_choices")
     if picks:
         options, function = picks
-        cols = st.columns(min(len(options), 4))
-        for i, (ticker, name) in enumerate(options):
-            cols[i % len(cols)].button(
-                f"{ticker} · {name[:24]}", key=f"cand_{ticker}", width="stretch",
-                on_click=_pick_candidate, args=(ticker, function))
+        cols = st.columns(min(len(options), 5))
+        for i, ticker in enumerate(options):
+            cols[i % len(cols)].button(ticker, key=f"cand_{ticker}", width="stretch",
+                                       on_click=_pick_choice, args=(ticker, function))
     with st.expander("Functions"):
-        st.markdown(ui.grid(pd.DataFrame(command.help_rows(),
-                                         columns=["code", "opens", "what"]),
-                            ticker_col="code"), unsafe_allow_html=True)
+        st.markdown(ui.grid(pd.DataFrame(
+            [(code, t.tab + (f" → {t.section or layout.SUB_SECTION.get(code, '')}"
+                             if (t.section or code in layout.SUB_SECTION) else ""),
+              t.label) for code, t in command.FUNCTIONS.items()],
+            columns=["code", "opens", "what"]), ticker_col="code"),
+            unsafe_allow_html=True)
         st.caption("A security alone opens its description. A market after the ticker "
-                   "picks the line (SAP GR = Xetra, 7203 JP = Tokyo); a name works too "
-                   "(newmont). Links: ?cmd=AAPL%20FA.")
+                   "picks the line: SAP GR = Xetra, 7203 JT = Tokyo; Canada is typed "
+                   "RY CAN, because CN is the news function. A yellow key is optional "
+                   "(SPX INDEX = the S&P 500, not a share called SPX). A company name "
+                   "works too (newmont). Links: ?cmd=AAPL%20FA.")
 
 
 # ---------------------------------------------------------------- HP: the price table
@@ -4683,8 +4660,8 @@ def _sec_prices(c) -> None:
 # ---------------------------------------------------------------------- the six tabs
 def _sections(tab: str, views: dict, *args) -> None:
     """A tab's own row of sections: lazy, each guarded, selectable by the command."""
-    labels = command.SECTIONS[tab]
-    for label, part in zip(labels, st.tabs(labels, key=command.section_key(tab),
+    labels = layout.SECTIONS[tab]
+    for label, part in zip(labels, st.tabs(labels, key=layout.section_key(tab),
                                             on_change="rerun")):
         with part:
             if part.open:
@@ -4694,7 +4671,7 @@ def _sections(tab: str, views: dict, *args) -> None:
 def _tab_security() -> None:
     """DES … CF on the loaded security."""
     sec = _ctx()
-    if sec is None:
+    if not sec:
         st.markdown("#### No security loaded")
         st.caption("Type a ticker or a name in the command line above — AAPL, SAP GR, "
                    "newmont, SPX, GC=F — and Enter. Add a function to jump straight to "
@@ -4703,13 +4680,14 @@ def _tab_security() -> None:
                          expanded=st.session_state.get("cmd_focus") == "MA"):
             _view_deals()
         return
-    if sec.kind == "store" and rs.profile(src.con, sec.symbol):
-        _equity_page(sec.symbol)
+    if rs.profile(src.con, sec):
+        _equity_page(sec)
     else:
-        _security_page(sec.symbol)
+        # A price-only series (index, commodity, crypto) or a Yahoo symbol.
+        _security_page(sec)
         with st.expander("Price table (HP)",
                          expanded=st.session_state.get("cmd_focus") == "HP"):
-            _sec_prices(SimpleNamespace(ticker=sec.symbol))
+            _sec_prices(SimpleNamespace(ticker=sec))
 
 
 def _tab_screen() -> None:
@@ -4738,20 +4716,20 @@ def _tab_events() -> None:
     _sections(command.EVENTS, {
         "BRIEFING": _view_briefing, "CALENDAR": _view_calendar,
         "FILING SEARCH": lambda: _view_filing_search(
-            _ctx_symbol() if (_ctx() and _ctx().kind == "store") else ""),
+            _ctx_symbol() if _ctx() and _in_store(_ctx()) else ""),
     })
 
 
 TABS = {command.SECURITY: _tab_security, command.SCREEN: _tab_screen,
         command.PORTFOLIOS: _tab_portfolios, command.MARKETS: _tab_markets,
         command.WORLD: _view_map, command.EVENTS: _tab_events}
-assert list(TABS) == command.TAB_LABELS
+assert tuple(TABS) == layout.TAB_LABELS
 
 _command_bar()
 # Lazy: only the open tab runs. Before 02.10.2026 every rerun drew all thirteen tabs,
 # with their network calls, whichever one was on screen.
-for (label, view), tab in zip(TABS.items(), st.tabs(command.TAB_LABELS,
-                                                       key=command.MAIN_KEY,
+for (label, view), tab in zip(TABS.items(), st.tabs(layout.TAB_LABELS,
+                                                       key=layout.MAIN_KEY,
                                                        on_change="rerun")):
     with tab:
         if tab.open:

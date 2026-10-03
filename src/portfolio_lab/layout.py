@@ -1,30 +1,33 @@
-"""The app's tabs and their sections, as plain constants (no Streamlit).
+"""Names of the app's tabs and of their sections, in one place (no Streamlit).
 
-app.py draws exactly these, and the command line (command.py) maps its function codes
-onto them, so a renamed tab breaks a test instead of a jump. Thirteen tabs became six
-on 02.10.2026 (PLAN.md → „Audit Bloomberg-Annäherung 02.10.2026“).
+app.py builds its tabs from these and command.py routes function codes onto them, so a
+renamed tab cannot silently break the command bar: tests/test_command.py checks every
+routing target against these tuples. Thirteen tabs became six on 02.10.2026 (PLAN.md →
+„Audit Bloomberg-Annäherung 02.10.2026“).
 """
 
-SECURITY = "SECURITY"
-SCREEN = "SCREEN & BACKTEST"
-PORTFOLIOS = "PORTFOLIOS"
-MARKETS = "MARKETS & MACRO"
-WORLD = "WORLD & LOGISTICS"
-EVENTS = "EVENTS & NEWS"
-TAB_LABELS = [SECURITY, SCREEN, PORTFOLIOS, MARKETS, WORLD, EVENTS]
+TAB_LABELS = ("SECURITY", "SCREEN & BACKTEST", "PORTFOLIOS", "MARKETS & MACRO",
+              "WORLD & LOGISTICS", "EVENTS & NEWS")
+SECURITY_SECTIONS = ("OVERVIEW", "FINANCIALS", "VALUATION", "OPTIONS", "EXPOSURE",
+                     "ANALYSTS", "OWNERSHIP", "NEWS & FILINGS")
 
-# The price table (HP) is part of OVERVIEW; the counterparties read out of the 10-K
-# (SPLC) are part of NEWS & FILINGS, next to the filing they come from.
-SECURITY_SECTIONS = ["OVERVIEW", "FINANCIALS", "VALUATION", "OPTIONS", "EXPOSURE",
-                     "ANALYSTS", "OWNERSHIP", "NEWS & FILINGS"]
-SCREEN_SECTIONS = ["SCREEN", "BACKTEST", "RULE", "SAVINGS PLAN"]
-PORTFOLIO_SECTIONS = ["BOOKS", "TRACKING", "WATCHLIST & ALERTS", "COMMODITY LINKS"]
-MARKET_SECTIONS = ["BOARDS", "COMPARE", "ECONOMY", "RATES"]
-EVENT_SECTIONS = ["BRIEFING", "CALENDAR", "FILING SEARCH"]
+SECURITY, SCREEN, PORTFOLIOS, MARKETS, WORLD, EVENTS = TAB_LABELS
 
-SECTIONS: dict[str, list[str]] = {
-    SECURITY: SECURITY_SECTIONS, SCREEN: SCREEN_SECTIONS, PORTFOLIOS: PORTFOLIO_SECTIONS,
-    MARKETS: MARKET_SECTIONS, WORLD: [], EVENTS: EVENT_SECTIONS,
+# The other tabs' own sections. The command line opens the tab (command.py); app.py
+# then picks the section a function belongs to (SUB_SECTION below).
+SECTIONS: dict[str, tuple[str, ...]] = {
+    SECURITY: SECURITY_SECTIONS,
+    SCREEN: ("SCREEN", "BACKTEST", "RULE", "SAVINGS PLAN"),
+    PORTFOLIOS: ("BOOKS", "TRACKING", "WATCHLIST & ALERTS", "COMMODITY LINKS"),
+    MARKETS: ("BOARDS", "COMPARE", "ECONOMY", "RATES"),
+    WORLD: (),
+    EVENTS: ("BRIEFING", "CALENDAR", "FILING SEARCH"),
+}
+# Function codes whose tab has sections of its own -> the section they open.
+SUB_SECTION = {
+    "EQS": "SCREEN", "BTST": "BACKTEST", "PORT": "BOOKS", "ALRT": "WATCHLIST & ALERTS",
+    "WEI": "BOARDS", "GLCO": "BOARDS", "CORR": "COMPARE", "ECST": "ECONOMY",
+    "GC": "RATES", "WIRP": "RATES", "TOP": "BRIEFING", "EVTS": "CALENDAR",
 }
 MAIN_KEY = "main_tab"
 

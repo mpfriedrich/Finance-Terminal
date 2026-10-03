@@ -1,261 +1,367 @@
-"""The command line: `AAPL US FA <GO>` — a security, a function, or both.
+"""The command bar: Bloomberg-style input such as ``SAP GR FA <GO>``, turned into a tab,
+a section and a security.
 
-Pure: no Streamlit, no database. The app hands `resolve()` three small lookups and
-gets back what to show; everything here can be tested with a dict.
+Pure on purpose: no Streamlit import, so every rule here is tested without a running
+app. app.py only renders the box, calls ``parse`` -> ``resolve`` -> ``dispatch`` and acts
+on the returned ``Action``.
 
-Grammar (case does not matter, extra spaces neither):
+Grammar (case-insensitive, extra spaces ignored)::
 
     [security] [function] [GO | <GO>]
-    security := SYMBOL [MARKET] [YELLOW KEY]
+    security := SYMBOL [MARKET] [YELLOW]
 
-* SYMBOL keeps . - = ^ & : BRK-B, SAP.DEU, XYZ-12345, GC=F, ^GSPC, 000001.SS.
-* MARKET is a Bloomberg exchange code (US GR GY LN JP JT FP NA SW IM HK AU CN KS) or an
-  ISO-3 country (DEU, JPN); `SAP GR` is the Xetra line, SAP.DEU in the world store.
-* A yellow key (EQUITY INDEX CURNCY COMDTY CORP GOVT) is accepted and ignored — the
-  store already knows what a symbol is.
-* One word is a FUNCTION first (`MA` opens precedent deals); a security with a market
-  is never a function (`MA US` is Mastercard). With several words the last one is the
-  function if it is one. A security without a function opens its description (DES).
-* Several words that are not a symbol and a market are a name search (`american
-  airlines`); one hit is taken, several are offered, none is never guessed.
+* MARKET is a Bloomberg exchange code (``GR``, ``JT``, ``LN`` ...) or an ISO-3 country
+  code (``DEU``). It is stored as ISO-3, because the world store names Compustat lines
+  ``TIC.ISO3`` (CLAUDE.md section 7).
+* YELLOW is Bloomberg's market-sector key (``EQUITY``, ``INDEX`` ...). It carries no
+  information the store could use except that INDEX/CURNCY/COMDTY make an alias
+  (``SPX`` -> ``^GSPC``) win over a same-named share.
+* A single word that is a function code is the function (``MA`` opens precedent deals),
+  because that is what the code means on a Bloomberg keyboard; ``MA US`` or ``MA EQUITY``
+  is the security MA. With several words the last one is the function if it is a code.
 
-Measured nothing here; it is a user interface. What it promises is tested in
-tests/test_command.py: every function points at a tab and section that exist.
+Nothing here raises on user input: a bad command returns a ``Parsed`` with ``error``
+set, and the app shows that text.
 """
-
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-# ------------------------------------------------------------------- tabs, sections
-from .layout import (EVENTS, MAIN_KEY, MARKETS, PORTFOLIOS, SCREEN, SECTIONS,  # noqa: E402,F401
-                     SECURITY, TAB_LABELS, WORLD, section_key)
+from portfolio_lab.data.wrds import DEFAULT_COUNTRIES
+from portfolio_lab.layout import SECURITY_SECTIONS, TAB_LABELS
+
+SECURITY, SCREEN, PORTFOLIOS, MARKETS, WORLD, EVENTS = TAB_LABELS
+(OVERVIEW, FINANCIALS, VALUATION, OPTIONS, EXPOSURE, ANALYSTS, OWNERSHIP,
+ NEWS_FILINGS) = SECURITY_SECTIONS
 
 
 @dataclass(frozen=True)
-class Function:
-    code: str
+class Target:
     tab: str
     section: str | None
+    needs_security: bool
     label: str
-    needs_security: bool = False
 
 
-def _f(code, tab, section, label, needs=False):
-    return code, Function(code, tab, section, label, needs)
+FUNCTIONS: dict[str, Target] = {
+    # SECURITY
+    "DES": Target(SECURITY, OVERVIEW, True, "Description and key figures"),
+    "GP": Target(SECURITY, OVERVIEW, True, "Price chart"),
+    "HP": Target(SECURITY, OVERVIEW, True, "Price history table"),
+    "FA": Target(SECURITY, FINANCIALS, True, "Financial statements"),
+    "ERN": Target(SECURITY, FINANCIALS, True, "Earnings history and next report date"),
+    "DVD": Target(SECURITY, FINANCIALS, True, "Dividend history"),
+    "RV": Target(SECURITY, VALUATION, True, "Relative valuation against peers"),
+    "COMP": Target(SECURITY, VALUATION, True, "Comparable companies"),
+    "WACC": Target(SECURITY, VALUATION, True, "Cost of capital"),
+    "DCF": Target(SECURITY, VALUATION, True, "Discounted cash flow model"),
+    # Precedent deals stand on their own; a security in context only narrows them.
+    "MA": Target(SECURITY, VALUATION, False, "Precedent transactions"),
+    "OMON": Target(SECURITY, OPTIONS, True, "Option chain"),
+    "OVDV": Target(SECURITY, OPTIONS, True, "Implied volatility surface"),
+    "SKEW": Target(SECURITY, OPTIONS, True, "Volatility skew"),
+    "SPLC": Target(SECURITY, EXPOSURE, True, "Commodity and rate exposure"),
+    "HRA": Target(SECURITY, EXPOSURE, True, "Historical regression against markets"),
+    "ANR": Target(SECURITY, ANALYSTS, True, "Analyst ratings and targets"),
+    "INS": Target(SECURITY, OWNERSHIP, True, "Insider transactions"),
+    "HDS": Target(SECURITY, OWNERSHIP, True, "Holders"),
+    "CN": Target(SECURITY, NEWS_FILINGS, True, "Company news"),
+    "CF": Target(SECURITY, NEWS_FILINGS, True, "Company filings"),
+    # SCREEN & BACKTEST
+    "EQS": Target(SCREEN, None, False, "Equity screen"),
+    "BTST": Target(SCREEN, None, False, "Backtest"),
+    # PORTFOLIOS
+    "PORT": Target(PORTFOLIOS, None, False, "Paper portfolios"),
+    "ALRT": Target(PORTFOLIOS, None, False, "Alerts"),
+    # MARKETS & MACRO
+    "WEI": Target(MARKETS, None, False, "World equity indices"),
+    "CORR": Target(MARKETS, None, False, "Correlation matrix"),
+    "ECST": Target(MARKETS, None, False, "Economic statistics"),
+    "GC": Target(MARKETS, None, False, "Yield curve"),
+    "WIRP": Target(MARKETS, None, False, "Policy rate path"),
+    "GLCO": Target(MARKETS, None, False, "Commodity prices"),
+    # WORLD & LOGISTICS
+    "BMAP": Target(WORLD, None, False, "Map of ships, ports and aircraft"),
+    # EVENTS & NEWS
+    "EVTS": Target(EVENTS, None, False, "Event calendar"),
+    "TOP": Target(EVENTS, None, False, "Top news and briefing"),
+}
 
+YELLOW = ("EQUITY", "INDEX", "CURNCY", "COMDTY", "CORP", "GOVT")
+# Keys after which an alias beats a share with the same ticker (SPX INDEX is the index).
+_ALIAS_FIRST = {"INDEX", "CURNCY", "COMDTY"}
 
-FUNCTIONS: dict[str, Function] = dict([
-    _f("DES", SECURITY, "OVERVIEW", "description, price, return and risk", True),
-    _f("GP", SECURITY, "OVERVIEW", "price chart", True),
-    _f("HP", SECURITY, "OVERVIEW", "historical price table", True),
-    _f("FA", SECURITY, "FINANCIALS", "financials as first filed", True),
-    _f("ERN", SECURITY, "FINANCIALS", "earnings and the next report", True),
-    _f("RV", SECURITY, "VALUATION", "relative value: own history and peers", True),
-    _f("COMP", SECURITY, "VALUATION", "trading comps", True),
-    _f("WACC", SECURITY, "VALUATION", "cost of capital", True),
-    _f("DCF", SECURITY, "VALUATION", "discounted cash flow", True),
-    _f("OMON", SECURITY, "OPTIONS", "option chain and position builder", True),
-    _f("OVDV", SECURITY, "OPTIONS", "volatility surface", True),
-    _f("SKEW", SECURITY, "OPTIONS", "smile and put-call spread", True),
-    _f("HRA", SECURITY, "EXPOSURE", "moves with commodities and rates", True),
-    _f("ANR", SECURITY, "ANALYSTS", "analyst ratings, reported as data", True),
-    _f("INS", SECURITY, "OWNERSHIP", "insider trades (Form 4)", True),
-    _f("HDS", SECURITY, "OWNERSHIP", "institutional holders", True),
-    _f("DVD", SECURITY, "OWNERSHIP", "dividends", True),
-    _f("SPLC", SECURITY, "NEWS & FILINGS", "counterparties named in the 10-K", True),
-    _f("CN", SECURITY, "NEWS & FILINGS", "company headlines", True),
-    _f("CF", SECURITY, "NEWS & FILINGS", "company filings", True),
-    _f("MA", SECURITY, "VALUATION", "precedent transactions"),
-    _f("EQS", SCREEN, "SCREEN", "equity screen"),
-    _f("BTST", SCREEN, "BACKTEST", "backtest: point in time, then buy and hold"),
-    _f("RULE", SCREEN, "RULE", "a buy/sell rule on a stock or basket"),
-    _f("PLAN", SCREEN, "SAVINGS PLAN", "when to invest: savings plans"),
-    _f("PORT", PORTFOLIOS, "BOOKS", "paper books, side by side"),
-    _f("TRAK", PORTFOLIOS, "TRACKING", "live tracking of the open portfolio"),
-    _f("CMDY", PORTFOLIOS, "COMMODITY LINKS", "followed names against commodities"),
-    _f("ALRT", PORTFOLIOS, "WATCHLIST & ALERTS", "watchlist and alerts"),
-    _f("WEI", MARKETS, "BOARDS", "world indices, currencies, rates"),
-    _f("GLCO", MARKETS, "BOARDS", "commodities board"),
-    _f("CORR", MARKETS, "COMPARE", "compare anything, correlation"),
-    _f("ECST", MARKETS, "ECONOMY", "the US economy (FRED)"),
-    _f("GC", MARKETS, "RATES", "Treasury curve"),
-    _f("WIRP", MARKETS, "RATES", "what fed funds futures price"),
-    _f("BMAP", WORLD, None, "ships, ports, aircraft"),
-    _f("TOP", EVENTS, "BRIEFING", "daily briefing and headlines"),
-    _f("EVTS", EVENTS, "CALENDAR", "who reports next"),
-    _f("FTS", EVENTS, "FILING SEARCH", "full-text search of SEC filings"),
-])
-
-# Bloomberg exchange codes -> ISO-3, the country code of the world store's tickers.
-MARKETS_BBG = {
+# Bloomberg exchange codes -> ISO-3 of the market.
+BBG_MARKETS: dict[str, str] = {
     "US": "USA", "GR": "DEU", "GY": "DEU", "LN": "GBR", "JP": "JPN", "JT": "JPN",
     "FP": "FRA", "NA": "NLD", "SW": "CHE", "IM": "ITA", "HK": "HKG", "AU": "AUS",
     "CN": "CAN", "KS": "KOR",
 }
-ISO3 = set(MARKETS_BBG.values()) | {
-    "AUT", "BEL", "DNK", "ESP", "FIN", "IRL", "NOR", "PRT", "SWE", "SGP", "TWN", "CHN",
-    "IND", "BRA", "MEX", "ZAF", "ISR", "NZL"}
-# Yahoo suffix -> ISO-3: SAP.DE is tried as SAP.DEU in the store first.
-YAHOO_SUFFIX = {
-    "DE": "DEU", "F": "DEU", "L": "GBR", "T": "JPN", "PA": "FRA", "AS": "NLD",
-    "SW": "CHE", "MI": "ITA", "HK": "HKG", "AX": "AUS", "TO": "CAN", "KS": "KOR",
+
+# Yahoo symbol suffixes -> ISO-3. Several suffixes can share a country (Xetra .DE and
+# Frankfurt .F); ISO3_TO_YAHOO picks the main exchange.
+YAHOO_TO_ISO3: dict[str, str] = {
+    "DE": "DEU", "F": "DEU", "T": "JPN", "AX": "AUS", "L": "GBR", "PA": "FRA",
+    "MI": "ITA", "SS": "CHN", "SZ": "CHN", "HK": "HKG", "TO": "CAN", "V": "CAN",
+    "SW": "CHE", "AS": "NLD", "KS": "KOR", "KQ": "KOR", "ST": "SWE", "OL": "NOR",
+    "CO": "DNK", "HE": "FIN", "MC": "ESP", "BR": "BEL", "LS": "PRT", "VI": "AUT",
+    "IR": "IRL", "TA": "ISR", "NZ": "NZL", "SI": "SGP", "TW": "TWN", "NS": "IND",
 }
-_ISO_TO_YAHOO = {"DEU": "DE", "GBR": "L", "JPN": "T", "FRA": "PA", "NLD": "AS",
-                 "CHE": "SW", "ITA": "MI", "HKG": "HK", "AUS": "AX", "CAN": "TO",
-                 "KOR": "KS"}
-YELLOW = {"EQUITY", "INDEX", "CURNCY", "COMDTY", "CORP", "GOVT", "MTGE", "MUNI", "PFD"}
-GO = {"GO", "<GO>"}
-ALIASES = {
+ISO3_TO_YAHOO: dict[str, str] = {
+    "DEU": "DE", "JPN": "T", "AUS": "AX", "GBR": "L", "FRA": "PA", "ITA": "MI",
+    "CHN": "SS", "HKG": "HK", "CAN": "TO", "CHE": "SW", "NLD": "AS", "KOR": "KS",
+    "SWE": "ST", "NOR": "OL", "DNK": "CO", "FIN": "HE", "ESP": "MC", "BEL": "BR",
+    "PRT": "LS", "AUT": "VI", "IRL": "IR", "ISR": "TA", "NZL": "NZ", "SGP": "SI",
+    "TWN": "TW", "IND": "NS",
+}
+
+# ISO-3 codes accepted as MARKET. A typo such as "SAP DUE" should be an error, not a
+# silent search for a market that does not exist.
+MARKETS_ISO3 = frozenset(
+    {"USA"} | set(BBG_MARKETS.values()) | set(YAHOO_TO_ISO3.values()) | set(DEFAULT_COUNTRIES)
+)
+
+# Bloomberg names -> Yahoo symbols for things that are not shares in the store.
+ALIASES: dict[str, str] = {
     "SPX": "^GSPC", "INDU": "^DJI", "NDX": "^NDX", "DAX": "^GDAXI", "UKX": "^FTSE",
-    "NKY": "^N225", "HSI": "^HSI", "AS51": "^AXJO", "CL1": "CL=F", "CO1": "BZ=F",
-    "GC1": "GC=F", "XAU": "GC=F", "SI1": "SI=F", "HG1": "HG=F", "NG1": "NG=F",
-    "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "JPY=X", "AUDUSD": "AUDUSD=X",
-    "XBT": "BTC-USD", "BTC": "BTC-USD", "ETH": "ETH-USD", "VIX": "^VIX",
+    "NKY": "^N225", "HSI": "^HSI", "CL1": "CL=F", "CO1": "BZ=F", "GC1": "GC=F",
+    "XAU": "GC=F", "EURUSD": "EURUSD=X", "XBT": "BTC-USD", "BTC": "BTC-USD",
 }
-_SYMBOL = re.compile(r"^\^?[A-Z0-9][A-Z0-9.\-=&]{0,19}$")
-MAX_NAME_WORDS = 5
+
+_SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9.\-=^]*$|^\^[A-Z0-9.\-=]+$")
+_GO = {"GO", "<GO>"}
+NAME_SEARCH_MIN = 3  # shorter text matches half the store by name
+MAX_CHOICES = 25
+HISTORY_KEY = "sec_history"
+HISTORY_MAX = 10
 
 
 @dataclass(frozen=True)
 class Parsed:
-    symbol: str | None = None        # as typed, aliases applied
-    market: str | None = None        # ISO-3
-    name: str | None = None          # a name search instead of a symbol
+    symbol: str | None = None
+    market: str | None = None   # ISO-3
+    yellow: str | None = None
     function: str | None = None
     error: str | None = None
 
 
-def parse(text: str) -> Parsed:
-    """The words of one command, or a sentence saying why they are not one."""
-    words = [w for w in str(text or "").upper().split() if w not in GO]
-    words = [w for w in words if w not in YELLOW]
-    if not words:
-        return Parsed(error="Type a ticker, a function, or both — e.g. AAPL US FA.")
-    function = None
-    # `RY CN` is Royal Bank's Canadian line (CN the market), `RY CN CN` its news: with
-    # exactly two words a market code wins over a function of the same name.
-    if words[-1] in FUNCTIONS and not (len(words) == 2 and words[-1] in MARKETS_BBG):
-        if len(words) == 1:
-            return Parsed(function=words[0])
-        function = words.pop()
-    if len(words) == 1:
-        symbol = words[0]
-        if not _SYMBOL.match(symbol):
-            return Parsed(error=f"'{symbol}' is not a ticker. Tickers keep letters, "
-                                "digits and . - = ^ (BRK-B, SAP.DEU, GC=F, ^GSPC).")
-        return Parsed(symbol=ALIASES.get(symbol, symbol), function=function)
-    if len(words) == 2:
-        market = words[1]
-        if market in MARKETS_BBG or market in ISO3:
-            if not _SYMBOL.match(words[0]):
-                return Parsed(error=f"'{words[0]}' is not a ticker.")
-            return Parsed(symbol=words[0], market=MARKETS_BBG.get(market, market),
-                          function=function)
-        # Bloomberg market codes are two letters: a two-letter word after a ticker is
-        # a mistyped market, not the second half of a company name.
-        if len(market) == 2 and market.isalpha() and _SYMBOL.match(words[0]):
-            return Parsed(error=f"'{market}' is not a market code this knows. Use a "
-                                "Bloomberg code (US, GR, LN, JP …) or ISO-3 (DEU, JPN).")
-    if len(words) > MAX_NAME_WORDS:
-        return Parsed(error=f"Too many words ({len(words)}). A command is a security, "
-                            "a market and a function, e.g. SAP GR DES.")
-    return Parsed(name=" ".join(words).lower(), function=function)
-
-
 @dataclass(frozen=True)
 class Resolution:
-    symbol: str | None = None
-    kind: str | None = None          # "store" | "price_only" | "yahoo"
-    candidates: tuple[tuple[str, str], ...] = ()
-    note: str | None = None
-    error: str | None = None
-
-
-def resolve(parsed: Parsed, in_store: Callable[[str], bool],
-            price_only: Callable[[str], bool],
-            find: Callable[[str], list[tuple[str, str]]]) -> Resolution:
-    """Which security a parsed command means.
-
-    `in_store(t)` says whether `t` is a listing in the store, `price_only(t)` whether it
-    is a stored index/commodity/crypto series, `find(text)` returns (ticker, name) pairs
-    for a name search. Order: exact listing; the market's line (TIC.ISO3); a Yahoo
-    suffix tried as the store's line first; a stored price-only series; a name search;
-    else the symbol goes to Yahoo, price only.
-    """
-    if parsed.error:
-        return Resolution(error=parsed.error)
-    if parsed.name:
-        hits = list(find(parsed.name))[:12]
-        if len(hits) == 1:
-            return Resolution(symbol=hits[0][0], kind="store")
-        if hits:
-            return Resolution(candidates=tuple(hits),
-                              note=f"{len(hits)} companies match '{parsed.name}'.")
-        return Resolution(error=f"Nothing in the store is called '{parsed.name}'.")
-    symbol = parsed.symbol
-    if symbol is None:
-        return Resolution()
-    if parsed.market and parsed.market != "USA":
-        line = f"{symbol}.{parsed.market}"
-        if in_store(line):
-            return Resolution(symbol=line, kind="store")
-        suffix = _ISO_TO_YAHOO.get(parsed.market)
-        yahoo = f"{symbol}.{suffix}" if suffix else symbol
-        return Resolution(symbol=yahoo, kind="yahoo",
-                          note=f"{line} is not in the store; {yahoo} from Yahoo, "
-                               "price only.")
-    if in_store(symbol):
-        return Resolution(symbol=symbol, kind="store")
-    if "." in symbol:
-        base, _, suffix = symbol.rpartition(".")
-        iso = YAHOO_SUFFIX.get(suffix)
-        if iso and in_store(f"{base}.{iso}"):
-            return Resolution(symbol=f"{base}.{iso}", kind="store")
-    if price_only(symbol):
-        return Resolution(symbol=symbol, kind="price_only")
-    if parsed.market == "USA":
-        return Resolution(error=f"{symbol} is not a US listing in the store.")
-    hits = [h for h in find(symbol) if h[0] != symbol][:12]
-    if len(hits) == 1 and len(symbol) >= 4 and symbol.isalpha():
-        return Resolution(symbol=hits[0][0], kind="store")
-    if len(hits) > 1 and len(symbol) >= 4 and symbol.isalpha():
-        return Resolution(candidates=tuple(hits),
-                          note=f"{symbol} is not a ticker here; {len(hits)} names "
-                               "contain it.")
-    return Resolution(symbol=symbol, kind="yahoo")
+    symbol: str | None
+    choices: list = field(default_factory=list)
+    source: str = ""  # "store" | "yahoo" | "alias" | "name"; "" when nothing was found
 
 
 @dataclass(frozen=True)
-class Security:
-    symbol: str
-    kind: str
+class Action:
+    tab: str | None       # None: stay where you are
+    section: str | None
+    symbol: str | None    # the security in context after the command
+    message: str = ""
 
 
-def push(history: tuple, security: Security, limit: int = 10) -> tuple:
-    """The visit history, newest last, without an immediate repeat, at most `limit`."""
-    if history and history[-1] == security:
-        return history
-    return (tuple(history) + (security,))[-limit:]
+# --- parsing --------------------------------------------------------------------------
+
+def _market(token: str) -> str | None:
+    if token in BBG_MARKETS:
+        return BBG_MARKETS[token]
+    if len(token) == 3 and token in MARKETS_ISO3:
+        return token
+    return None
 
 
-def back(history: tuple) -> tuple[tuple, Security | None]:
-    """(history without the current entry, the one before it) — None if there is none."""
-    if len(history) < 2:
-        return tuple(history), None
-    rest = tuple(history[:-1])
-    return rest, rest[-1]
+def parse(text: str) -> Parsed:
+    tokens = (text or "").upper().split()
+    while tokens and tokens[-1] in _GO:
+        tokens.pop()
+    if not tokens:
+        return Parsed(error="Type a symbol, a function code, or both (e.g. AAPL US DES).")
+
+    if len(tokens) == 1 and tokens[0] in FUNCTIONS:
+        return Parsed(function=tokens[0])
+
+    function = None
+    if len(tokens) > 1 and tokens[-1] in FUNCTIONS:
+        function = tokens.pop()
+
+    symbol, rest = tokens[0], tokens[1:]
+    if not _SYMBOL.match(symbol):
+        return Parsed(error=f"'{symbol}' is not a symbol: letters, digits and . - = ^ only.")
+    if len(rest) > 2:
+        return Parsed(error=f"Too many words: '{text.strip()}'. "
+                            "Format: SYMBOL [MARKET] [EQUITY|INDEX|...] [FUNCTION].")
+    market = yellow = None
+    for i, token in enumerate(rest):
+        if token in YELLOW:
+            if yellow or i != len(rest) - 1:
+                return Parsed(error=f"'{token}' must come last, after the market.")
+            yellow = token
+            continue
+        found = _market(token)
+        if found is None or market:
+            return Parsed(error=f"Unknown market '{token}'. Use a code such as US, GR, "
+                                "LN, JT or a three-letter country code such as DEU.")
+        market = found
+    return Parsed(symbol=symbol, market=market, yellow=yellow, function=function)
 
 
-def target(function: str | None) -> tuple[str, str | None]:
-    """(tab, section) of a function; a security alone opens its description."""
-    f = FUNCTIONS[function or "DES"]
-    return f.tab, f.section
+# --- resolution -----------------------------------------------------------------------
+
+def _yahoo_suffix(symbol: str) -> tuple[str, str] | None:
+    """('SAP', 'DEU') for 'SAP.DE'; None when the part after the dot is not a Yahoo
+    suffix (SAP.DEU is already a store ticker, BRK.B is a share class)."""
+    base, dot, suffix = symbol.rpartition(".")
+    if dot and base and suffix in YAHOO_TO_ISO3:
+        return base, YAHOO_TO_ISO3[suffix]
+    return None
 
 
-def help_rows() -> list[tuple[str, str, str]]:
-    """(code, where, what) for the function list shown under the command line."""
-    return [(f.code, f.tab + (f" → {f.section}" if f.section else ""), f.label)
-            for f in FUNCTIONS.values()]
+def candidates(parsed: Parsed) -> list[str]:
+    """Store tickers to try, best first.
+
+    A non-US market means the local line, ``TIC.ISO3`` as Compustat lines are named,
+    and not the bare ticker: bare SAP is the New York ADR. A Yahoo-style symbol
+    (SAP.DE) is tried as the store line SAP.DEU first, because the store has
+    fundamentals and Yahoo only has prices.
+    """
+    sym = parsed.symbol
+    if not sym:
+        return []
+    out: list[str] = []
+    split = _yahoo_suffix(sym)
+    if split:
+        out += [f"{split[0]}.{split[1]}", sym]
+    elif parsed.market and parsed.market != "USA":
+        out.append(f"{sym}.{parsed.market}")
+    else:
+        out.append(sym)
+    alias = ALIASES.get(sym)
+    if alias and parsed.yellow in _ALIAS_FIRST:
+        return [alias]   # SPX INDEX is the index, never the share SPX
+    if alias:
+        out.append(alias)
+    seen: set[str] = set()
+    return [c for c in out if not (c in seen or seen.add(c))]
+
+
+def _yahoo_fallback(parsed: Parsed) -> str | None:
+    """A symbol Yahoo knows, for a share that the store does not hold: prices only."""
+    sym = parsed.symbol or ""
+    if _yahoo_suffix(sym) or "^" in sym or "=" in sym:
+        return sym
+    if parsed.market and parsed.market != "USA" and parsed.market in ISO3_TO_YAHOO:
+        return f"{sym}.{ISO3_TO_YAHOO[parsed.market]}"
+    return None
+
+
+def _in_market(ticker: str, market: str | None) -> bool:
+    if not market:
+        return True
+    if market == "USA":
+        return "." not in ticker
+    return ticker.upper().endswith("." + market)
+
+
+def resolve(con, parsed: Parsed) -> Resolution:
+    """Find the security the command means, against the ``securities`` table on `con`.
+
+    Order: store tickers from ``candidates``, then an alias, then a Yahoo symbol for a
+    non-US market, then a name search. Several name hits come back as ``choices`` and
+    are never picked automatically: guessing between two companies is how a screen
+    ends up showing the wrong one. `con` is used and not kept.
+    """
+    if parsed.error or not parsed.symbol:
+        return Resolution(None)
+    for cand in candidates(parsed):
+        row = con.execute(
+            "SELECT ticker FROM securities WHERE ticker = ? ORDER BY ticker LIMIT 1",
+            [cand.upper()],
+        ).fetchone()
+        if row:
+            return Resolution(row[0], source="store")
+    if parsed.symbol in ALIASES:
+        return Resolution(ALIASES[parsed.symbol], source="alias")
+    fallback = _yahoo_fallback(parsed)
+    if fallback:
+        return Resolution(fallback, source="yahoo")
+    if len(parsed.symbol) < NAME_SEARCH_MIN:
+        return Resolution(None)
+    hits = [r[0] for r in con.execute(
+        "SELECT DISTINCT ticker FROM securities WHERE name ILIKE '%' || ? || '%' "
+        "ORDER BY ticker LIMIT ?",
+        [parsed.symbol, MAX_CHOICES],
+    ).fetchall()]
+    local = [t for t in hits if _in_market(t, parsed.market)]
+    hits = local or hits
+    if len(hits) == 1:
+        return Resolution(hits[0], source="name")
+    if hits:
+        return Resolution(None, choices=hits, source="name")
+    return Resolution(None)
+
+
+# --- dispatch -------------------------------------------------------------------------
+
+def dispatch(parsed: Parsed, resolution: Resolution, current: str | None) -> Action:
+    """Where the command goes. ``tab=None`` means: stay, and show ``message``."""
+    if parsed.error:
+        return Action(None, None, current, parsed.error)
+    symbol = current
+    note = ""
+    if parsed.symbol:
+        if resolution.symbol:
+            symbol = resolution.symbol
+            if resolution.source == "yahoo":
+                note = f" {symbol} is not in the store: prices only."
+        elif resolution.choices:
+            shown = ", ".join(resolution.choices[:10])
+            more = " ..." if len(resolution.choices) > 10 else ""
+            return Action(None, None, current,
+                          f"Several matches for '{parsed.symbol}': {shown}{more}. "
+                          "Type the one you mean.")
+        else:
+            return Action(None, None, current, f"No security found for '{parsed.symbol}'.")
+    code = parsed.function or "DES"
+    target = FUNCTIONS[code]
+    if target.needs_security and not symbol:
+        return Action(None, None, None,
+                      f"{code} ({target.label}) needs a security. Type one first, "
+                      f"e.g. AAPL US {code}.")
+    head = f"{symbol} {code}" if symbol and target.tab == SECURITY else code
+    return Action(target.tab, target.section, symbol, f"{head}: {target.label}.{note}")
+
+
+def run(con, text: str, current: str | None) -> tuple[Parsed, Resolution, Action]:
+    """parse -> resolve -> dispatch in one call, for the app's callback."""
+    parsed = parse(text)
+    resolution = resolve(con, parsed)
+    return parsed, resolution, dispatch(parsed, resolution, current)
+
+
+# --- history (works on any dict, so st.session_state works) ---------------------------
+
+def current(state) -> str | None:
+    hist = state.get(HISTORY_KEY) or []
+    return hist[-1] if hist else None
+
+
+def push(state, symbol: str | None) -> None:
+    if not symbol:
+        return
+    hist = list(state.get(HISTORY_KEY) or [])
+    if hist and hist[-1] == symbol:
+        return
+    hist.append(symbol)
+    state[HISTORY_KEY] = hist[-HISTORY_MAX:]
+
+
+def back(state) -> str | None:
+    """Drop the current security and return the one before it (None if there is none;
+    the only entry is kept, so 'back' never empties the context)."""
+    hist = list(state.get(HISTORY_KEY) or [])
+    if len(hist) < 2:
+        return None
+    hist.pop()
+    state[HISTORY_KEY] = hist
+    return hist[-1]

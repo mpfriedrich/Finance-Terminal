@@ -44,7 +44,7 @@ def test_every_tab_and_section_draws_on_the_fixture_store(monkeypatch, fresh):
 
     at = run(monkeypatch, fresh)
     assert not at.exception, at.exception
-    at.session_state["sec"] = command.Security("AAA", "store")
+    at.session_state[command.HISTORY_KEY] = ["AAA"]
     for tab in layout.TAB_LABELS:
         for section in layout.SECTIONS[tab] or [None]:
             at.session_state[layout.MAIN_KEY] = tab
@@ -60,7 +60,7 @@ def test_the_app_draws_exactly_the_layout_tabs():
     from pathlib import Path
 
     source = (Path(__file__).resolve().parents[1] / "app.py").read_text()
-    assert "command.TAB_LABELS" in source and "command.SECTIONS[tab]" in source
+    assert "layout.TAB_LABELS" in source and "layout.SECTIONS[tab]" in source
 
 
 def test_without_a_portfolio_the_market_views_still_draw(monkeypatch, data, tmp_path):
@@ -124,7 +124,7 @@ def test_the_option_position_is_valued_at_its_own_underlying(monkeypatch, fresh)
                             "DESC LIMIT 1", [t]).fetchone()[0] for t in ("AAA", "BBB"))
     con.close()
     at = run(monkeypatch, fresh, state={
-        "sec": command.Security("BBB", "store"), "cmd_focus": "OMON",
+        command.HISTORY_KEY: ["BBB"], "cmd_focus": "OMON",
         layout.MAIN_KEY: layout.SECURITY,
         layout.section_key(layout.SECURITY): "OPTIONS"})
     assert not at.exception, at.exception
@@ -151,7 +151,7 @@ def test_one_set_of_intrinsic_value_assumptions(monkeypatch, fresh):
     from portfolio_lab import command
 
     at = run(monkeypatch, fresh, state={
-        "iv_grow": 5, "iv_term": 1.5, "sec": command.Security("AAA", "store"),
+        "iv_grow": 5, "iv_term": 1.5, command.HISTORY_KEY: ["AAA"],
         layout.MAIN_KEY: layout.SECURITY,
         layout.section_key(layout.SECURITY): "VALUATION"})
     assert not at.exception, at.exception
@@ -203,12 +203,14 @@ def test_a_deep_link_runs_its_command(monkeypatch, fresh):
 
 
 def test_the_command_line_loads_a_security_and_opens_its_section(monkeypatch, fresh):
+    from portfolio_lab import command
+
     at = run(monkeypatch, fresh)
     at.text_input(key="cmd_input").input("AAA US FA").run()
     assert not at.exception, at.exception
-    assert at.session_state["sec"].symbol == "AAA"
+    assert command.current(at.session_state) == "AAA"
     assert at.session_state[layout.MAIN_KEY] == layout.SECURITY
     assert at.session_state[layout.section_key(layout.SECURITY)] == "FINANCIALS"
     at.text_input(key="cmd_input").input("BBB").run()
     at.button(key="cmd_back").click().run()
-    assert at.session_state["sec"].symbol == "AAA"
+    assert command.current(at.session_state) == "AAA"
