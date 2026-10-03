@@ -68,6 +68,20 @@ def run(monkeypatch, data: Path, query: dict | None = None,
         monkeypatch.setattr(config, name, path)
     monkeypatch.setattr(socket.socket, "connect", _no_network)
     monkeypatch.setattr(socket, "create_connection", _no_network)
+    # yfinance talks through curl_cffi, which does not use Python's socket module: a
+    # first version of this fixture blocked sockets only, and live quotes still came in.
+    import requests
+    import yfinance
+
+    monkeypatch.setattr(yfinance, "Ticker", _no_network)
+    monkeypatch.setattr(yfinance, "download", _no_network)
+    monkeypatch.setattr(requests.Session, "request", _no_network)
+    try:
+        from curl_cffi import requests as curl
+
+        monkeypatch.setattr(curl.Session, "request", _no_network)
+    except ImportError:
+        pass
     st.cache_data.clear()
     st.cache_resource.clear()
     at = AppTest.from_file(str(APP), default_timeout=timeout)

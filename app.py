@@ -45,6 +45,7 @@ import plotly.graph_objects as go
 
 from portfolio_lab import charts, ui
 from portfolio_lab import appcache as ac
+from portfolio_lab import command
 from portfolio_lab import config as cfg
 from portfolio_lab.config import CostModel, Settings, secret
 from portfolio_lab.data import history as data_history, industry
@@ -121,6 +122,11 @@ def _market_source():
     source, path, opened_inode = _market()
     try:
         if path.stat().st_ino != opened_inode:
+            # Close the old connection first. DuckDB hands a new connect() to the same
+            # path the database that is still open in this process, i.e. the REPLACED
+            # file: measured 02.10.2026, the reopen saw the old rows until the old
+            # connection was closed. So the swap check never showed the new build.
+            source.con.close()
             _market.clear()
             st.cache_data.clear()
             st.rerun()
@@ -1896,7 +1902,7 @@ def _sec_valuation(c) -> None:
             help=f"{rates['long_source']}: the long rate, because a company is valued "
                  "over decades. Options use the 13-week bill instead.")
         beta_in = w2.number_input(
-            "Beta (raw)", -1.0, 4.0, round(float(beta_raw or 1.0), 2), 0.05,
+            "Beta (raw)", -1.0, 4.0, round(min(max(float(beta_raw or 1.0), -1.0), 4.0), 2), 0.05,
             key=f"beta_{ticker}",
             help="Daily returns against the S&P 500 total return over the "
                  "stored history." if beta_raw else "No beta measured; 1.0.")
@@ -2587,10 +2593,6 @@ def _security_page(symbol: str) -> None:
                        + ", ".join(non_equity.symbol.tolist()))
 
 
-RESEARCH_SECTIONS = ["OVERVIEW", "FINANCIALS", "RELATIONSHIPS", "VALUATION", "OPTIONS",
-                     "EXPOSURE", "ANALYSTS", "OWNERSHIP", "NEWS", "FILINGS"]
-
-
 def _equity_page(ticker: str) -> None:
     prof = rs.profile(src.con, ticker)
     ticker = prof["ticker"]
@@ -2685,45 +2687,44 @@ def _equity_page(ticker: str) -> None:
 
     c = SimpleNamespace(ticker=ticker, cik=cik, prof=prof, quote=quote, me=me,
                         enriched=enriched)
-    views = {"OVERVIEW": _sec_overview, "FINANCIALS": _sec_financials,
-             "RELATIONSHIPS": _sec_relationships, "VALUATION": _sec_valuation,
-             "OPTIONS": _sec_options, "EXPOSURE": _sec_exposure,
-             "ANALYSTS": _sec_analysts, "OWNERSHIP": _sec_ownership,
-             "NEWS": _sec_news, "FILINGS": _sec_filings}
+
+    def _valuation(c) -> None:
+        _sec_valuation(c)
+        # MA: precedent transactions (the old DEALS tab), applied to this company.
+        with st.expander("Precedent transactions (MA)",
+                         expanded=st.session_state.get("cmd_focus") == "MA"):
+            _view_deals(c.ticker)
+
+    def _options(c) -> None:
+        _sec_options(c)
+        # The position builder (the old OPTIONS tab), on the same underlying.
+        with st.expander("Build an options position",
+                         expanded=st.session_state.get("cmd_focus") == "OMON"):
+            _view_options_builder(c.ticker)
+
+    def _overview(c) -> None:
+        _sec_overview(c)
+        with st.expander("Price table (HP)",
+                         expanded=st.session_state.get("cmd_focus") == "HP"):
+            _sec_prices(c)
+
+    def _news_and_filings(c) -> None:
+        _sec_news(c)
+        st.markdown("#### Filings")
+        _sec_filings(c)
+        # SPLC: who the company says it depends on, read out of this 10-K.
+        with st.expander("Relationships named in the 10-K (SPLC)",
+                         expanded=st.session_state.get("cmd_focus") == "SPLC"):
+            _sec_relationships(c)
+
     # Lazy and isolated: only the open section runs, and one that fails (a chain that
     # does not parse, a filing that cannot be read) leaves the others standing.
-    for label, tab in zip(RESEARCH_SECTIONS, st.tabs(RESEARCH_SECTIONS, key="sec_section",
-                                                     on_change="rerun")):
-        with tab:
-            if tab.open:
-                _guarded(label, views[label], c)
-
-
-def _view_research() -> None:
-    st.markdown('<div class="tl-cmd"><span class="p">&gt;</span></div>', unsafe_allow_html=True)
-    query = st.text_input(
-        "Company", placeholder="ticker or name — AAPL, newmont, american airlines",
-        label_visibility="collapsed", key="research_query",
-    )
-    if not query.strip():
-        st.caption(
-            "Look one company up. Reported figures are as first filed, not as later "
-            "restated, so you see what the market saw at the time. The quote is live."
-        )
-        return
-    matches = rs.find_ticker(src.con, query)
-    if matches.empty:
-        _security_page(query.strip())
-        return
-    ticker = matches.iloc[0].ticker
-    if len(matches) > 1:
-        names = matches.set_index("ticker")["name"]
-        ticker = st.radio(
-            "Matches", options=matches.ticker.tolist(),
-            format_func=lambda t: f"{t} · {names.loc[t][:26]}",
-            horizontal=True, key="research_pick",
-        )
-    _security_page(ticker)
+    _sections(command.SECURITY, {
+        "OVERVIEW": _overview, "FINANCIALS": _sec_financials,
+        "VALUATION": _valuation, "OPTIONS": _options, "EXPOSURE": _sec_exposure,
+        "ANALYSTS": _sec_analysts, "OWNERSHIP": _sec_ownership,
+        "NEWS & FILINGS": _news_and_filings,
+    }, c)
 
 
 def _view_options_builder(default_under: str = "") -> None:
@@ -2933,7 +2934,7 @@ def _view_options_builder(default_under: str = "") -> None:
                     )
 
 
-def _view_strategy() -> None:
+def _view_strategy(default: str = "") -> None:
     st.markdown("#### When to invest")
     st.write(
         "Not which company — when. Money arrives on a schedule; a rule decides when it "
@@ -2944,9 +2945,9 @@ def _view_strategy() -> None:
     )
 
     what = st.text_input(
-        "What to buy", value="^SP500TR",
+        "What to buy", value=default or "^SP500TR",
         help="A ticker in the local store. ^SP500TR is the S&P 500 including dividends.",
-        key="stg_symbol",
+        key=f"stg_symbol_{default}",
     )
     c1, c2, c3 = st.columns(3)
     # Stable keys: without them every one of these reset whenever a label changed.
@@ -4331,91 +4332,100 @@ def _view_lab(default_ticker: str = "") -> None:
             "rule is frozen as it stands now.")
 
 
-def _view_news() -> None:
-    with st.expander("Alerts", expanded=False):
-        rules_now = alerts.rules(store.con)
-        with st.form("alert_form", clear_on_submit=True):
-            a1, a2, a3, a4 = st.columns([1, 2, 1, 1])
-            a_ticker = a1.text_input("Ticker", placeholder="AAPL")
-            a_kind = a2.selectbox("When", list(alerts.KINDS),
-                                  format_func=lambda k: alerts.KINDS[k])
-            a_x = a3.number_input("Level / %", min_value=0.0, value=0.0, step=1.0)
-            a4.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
-            if a4.form_submit_button("Add", width="stretch") and a_ticker.strip():
-                try:
-                    alerts.add(store.con, a_ticker, a_kind,
-                               None if a_kind == "new_filing" else a_x)
-                    st.rerun()
-                except ValueError as exc:
-                    st.error(str(exc))
-        if rules_now.empty:
-            st.caption("No alerts yet.")
-        else:
-            for rule in rules_now.itertuples():
-                r1, r2 = st.columns([5, 1])
-                level = "" if rule.kind == "new_filing" else f" {rule.threshold:g}"
-                r1.markdown(f"`{rule.ticker}` — {alerts.KINDS[rule.kind]}{level}")
-                if r2.button("×", key=f"rm_alert_{rule.id}"):
-                    alerts.remove(store.con, rule.id)
-                    st.rerun()
-            if st.button("Check now against the stored closes", key="alerts_now"):
-                fired, state_now = alerts.run(store.con, src.con,
-                                              alerts.load_state(cfg.ALERTS_STATE))
-                alerts.save_state(cfg.ALERTS_STATE, state_now)
-                st.success("; ".join(e["message"] for e in fired) if fired
-                           else "Nothing new fired.")
-        history_log = alerts.load_state(cfg.ALERTS_STATE).get("log", [])[-10:][::-1]
-        if history_log:
-            st.markdown(ui.grid(pd.DataFrame({
-                "bar": [e["on"] for e in history_log],
-                "alert": [e["message"] for e in history_log]}),
-                ticker_col="bar"), unsafe_allow_html=True)
-        st.caption(
-            "Checked on end-of-day closes: every morning run (after the price refresh, "
-            "with a Mac notification) and with the button above. A level alert fires "
-            "when the close crosses the level, once. New-filing alerts need the morning "
-            "run or scripts/check_alerts.py, which ask EDGAR.")
-
-    with st.expander("Search every SEC filing (full text, 2001 onwards)", expanded=False):
-        with st.form("fts_form"):
-            f1, f2 = st.columns([3, 1])
-            fts_q = f1.text_input("Words", placeholder='"pricing pressure" tariff',
-                                  help='Phrases in double quotes. Every word must appear.')
-            fts_ticker = f2.text_input("Only this ticker", placeholder="optional")
-            f3, f4, f5 = st.columns([2, 1, 1])
-            fts_forms = f3.multiselect(
-                "Forms", ["10-K", "10-Q", "8-K", "20-F", "6-K", "S-1", "DEF 14A", "SC 13D"],
-                default=["10-K", "10-Q", "8-K"])
-            fts_from = f4.date_input("From", value=dt.date.today() - dt.timedelta(days=730))
-            fts_to = f5.date_input("To", value=dt.date.today())
-            go_fts = st.form_submit_button("Search", width="stretch")
-        if go_fts and fts_q.strip():
-            fts_cik = None
-            if fts_ticker.strip():
-                hit_cik = src.con.execute(
-                    "SELECT cik FROM securities WHERE upper(ticker) = upper(?) LIMIT 1",
-                    [fts_ticker.strip()]).fetchone()
-                fts_cik = hit_cik[0] if hit_cik else None
-                if fts_cik is None:
-                    st.warning(f"{fts_ticker} is not a US listing in the store; "
-                               "searching all companies.")
-            fts_failed = False
+def _view_alerts() -> None:
+    """ALRT: level, move and new-filing alerts on end-of-day closes."""
+    st.markdown("#### Alerts")
+    rules_now = alerts.rules(store.con)
+    with st.form("alert_form", clear_on_submit=True):
+        a1, a2, a3, a4 = st.columns([1, 2, 1, 1])
+        a_ticker = a1.text_input("Ticker", placeholder="AAPL")
+        a_kind = a2.selectbox("When", list(alerts.KINDS),
+                              format_func=lambda k: alerts.KINDS[k])
+        a_x = a3.number_input("Level / %", min_value=0.0, value=0.0, step=1.0)
+        a4.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
+        if a4.form_submit_button("Add", width="stretch") and a_ticker.strip():
             try:
-                found, total = fts.search(fts_q, fts_forms, fts_from, fts_to, fts_cik,
-                                          pages=2)
-            except Exception as exc:                                  # noqa: BLE001
-                found, total, fts_failed = pd.DataFrame(), 0, True
-                st.error(f"The SEC search could not be reached ({type(exc).__name__}).")
-            if not found.empty:
-                st.caption(f"{total:,} filings contain it; the latest {len(found)} shown. "
-                           "A hit means the words appear, not that they matter — "
-                           "risk-factor boilerplate matches too.")
-                st.dataframe(found, hide_index=True, width="stretch",
-                             column_config={"url": st.column_config.LinkColumn(
-                                 "filing", display_text="open")})
-            elif not fts_failed:
-                st.info("No filing contains that.")
+                alerts.add(store.con, a_ticker, a_kind,
+                           None if a_kind == "new_filing" else a_x)
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+    if rules_now.empty:
+        st.caption("No alerts yet.")
+    else:
+        for rule in rules_now.itertuples():
+            r1, r2 = st.columns([5, 1])
+            level = "" if rule.kind == "new_filing" else f" {rule.threshold:g}"
+            r1.markdown(f"`{rule.ticker}` — {alerts.KINDS[rule.kind]}{level}")
+            if r2.button("×", key=f"rm_alert_{rule.id}"):
+                alerts.remove(store.con, rule.id)
+                st.rerun()
+        if st.button("Check now against the stored closes", key="alerts_now"):
+            fired, state_now = alerts.run(store.con, src.con,
+                                          alerts.load_state(cfg.ALERTS_STATE))
+            alerts.save_state(cfg.ALERTS_STATE, state_now)
+            st.success("; ".join(e["message"] for e in fired) if fired
+                       else "Nothing new fired.")
+    history_log = alerts.load_state(cfg.ALERTS_STATE).get("log", [])[-10:][::-1]
+    if history_log:
+        st.markdown(ui.grid(pd.DataFrame({
+            "bar": [e["on"] for e in history_log],
+            "alert": [e["message"] for e in history_log]}),
+            ticker_col="bar"), unsafe_allow_html=True)
+    st.caption(
+        "Checked on end-of-day closes: every morning run (after the price refresh, "
+        "with a Mac notification) and with the button above. A level alert fires "
+        "when the close crosses the level, once. New-filing alerts need the morning "
+        "run or scripts/check_alerts.py, which ask EDGAR.")
 
+
+def _view_filing_search(default_ticker: str = "") -> None:
+    """FTS: every SEC filing since 2001, full text."""
+    st.markdown("#### Search every SEC filing (full text, 2001 onwards)")
+    with st.form("fts_form"):
+        f1, f2 = st.columns([3, 1])
+        fts_q = f1.text_input("Words", placeholder='"pricing pressure" tariff',
+                              help='Phrases in double quotes. Every word must appear.')
+        fts_ticker = f2.text_input("Only this ticker", value=default_ticker,
+                               placeholder="optional")
+        f3, f4, f5 = st.columns([2, 1, 1])
+        fts_forms = f3.multiselect(
+            "Forms", ["10-K", "10-Q", "8-K", "20-F", "6-K", "S-1", "DEF 14A", "SC 13D"],
+            default=["10-K", "10-Q", "8-K"])
+        fts_from = f4.date_input("From", value=dt.date.today() - dt.timedelta(days=730),
+                             format="YYYY-MM-DD")
+        fts_to = f5.date_input("To", value=dt.date.today(), format="YYYY-MM-DD")
+        go_fts = st.form_submit_button("Search", width="stretch")
+    if go_fts and fts_q.strip():
+        fts_cik = None
+        if fts_ticker.strip():
+            hit_cik = src.con.execute(
+                "SELECT cik FROM securities WHERE ticker = upper(?) LIMIT 1",
+                [fts_ticker.strip()]).fetchone()
+            fts_cik = hit_cik[0] if hit_cik else None
+            if fts_cik is None:
+                st.warning(f"{fts_ticker} is not a listing in the store; "
+                           "searching all companies.")
+        fts_failed = False
+        try:
+            found, total = fts.search(fts_q, fts_forms, fts_from, fts_to, fts_cik,
+                                      pages=2)
+        except Exception as exc:                                  # noqa: BLE001
+            found, total, fts_failed = pd.DataFrame(), 0, True
+            st.error(f"The SEC search could not be reached ({type(exc).__name__}).")
+        if not found.empty:
+            st.caption(f"{total:,} filings contain it; the latest {len(found)} shown. "
+                       "A hit means the words appear, not that they matter — "
+                       "risk-factor boilerplate matches too.")
+            st.dataframe(found, hide_index=True, width="stretch",
+                         column_config={"url": st.column_config.LinkColumn(
+                             "filing", display_text="open")})
+        elif not fts_failed:
+            st.info("No filing contains that.")
+
+
+def _view_briefing() -> None:
+    """TOP: the daily briefing on what you follow."""
     st.markdown("#### Daily briefing")
     followed = store.everything_followed()
     if not followed:
@@ -4491,19 +4501,257 @@ def _view_news() -> None:
                         st.caption(row.summary)
 
 
+# ------------------------------------------------------------------ the command line
+# One security is "loaded" at a time, as on a terminal: every single-ticker field (the
+# security tab, the option builder, a rule, a savings plan, compare, precedent deals,
+# the filing search) starts at it. Typed into the line at the top: `AAPL US FA`.
+def _ctx():
+    """The loaded security (command.Security) or None."""
+    return st.session_state.get("sec")
 
-# ---------------------------------------------------------------------- the tabs
-TABS = {
-    "SCREEN": _view_screen, "MONITOR": _view_monitor, "RESEARCH": _view_research,
-    "OPTIONS": _view_options_builder, "STRATEGY": _view_strategy, "LAB": _view_lab,
-    "BOOKS": _view_books, "DEALS": _view_deals,
-    "MACRO": lambda: (_view_economy(), _view_rates()),
-    "COMMODITIES": _view_commodity_links, "MAP": _view_map, "CALENDAR": _view_calendar,
-    "NEWS": _view_news,
-}
-# Lazy: only the open tab runs. Before 02.10.2026 every rerun drew all thirteen, with
-# their network calls, whichever one was on screen.
-for (label, view), tab in zip(TABS.items(), st.tabs(list(TABS), key="main_tab",
+
+def _ctx_symbol() -> str:
+    sec = _ctx()
+    return sec.symbol if sec else ""
+
+
+def _in_store(ticker: str) -> bool:
+    return bool(_market_source().con.execute(
+        "SELECT 1 FROM securities WHERE ticker = ? LIMIT 1", [ticker]).fetchone())
+
+
+def _is_price_only(symbol: str) -> bool:
+    return symbol.upper() in set(_price_only(DATA_KEY).symbol.str.upper())
+
+
+def _find_names(text: str) -> list[tuple[str, str]]:
+    hits = rs.find_ticker(_market_source().con, text)
+    return [(str(r.ticker), str(r.name)) for r in hits.itertuples()]
+
+
+def _load(sec) -> None:
+    st.session_state["sec"] = sec
+    st.session_state["sec_history"] = command.push(
+        st.session_state.get("sec_history", ()), sec)
+
+
+def _open(tab: str, section: str | None) -> None:
+    """Select a tab (and its section) before the tabs are drawn on this run."""
+    st.session_state[command.MAIN_KEY] = tab
+    if section:
+        st.session_state[command.section_key(tab)] = section
+
+
+def _say(kind: str, text: str) -> None:
+    st.session_state["cmd_msg"] = (kind, text)
+
+
+def _execute(text: str) -> None:
+    """Run one command: load the security it names, open the tab its function lives in."""
+    st.session_state.pop("cmd_candidates", None)
+    st.session_state.pop("cmd_msg", None)
+    parsed = command.parse(text)
+    if parsed.error:
+        _say("error", parsed.error)
+        return
+    if parsed.symbol or parsed.name:
+        found = command.resolve(parsed, _in_store, _is_price_only, _find_names)
+        if found.error:
+            _say("error", found.error)
+            return
+        if found.candidates:
+            st.session_state["cmd_candidates"] = (found.candidates, parsed.function)
+            _say("info", (found.note or "Several match.") + " Pick one.")
+            return
+        _load(command.Security(found.symbol, found.kind))
+        if found.note:
+            _say("info", found.note)
+    elif command.FUNCTIONS[parsed.function].needs_security and _ctx() is None:
+        _say("info", f"{parsed.function} works on a security: type one first, e.g. "
+                     f"AAPL US {parsed.function}.")
+    st.session_state["cmd_focus"] = parsed.function or "DES"
+    _open(*command.target(parsed.function))
+
+
+def _on_command() -> None:
+    _execute(st.session_state.get("cmd_input", ""))
+    st.session_state["cmd_input"] = ""
+
+
+def _pick_candidate(ticker: str, function: str | None) -> None:
+    st.session_state.pop("cmd_candidates", None)
+    st.session_state.pop("cmd_msg", None)
+    _load(command.Security(ticker, "store"))
+    st.session_state["cmd_focus"] = function or "DES"
+    _open(*command.target(function))
+
+
+def _go_back() -> None:
+    rest, previous = command.back(st.session_state.get("sec_history", ()))
+    if previous is not None:
+        st.session_state["sec_history"] = rest
+        st.session_state["sec"] = previous
+        _open(command.SECURITY, None)
+
+
+def _command_bar() -> None:
+    # A link like http://localhost:8501/?cmd=AAPL%20FA runs once when opened.
+    linked = st.query_params.get("cmd")
+    if linked and st.session_state.get("cmd_linked") != linked:
+        st.session_state["cmd_linked"] = linked
+        _execute(linked)
+    c1, c2, c3, c4 = st.columns([6, 0.8, 0.9, 2.6], vertical_alignment="center")
+    c1.text_input(
+        "Command", key="cmd_input", on_change=_on_command, label_visibility="collapsed",
+        placeholder="AAPL US FA <GO>  ·  SAP GR DES  ·  SPX GP  ·  EQS  ·  MA  ·  WEI  "
+                    "— Enter runs it")
+    c2.button("GO", key="cmd_go", on_click=_on_command, width="stretch")
+    history = st.session_state.get("sec_history", ())
+    c3.button("◀ BACK", key="cmd_back", on_click=_go_back, width="stretch",
+              disabled=len(history) < 2,
+              help="The security before this one (the last ten are kept).")
+    sec = _ctx()
+    c4.markdown(
+        f"<span style='color:{ui.MUTED};font-size:0.7rem'>LOADED</span> "
+        f"<span style='color:{ui.AMBER};font-weight:600'>"
+        f"{html.escape(sec.symbol) if sec else '—'}</span>"
+        + (f" <span style='color:{ui.MUTED};font-size:0.68rem'>"
+           f"{html.escape(sec.kind.replace('_', ' '))}</span>" if sec else ""),
+        unsafe_allow_html=True)
+    msg = st.session_state.get("cmd_msg")
+    if msg:
+        (st.error if msg[0] == "error" else st.caption)(msg[1])
+    picks = st.session_state.get("cmd_candidates")
+    if picks:
+        options, function = picks
+        cols = st.columns(min(len(options), 4))
+        for i, (ticker, name) in enumerate(options):
+            cols[i % len(cols)].button(
+                f"{ticker} · {name[:24]}", key=f"cand_{ticker}", width="stretch",
+                on_click=_pick_candidate, args=(ticker, function))
+    with st.expander("Functions"):
+        st.markdown(ui.grid(pd.DataFrame(command.help_rows(),
+                                         columns=["code", "opens", "what"]),
+                            ticker_col="code"), unsafe_allow_html=True)
+        st.caption("A security alone opens its description. A market after the ticker "
+                   "picks the line (SAP GR = Xetra, 7203 JP = Tokyo); a name works too "
+                   "(newmont). Links: ?cmd=AAPL%20FA.")
+
+
+# ---------------------------------------------------------------- HP: the price table
+def _sec_prices(c) -> None:
+    """HP: the stored bars as a table — daily, weekly or monthly — with the change."""
+    symbol = c.ticker
+    bars = src.con.execute(
+        "SELECT date, open, high, low, COALESCE(close_raw, close) AS close, close_adj, "
+        "volume FROM prices WHERE ticker = ? ORDER BY date", [symbol]).fetch_df()
+    source = "stored closes"
+    if bars.empty:
+        bars = _yahoo_bars(symbol)
+        source = "Yahoo, not stored"
+    if bars.empty:
+        st.info(f"No price history for {symbol}.")
+        return
+    p1, p2 = st.columns([1, 1])
+    every = p1.segmented_control("Every", ["day", "week", "month"], default="day",
+                                 key="hp_every") or "day"
+    span = p2.segmented_control("Last", ["1M", "3M", "1Y", "5Y"], default="3M",
+                                key="hp_span") or "3M"
+    frame = bars.assign(date=pd.to_datetime(bars["date"])).set_index("date")
+    if every != "day":
+        rule = {"week": "W-FRI", "month": "ME"}[every]
+        frame = frame.resample(rule).agg({"open": "first", "high": "max", "low": "min",
+                                          "close": "last", "close_adj": "last",
+                                          "volume": "sum"}).dropna(subset=["close"])
+    since = frame.index[-1] - pd.Timedelta(days={"1M": 31, "3M": 92, "1Y": 366,
+                                                 "5Y": 1827}[span])
+    frame["change"] = frame["close_adj"].pct_change()
+    view = frame[frame.index > since].sort_index(ascending=False)
+    st.markdown(ui.grid(pd.DataFrame({
+        "date": view.index.strftime("%Y-%m-%d"),
+        "open": view["open"].map(ui.num), "high": view["high"].map(ui.num),
+        "low": view["low"].map(ui.num), "close": view["close"].map(ui.num),
+        "change": view["change"].map(lambda v: ui.pct(v, 2)),
+        "volume": view["volume"].map(lambda v: "—" if pd.isna(v) else f"{v:,.0f}"),
+    }), numeric={"open", "high", "low", "close", "volume"}, signed={"change"},
+        ticker_col="date"), unsafe_allow_html=True)
+    st.caption(f"{len(view)} rows from the {source}, newest first. Close as traded; "
+               "the change is on the close adjusted for splits and dividends, so an ex-"
+               "dividend day does not show as a fall.")
+
+
+# ---------------------------------------------------------------------- the six tabs
+def _sections(tab: str, views: dict, *args) -> None:
+    """A tab's own row of sections: lazy, each guarded, selectable by the command."""
+    labels = command.SECTIONS[tab]
+    for label, part in zip(labels, st.tabs(labels, key=command.section_key(tab),
+                                            on_change="rerun")):
+        with part:
+            if part.open:
+                _guarded(label, views[label], *args)
+
+
+def _tab_security() -> None:
+    """DES … CF on the loaded security."""
+    sec = _ctx()
+    if sec is None:
+        st.markdown("#### No security loaded")
+        st.caption("Type a ticker or a name in the command line above — AAPL, SAP GR, "
+                   "newmont, SPX, GC=F — and Enter. Add a function to jump straight to "
+                   "it: AAPL FA, AAPL OMON, AAPL DCF.")
+        with st.expander("Precedent transactions (MA)",
+                         expanded=st.session_state.get("cmd_focus") == "MA"):
+            _view_deals()
+        return
+    if sec.kind == "store" and rs.profile(src.con, sec.symbol):
+        _equity_page(sec.symbol)
+    else:
+        _security_page(sec.symbol)
+        with st.expander("Price table (HP)",
+                         expanded=st.session_state.get("cmd_focus") == "HP"):
+            _sec_prices(SimpleNamespace(ticker=sec.symbol))
+
+
+def _tab_screen() -> None:
+    _sections(command.SCREEN, {
+        "SCREEN": _view_screen, "BACKTEST": _view_backtest,
+        "RULE": lambda: _view_lab(_ctx_symbol()),
+        "SAVINGS PLAN": lambda: _view_strategy(_ctx_symbol()),
+    })
+
+
+def _tab_portfolios() -> None:
+    _sections(command.PORTFOLIOS, {
+        "BOOKS": _view_books, "TRACKING": _view_tracking,
+        "WATCHLIST & ALERTS": _view_alerts, "COMMODITY LINKS": _view_commodity_links,
+    })
+
+
+def _tab_markets() -> None:
+    _sections(command.MARKETS, {
+        "BOARDS": _view_monitor, "COMPARE": lambda: _view_compare(_ctx_symbol()),
+        "ECONOMY": _view_economy, "RATES": _view_rates,
+    })
+
+
+def _tab_events() -> None:
+    _sections(command.EVENTS, {
+        "BRIEFING": _view_briefing, "CALENDAR": _view_calendar,
+        "FILING SEARCH": lambda: _view_filing_search(
+            _ctx_symbol() if (_ctx() and _ctx().kind == "store") else ""),
+    })
+
+
+TABS = {command.SECURITY: _tab_security, command.SCREEN: _tab_screen,
+        command.PORTFOLIOS: _tab_portfolios, command.MARKETS: _tab_markets,
+        command.WORLD: _view_map, command.EVENTS: _tab_events}
+assert list(TABS) == command.TAB_LABELS
+
+_command_bar()
+# Lazy: only the open tab runs. Before 02.10.2026 every rerun drew all thirteen tabs,
+# with their network calls, whichever one was on screen.
+for (label, view), tab in zip(TABS.items(), st.tabs(command.TAB_LABELS,
+                                                       key=command.MAIN_KEY,
                                                        on_change="rerun")):
     with tab:
         if tab.open:

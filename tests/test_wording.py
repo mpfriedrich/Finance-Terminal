@@ -115,3 +115,15 @@ def test_no_hand_rolled_chat_markup_bypasses_the_escaping():
     source = (ROOT / "app.py").read_text()
     assert 'class="tl-msg"' not in source
     assert 'class="tl-reply"' not in source
+
+
+def test_model_text_is_escaped_before_it_is_rendered():
+    """The daily briefing put the model's text, written from fetched headlines, into
+    unsafe_allow_html (audit 02.10.2026). It now goes through ui.markdown_text."""
+    from portfolio_lab import ui
+
+    safe = ui.markdown_text('Shares fell <img src=x onerror="alert(1)"> **3 %**')
+    assert "<img" not in safe and "**3 %**" in safe
+    source = (ROOT / "app.py").read_text()
+    assert "{brief['text']}" not in source
+    assert 'ui.markdown_text(brief["text"])' in source
