@@ -127,3 +127,27 @@ def test_model_text_is_escaped_before_it_is_rendered():
     source = (ROOT / "app.py").read_text()
     assert "{brief['text']}" not in source
     assert 'ui.markdown_text(brief["text"])' in source
+
+    # Headlines (review 03.10.2026, F8): CN rendered title and URL raw inside
+    # unsafe_allow_html. The title is escaped; only an http(s) address becomes a link.
+    shown = ui.headline('<img src=x onerror="alert(1)"> Fed [cuts]',
+                        "https://example.com/a(b)")
+    assert "<img" not in shown and "&lt;img" in shown
+    assert shown.endswith("(https://example.com/a%28b%29)**")
+    assert "\\[cuts\\]" in shown
+    assert ui.headline("Click", "javascript:alert(1)") == "**Click**"
+    assert ui.headline("Click", "data:text/html,<b>x</b>") == "**Click**"
+    assert "[{row.title}]({row.url})" not in source
+    assert source.count("ui.headline(row.title, row.url)") == 2
+
+
+def test_no_raw_exception_text_reaches_the_screen():
+    """R24 (review 03.10.2026, F12b): the volatility surface and the briefing showed
+    `{exc}` as it came, URL and query string included. Everything shown, or stored as
+    a chat line, goes through ui.error_text."""
+    import re
+
+    source = (ROOT / "app.py").read_text()
+    body = source[source.index("if not st.runtime.exists()"):]   # past the import guard
+    raw = re.findall(r'f"[^"\n]*\{exc\}[^"\n]*"', body)
+    assert raw == [], raw

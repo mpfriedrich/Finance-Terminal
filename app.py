@@ -192,6 +192,15 @@ def _kept(name: str, default, field: str = "value") -> dict:
     return kwargs
 
 
+def _kept_choice(name: str, options: list, default) -> dict:
+    """_kept for a radio, which is seeded with an index rather than a value."""
+    kwargs = _kept(name, default)
+    if "value" in kwargs:
+        value = kwargs.pop("value")
+        kwargs["index"] = options.index(value if value in options else default)
+    return kwargs
+
+
 @st.cache_data(ttl=600)
 def _frame(asof: dt.date, key: str) -> pd.DataFrame:
     del key
@@ -199,9 +208,11 @@ def _frame(asof: dt.date, key: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _option_snapshot(day: dt.date) -> pd.DataFrame | None:
+def _option_snapshot(day: dt.date, stamp: tuple | None) -> pd.DataFrame | None:
     """The newest daily options snapshot (scripts/snapshot_options.py), if it is at most
-    four days old; the cross-section the put-call spread is ranked against."""
+    four days old; the cross-section the put-call spread is ranked against. `stamp`
+    (op.snapshot_stamp) is part of the cache key, so a new file is read at once."""
+    del stamp
     folder = cfg.CACHE_DIR / "options"
     files = sorted(folder.glob("*.parquet")) if folder.exists() else []
     if not files:
@@ -389,9 +400,12 @@ def _band_changed() -> None:
 
 
 def _assumptions() -> Assumptions:
-    """The ONE set of intrinsic-value assumptions: the P/IV column of the screen, the
-    price/intrinsic line of a company's overview, and the starting values of its DCF
-    all read these (audit 02.10.2026: the sidebar and the DCF had separate defaults)."""
+    """The screen's intrinsic-value assumptions: the P/IV column of the screen and the
+    price/intrinsic line of a company's overview read these, and the DCF starts its
+    growth forever here. The DCF's growth in the forecast years is its own input with
+    its own default (3 %), deliberately: the screen grows EARNINGS from 0 % so it ranks
+    on what is there, the DCF grows CASH FLOW over a few named years (the user's
+    decision of 03.10.2026, review F13; for one day both started at 0 %)."""
     return Assumptions(discount_rate=_keep("iv_disc", 10) / 100,
                        growth_rate=_keep("iv_grow", 0) / 100,
                        terminal_growth=_keep("iv_term", 2.0) / 100)
@@ -836,13 +850,15 @@ def _screen_filters() -> None:
                 help="Where the stock trades: a Japanese company's New York ADR is USA, "
                      "its Tokyo line JPN.", **_kept("markets", [], "default"))
         st.markdown("**Intrinsic value** — a model, not a measurement. These assumptions "
-                    "decide the P/IV column, a company's price/intrinsic line and the "
-                    "starting values of its DCF.")
+                    "decide the P/IV column and a company's price/intrinsic line; a "
+                    "company's DCF starts its growth forever here and has its own "
+                    "cash-flow growth.")
         # Sliders work in whole percent. Streamlit formats the raw value, so a 0.10 shown
         # with "%.0f%%" renders as "0%" — the number has to carry the percent.
         i1, i2, i3 = st.columns(3)
         i1.slider("Required return %", 4, 20, step=1, **_kept("iv_disc", 10))
-        i2.slider("Growth assumed % a year", -5, 15, step=1, **_kept("iv_grow", 0))
+        i2.slider("Screen: earnings growth for intrinsic value, % a year", -5, 15,
+                  step=1, **_kept("iv_grow", 0))
         i3.slider("Growth forever after %", 0.0, 4.0, step=0.5, **_kept("iv_term", 2.0))
         a = _assumptions()
         if not a.valid():
@@ -1926,21 +1942,24 @@ def _sec_valuation(c) -> None:
         erp_in = w3.number_input("Equity risk premium %", 2.0, 9.0,
                                  W.DEFAULT_ERP * 100, 0.25, key=f"erp_{ticker}")
         blume = w4.toggle("Blume-adjusted beta", value=True, key=f"blume_{ticker}")
-        # Growth and growth-forever start from the screen's assumptions — one set, so
-        # the P/IV column and this DCF cannot quietly disagree; the discount rate does
-        # differ, by design: here it is the WACC, there the required return.
+        # Growth in the forecast years is the DCF's own (3 %, as before 02.10.2026),
+        # separate from the screen's earnings growth (0 %) on purpose: see
+        # _assumptions (review F13). Growth forever starts at the screen's; the
+        # discount rate differs by design: here the WACC, there the required return.
         shared = _assumptions()
         g1, g2, g3 = st.columns(3)
-        growth_in = g1.number_input("FCFF growth %/yr", -10.0, 30.0,
-                                    float(shared.growth_rate * 100), 0.5,
-                                    key=f"g_{ticker}")
+        growth_in = g1.number_input("DCF: cash-flow growth in the forecast period, %/yr",
+                                    -10.0, 30.0, 3.0, 0.5, key=f"g_{ticker}")
         years_in = g2.number_input("Years", 1, 15, 5, 1, key=f"yrs_{ticker}")
         tg_in = g3.number_input("Growth forever %", -2.0, 5.0,
                                 float(shared.terminal_growth * 100), 0.25,
                                 key=f"tg_{ticker}")
-        st.caption("Growth and growth forever start at the screen's intrinsic-value "
-                   "assumptions (SCREEN → filters); the discount rate here is the WACC "
-                   "below, not the screen's required return.")
+        st.caption("The DCF's cash-flow growth (3 % to start) and the screen's earnings "
+                   "growth for intrinsic value (SCREEN → filters, 0 % to start) are "
+                   "deliberately separate inputs: one grows free cash flow over the "
+                   "years above, the other values the screen on today's earnings. Growth "
+                   "forever starts at the screen's figure. The discount rate here is the "
+                   "WACC below, not the screen's required return.")
         w_inputs = W.Inputs(risk_free=rf_in / 100, beta=beta_in,
                             equity_risk_premium=erp_in / 100, adjust_beta=blume,
                             growth=growth_in / 100, years=int(years_in),
@@ -2207,7 +2226,8 @@ def _sec_options(c) -> None:
                                     if ch is not None and not ch.empty],
                                    r=rate, q=div_q)
             if slope.get("value") is not None:
-                snap = _option_snapshot(dt.date.today())
+                snap = _option_snapshot(dt.date.today(),
+                                        op.snapshot_stamp(cfg.CACHE_DIR / "options"))
                 pct = (op.percentile(slope["value"], snap.smile_slope)
                        if snap is not None else None)
                 st.markdown(ui.stats([
@@ -2274,7 +2294,7 @@ def _sec_options(c) -> None:
                         "speculation, because crashes happen faster than rallies."
                     )
             except Exception as exc:
-                st.caption(f"Surface unavailable: {exc}")
+                st.caption(f"Surface unavailable: {ui.error_text(exc)}")
 
             c1, c2 = st.columns(2, gap="medium")
             with c1:
@@ -2450,7 +2470,7 @@ def _sec_news(c) -> None:
     else:
         for row in items.itertuples():
             st.markdown(
-                f"**[{row.title}]({row.url})**  \n"
+                f"{ui.headline(row.title, row.url)}  \n"
                 f"<span style='color:{ui.MUTED};font-size:0.72rem'>"
                 f"{html.escape(str(row.when))} · {html.escape(str(row.source))}</span>",
                 unsafe_allow_html=True,
@@ -3818,7 +3838,9 @@ def _view_map() -> None:
     # Anonymous OpenSky allows ~100 worldwide calls a day. Until 02.10.2026 every visit
     # to this tab asked, whichever layer was on; now only the AIR and FREIGHTERS layers
     # and the AIR table do, and the strip shows the last answer of this session.
-    layer_now = st.session_state.get("map_layer", "SHIPS")
+    # The layer survives a visit to another tab (_kept): a lazy tab is not drawn, and
+    # Streamlit forgets the state of a widget that is not drawn (review 03.10.2026, F12e).
+    layer_now = _keep("map_layer", "SHIPS")
     live_air = _air(layer_now in ("AIR", "FREIGHTERS"))
     ais_static_path = cfg.CACHE_DIR / "ais_static.json"
 
@@ -3852,9 +3874,9 @@ def _view_map() -> None:
     if strip:
         st.markdown(ui.stats(strip), unsafe_allow_html=True)
 
-    layer = st.radio("Layer", ["SHIPS", "TANKERS", "PORT CARGO", "LIVE AIS", "AIR",
-                               "FREIGHTERS"],
-                     horizontal=True, key="map_layer", label_visibility="collapsed")
+    layers = ["SHIPS", "TANKERS", "PORT CARGO", "LIVE AIS", "AIR", "FREIGHTERS"]
+    layer = st.radio("Layer", layers, horizontal=True, label_visibility="collapsed",
+                     **_kept_choice("map_layer", layers, "SHIPS"))
     c_map, c_side = st.columns([3, 1])
 
     with c_map:
@@ -3902,7 +3924,7 @@ def _view_map() -> None:
                         try:
                             heard = ais.listen(ais_key, ais_region, ais_seconds)
                         except ais.ListenFailed as exc:
-                            st.warning(f"AISStream: {exc}. Check the key in .env.local, "
+                            st.warning(f"AISStream: {ui.error_text(exc)}. Check the key in .env.local, "
                                        "or wait a minute (3 connections at most).")
                             heard = None
                     if heard is not None:
@@ -4207,16 +4229,16 @@ def _view_lab(default_ticker: str = "") -> None:
     """A buy/sell rule on the held basket or one stock (the old LAB)."""
     if not _need_portfolio("a rule is saved with its portfolio."):
         return
-    lab_mode = st.radio(
-        "Test the rule on", ["Basket you hold", "Single stock"], horizontal=True,
-        key=f"lab_mode_{chosen}",
-    )
+    # Every input here survives a switch to another section or tab (_kept, F12e).
+    modes = ["Basket you hold", "Single stock"]
+    lab_mode = st.radio("Test the rule on", modes, horizontal=True,
+                        **_kept_choice(f"lab_mode_{chosen}", modes, modes[0]))
     lab_single = lab_mode == "Single stock"
     if lab_single:
         held_default = default_ticker or (store.get_spec(chosen).selected or [""])[0]
         lab_ticker = st.text_input(
-            "Ticker", value=held_default, key=f"lab_ticker_{chosen}_{held_default}",
-            placeholder="e.g. AAPL",
+            "Ticker", placeholder="e.g. AAPL",
+            **_kept(f"lab_ticker_{chosen}_{held_default}", held_default),
         ).strip().upper()
         held_now = [lab_ticker] if lab_ticker else []
     else:
@@ -4267,7 +4289,8 @@ def _view_lab(default_ticker: str = "") -> None:
                         "\n".join(f"- {c}" for c in out.changed) or "- no change",
                         kind="lab")
                 except Exception as exc:                      # noqa: BLE001
-                    store.add_message(chosen, "assistant", f"could not translate: {exc}",
+                    store.add_message(chosen, "assistant",
+                                      f"could not translate: {ui.error_text(exc)}",
                                       kind="lab")
                 st.rerun()
 
@@ -4279,8 +4302,9 @@ def _view_lab(default_ticker: str = "") -> None:
 
         c1, c2 = st.columns([1, 1])
         lab_start = c1.date_input(
-            "From", value=max(dt.date(2011, 1, 3), asof - dt.timedelta(days=365 * 10)),
-            min_value=dt.date(2010, 1, 4), max_value=asof, key=f"lab_start_{chosen}")
+            "From", min_value=dt.date(2010, 1, 4), max_value=asof,
+            **_kept(f"lab_start_{chosen}",
+                    max(dt.date(2011, 1, 3), asof - dt.timedelta(days=365 * 10))))
         go_lab = c2.button("Run rule", width="stretch", key=f"lab_go_{chosen}")
 
         if go_lab:
@@ -4514,7 +4538,7 @@ def _view_briefing() -> None:
                     st.session_state["briefing"] = bfg.write(bundle)
                     st.session_state["bundle"] = bundle
                 except Exception as exc:
-                    st.error(f"Could not write the briefing: {exc}")
+                    st.error(f"Could not write the briefing: {ui.error_text(exc)}")
 
         brief = st.session_state.get("briefing")
         bundle = st.session_state.get("bundle")
@@ -4561,7 +4585,7 @@ def _view_briefing() -> None:
                         f"<span style='color:{ui.AMBER};font-weight:600'>{html.escape(str(row.tickers))}</span>  "
                         f"<span style='color:{ui.MUTED};font-size:0.70rem'>{html.escape(str(row.when))} · "
                         f"{html.escape(str(row.source))}</span>", unsafe_allow_html=True)
-                    st.markdown(f"**[{row.title}]({row.url})**")
+                    st.markdown(ui.headline(row.title, row.url))
                     if row.summary:
                         st.caption(row.summary)
 
@@ -4700,14 +4724,20 @@ def _command_bar() -> None:
 
 # ---------------------------------------------------------------- HP: the price table
 def _sec_prices(c) -> None:
-    """HP: the stored bars as a table — daily, weekly or monthly — with the change."""
+    """HP: the stored bars as a table — daily, weekly or monthly — with the change, on
+    one basis (research.price_table; review 03.10.2026, F7)."""
     symbol = c.ticker
     bars = src.con.execute(
-        "SELECT date, open, high, low, COALESCE(close_raw, close) AS close, close_adj, "
-        "volume FROM prices WHERE ticker = ? ORDER BY date", [symbol]).fetch_df()
-    source = "stored closes"
+        "SELECT date, open, high, low, close, close_raw, close_adj, volume FROM prices "
+        "WHERE ticker = ? ORDER BY date", [symbol]).fetch_df()
+    source = "stored prices"
     if bars.empty:
-        bars = _yahoo_bars(symbol)
+        bars, err = ac.attempt(ac.yahoo_bars, symbol)
+        if err:
+            st.warning(f"{symbol} is not stored, and Yahoo could not be reached for its "
+                       f"prices ({err}). Try again in a moment.")
+            return
+        bars = bars if bars is not None else pd.DataFrame()
         source = "Yahoo, not stored"
     if bars.empty:
         st.info(f"No price history for {symbol}.")
@@ -4715,29 +4745,29 @@ def _sec_prices(c) -> None:
     p1, p2 = st.columns([1, 1])
     every = p1.segmented_control("Every", ["day", "week", "month"], default="day",
                                  key="hp_every") or "day"
-    span = p2.segmented_control("Last", ["1M", "3M", "1Y", "5Y"], default="3M",
+    span = p2.segmented_control("Last", list(rs.PRICE_TABLE_SPANS), default="3M",
                                 key="hp_span") or "3M"
-    frame = bars.assign(date=pd.to_datetime(bars["date"])).set_index("date")
-    if every != "day":
-        rule = {"week": "W-FRI", "month": "ME"}[every]
-        frame = frame.resample(rule).agg({"open": "first", "high": "max", "low": "min",
-                                          "close": "last", "close_adj": "last",
-                                          "volume": "sum"}).dropna(subset=["close"])
-    since = frame.index[-1] - pd.Timedelta(days={"1M": 31, "3M": 92, "1Y": 366,
-                                                 "5Y": 1827}[span])
-    frame["change"] = frame["close_adj"].pct_change()
-    view = frame[frame.index > since].sort_index(ascending=False)
-    st.markdown(ui.grid(pd.DataFrame({
+    view = rs.price_table(bars, every, span)
+    table = {
         "date": view.index.strftime("%Y-%m-%d"),
         "open": view["open"].map(ui.num), "high": view["high"].map(ui.num),
         "low": view["low"].map(ui.num), "close": view["close"].map(ui.num),
-        "change": view["change"].map(lambda v: ui.pct(v, 2)),
-        "volume": view["volume"].map(lambda v: "—" if pd.isna(v) else f"{v:,.0f}"),
-    }), numeric={"open", "high", "low", "close", "volume"}, signed={"change"},
-        ticker_col="date"), unsafe_allow_html=True)
-    st.caption(f"{len(view)} rows from the {source}, newest first. Close as traded; "
-               "the change is on the close adjusted for splits and dividends, so an ex-"
-               "dividend day does not show as a fall.")
+    }
+    if "traded" in view:
+        table["close as traded"] = view["traded"].map(ui.num)
+    table["change"] = view["change"].map(lambda v: ui.pct(v, 2))
+    table["volume"] = view["volume"].map(lambda v: "—" if pd.isna(v) else f"{v:,.0f}")
+    st.markdown(ui.grid(pd.DataFrame(table),
+                        numeric={"open", "high", "low", "close", "close as traded",
+                                 "volume"}, signed={"change"}, ticker_col="date"),
+                unsafe_allow_html=True)
+    traded = ("'close as traded' is the price as it printed that day, before any later "
+              "split. " if "traded" in view else
+              "Yahoo's bars carry no close as traded, so none is shown. ")
+    st.caption(f"{len(view)} rows from the {source}, newest first. Open, high, low and "
+               "close are adjusted for splits and dividends, so the rows compare with "
+               f"each other and the change does not show an ex-dividend day as a fall. "
+               + traded)
 
 
 # ---------------------------------------------------------------------- the six tabs

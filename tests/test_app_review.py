@@ -163,6 +163,50 @@ def test_presets_ask_before_replacing_saved_legs(monkeypatch, fresh):
     assert "preset_0" not in _keys_outside_popovers(at)
 
 
+def test_the_price_table_shows_the_traded_close_apart(monkeypatch, fresh):
+    """F7, wired: HP labels the traded close as its own column."""
+    at = run(monkeypatch, fresh, state={command.HISTORY_KEY: ["AAA"], "cmd_focus": "HP",
+                                        layout.MAIN_KEY: layout.SECURITY})
+    assert not at.exception, at.exception
+    shown = texts(at)
+    assert "close as traded" in shown and "adjusted for splits and dividends" in shown
+
+
+def test_the_map_layer_and_the_rule_inputs_survive_another_tab(monkeypatch, fresh):
+    """F12e: a lazy tab is not drawn, and Streamlit drops an undrawn widget's state —
+    the map came back on SHIPS and the rule on the basket after any other tab."""
+    import datetime as dt
+
+    def on(tab):
+        # AppTest sends the tab row's last drawn value with every run; say it each time.
+        at.session_state[layout.MAIN_KEY] = tab
+        at.session_state[layout.section_key(layout.SCREEN)] = "RULE"
+        return at
+
+    def find(kind, label):
+        return next(w for w in getattr(at, kind) if w.label == label)
+
+    at = run(monkeypatch, fresh, state={layout.MAIN_KEY: layout.WORLD})
+    assert not at.exception, at.exception
+    find("radio", "Layer").set_value("PORT CARGO")
+    on(layout.WORLD).run()
+    on(layout.SCREEN).run()
+    find("radio", "Test the rule on").set_value("Single stock")
+    on(layout.SCREEN).run()
+    find("text_input", "Ticker").input("AAA")
+    on(layout.SCREEN).run()
+    find("date_input", "From").set_value(dt.date(2015, 6, 1))
+    on(layout.SCREEN).run()
+    on(layout.MARKETS).run()
+    on(layout.SCREEN).run()
+    assert find("radio", "Test the rule on").value == "Single stock"
+    assert find("text_input", "Ticker").value == "AAA"
+    assert find("date_input", "From").value == dt.date(2015, 6, 1)
+    on(layout.WORLD).run()
+    assert not at.exception, at.exception
+    assert find("radio", "Layer").value == "PORT CARGO"
+
+
 def _blocks(node, inside=False):
     """(node, inside a popover?) for every element under `node`."""
     here = inside or getattr(node, "type", None) == "popover"

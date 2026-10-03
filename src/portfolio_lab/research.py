@@ -78,6 +78,45 @@ def price_history(
     ).fetch_df()
 
 
+PRICE_TABLE_SPANS = {"1M": 31, "3M": 92, "1Y": 366, "5Y": 1827}
+
+
+def price_table(bars: pd.DataFrame, every: str = "day", span: str = "3M") -> pd.DataFrame:
+    """HP: bars as a table on ONE basis, newest first.
+
+    open, high, low and close are all adjusted for splits and dividends (the stored
+    open/high/low are on the split-adjusted basis of `close`, so each is scaled by
+    close_adj / close). `traded` is the close as it printed that day (close_raw),
+    kept as its own column; Yahoo's bars have no such column and get none. Until the
+    review of 03.10.2026 the table put the traded close next to split-adjusted
+    open/high/low — AAPL on 2020-08-28 read high 124, close 499 (F7). `change` is
+    the move of the adjusted close, so an ex-dividend day does not show as a fall.
+    `every` is day, week or month; `span` one of PRICE_TABLE_SPANS.
+    """
+    if bars.empty:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "change", "volume"])
+    frame = bars.assign(date=pd.to_datetime(bars["date"])).set_index("date").sort_index()
+    close = frame["close"].astype(float)
+    adj = frame["close_adj"].astype(float) if "close_adj" in frame else close
+    adj = adj.where(adj.notna(), close)
+    factor = adj / close.where(close != 0)
+    out = pd.DataFrame({"open": frame["open"] * factor, "high": frame["high"] * factor,
+                        "low": frame["low"] * factor, "close": adj,
+                        "volume": frame["volume"] if "volume" in frame else np.nan},
+                       index=frame.index)
+    if "close_raw" in frame and frame["close_raw"].notna().any():
+        out["traded"] = frame["close_raw"].astype(float)
+    if every != "day":
+        rule = {"week": "W-FRI", "month": "ME"}[every]
+        how = {"open": "first", "high": "max", "low": "min", "close": "last",
+               "volume": "sum", "traded": "last"}
+        out = out.resample(rule).agg({c: how[c] for c in out.columns}).dropna(
+            subset=["close"])
+    out["change"] = out["close"].pct_change()
+    since = out.index[-1] - pd.Timedelta(days=PRICE_TABLE_SPANS[span])
+    return out[out.index > since].sort_index(ascending=False)
+
+
 def bollinger(
     px: pd.DataFrame,
     window: int = 20,

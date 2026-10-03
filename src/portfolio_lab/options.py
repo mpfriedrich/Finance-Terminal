@@ -821,3 +821,18 @@ def percentile(value: float, cross_section: pd.Series) -> float | None:
     if len(s) < 20 or value is None:
         return None
     return float((s <= value).mean())
+
+
+def snapshot_stamp(folder) -> tuple[str, int] | None:
+    """(name, modification time in ns) of the newest daily snapshot in `folder`, or None.
+
+    The app's cache of the snapshot is keyed by this. Keyed by the day alone it served
+    the morning's answer for an hour after scripts/snapshot_options.py had written a new
+    file, or the first snapshot of a fresh install (review 03.10.2026, F12g)."""
+    from pathlib import Path
+
+    folder = Path(folder)
+    files = sorted(folder.glob("*.parquet")) if folder.exists() else []
+    if not files:
+        return None
+    return files[-1].name, files[-1].stat().st_mtime_ns

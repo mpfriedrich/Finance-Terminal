@@ -291,6 +291,26 @@ def markdown_text(text: str) -> str:
     return html.escape(str(text or ""), quote=False)
 
 
+_MD_LINK_TEXT = str.maketrans({"[": "\\[", "]": "\\]", "*": "\\*", "_": "\\_",
+                               "`": "\\`"})
+
+
+def headline(title, url) -> str:
+    """A fetched headline as bold Markdown: the title escaped, linked only when the
+    address is http(s). The news section put title and URL straight into
+    unsafe_allow_html (review 03.10.2026, F8): a tag in a headline ran, and a
+    `javascript:` link was one click away. Characters that would end the link are
+    percent-encoded."""
+    text = markdown_text(title).translate(_MD_LINK_TEXT) or "(untitled)"
+    link = str(url or "").strip()
+    if not re.match(r"^https?://[^\s]+$", link, flags=re.IGNORECASE):
+        return f"**{text}**"
+    for ch, code in (("(", "%28"), (")", "%29"), ("<", "%3C"), (">", "%3E"),
+                     ('"', "%22"), ("'", "%27")):
+        link = link.replace(ch, code)
+    return f"**[{text}]({link})**"
+
+
 def error_text(exc: BaseException, limit: int = 160) -> str:
     """What an error may show on screen: its type and message, with every URL and
     anything shaped like `key=value` for a credential cut out (R24). A connection error

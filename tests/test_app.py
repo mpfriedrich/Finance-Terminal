@@ -146,8 +146,11 @@ def test_the_watchlist_feeds_the_calendar(monkeypatch, fresh):
     assert not any("AAPL" in v for v in values)
 
 
-def test_one_set_of_intrinsic_value_assumptions(monkeypatch, fresh):
-    """The DCF started at 3 % growth while the screen assumed 0 %: two answers."""
+def test_the_dcf_grows_cash_flow_on_its_own_assumption(monkeypatch, fresh):
+    """Review 03.10.2026, F13 (the user's decision): the DCF's growth in the forecast
+    years starts at 3 % again, as its own input, and is NOT the screen's earnings growth
+    (0 %); the two are labelled apart. Growth forever still starts at the screen's.
+    (02.10.2026 had tied both to the screen, so the DCF started at 0 %.)"""
     from portfolio_lab import command
 
     at = run(monkeypatch, fresh, state={
@@ -155,9 +158,16 @@ def test_one_set_of_intrinsic_value_assumptions(monkeypatch, fresh):
         layout.MAIN_KEY: layout.SECURITY,
         layout.section_key(layout.SECURITY): "VALUATION"})
     assert not at.exception, at.exception
-    growth = [n.value for n in at.number_input if n.key and n.key.startswith("g_")]
+    growth = [n for n in at.number_input if n.key and n.key.startswith("g_")]
     forever = [n.value for n in at.number_input if n.key and n.key.startswith("tg_")]
-    assert growth == [5.0] and forever == [1.5]
+    assert [n.value for n in growth] == [3.0] and forever == [1.5]
+    assert growth[0].label == "DCF: cash-flow growth in the forecast period, %/yr"
+    assert "deliberately separate" in texts(at)
+    at.session_state[layout.MAIN_KEY] = layout.SCREEN
+    at.session_state[layout.section_key(layout.SCREEN)] = "SCREEN"
+    at.run()
+    assert "Screen: earnings growth for intrinsic value, % a year" in [
+        s.label for s in at.slider]
 
 
 def test_deleting_a_portfolio_asks_first(monkeypatch, fresh):
