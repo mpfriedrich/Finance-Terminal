@@ -43,6 +43,28 @@ survivors, and the label on every chart says so.
 | **Lab** | Describe a trading rule in words — moving-average cross, momentum, mean reversion, stops, position sizing — and test it on the basket you hold. |
 | **Tracking** | Freeze today's selection and follow it forward against the index. The only measurement here with no survivorship, no look-ahead and no fitting — it just needs time to pass. |
 
+### Six tabs and a command line
+
+The line at the top takes a security, a function, or both, the way a Bloomberg keyboard
+does, and Enter (or GO) runs it. One security is "loaded" at a time; every field that
+asks for one ticker starts at it. ◀ BACK returns to the previous one (ten are kept), and
+the **Functions** list under the line shows every code.
+
+| Tab | Holds | Codes |
+|---|---|---|
+| SECURITY | overview and price table, financials and dividends, valuation (comps, WACC, DCF, precedent deals), options (analysis and position builder), exposure (commodities, rates, event study, 10-K counterparties), analysts, ownership, news and filings | DES GP HP FA ERN DVD RV COMP WACC DCF MA OMON OVDV SKEW HRA SPLC ANR INS HDS CN CF |
+| SCREEN & BACKTEST | the chat screen with its filters, stage B and A backtests, a rule (LAB), savings plans | EQS BTST |
+| PORTFOLIOS | paper books with their risk, live tracking, watchlist and alerts, holdings against commodities | PORT ALRT |
+| MARKETS & MACRO | boards (indices, currencies, rates, commodities incl. wheat and corn, crypto), compare anything, the economy (FRED), the curve and fed funds | WEI GLCO CORR ECST GC WIRP |
+| WORLD & LOGISTICS | ships, ports and aircraft on one map | BMAP |
+| EVENTS & NEWS | daily briefing, earnings calendar, full-text search of SEC filings | TOP EVTS |
+
+Examples: `AAPL US FA`, `SAP GR DES` (the Xetra line in the world store), `7203 JT GP`,
+`SPX INDEX GP`, `GC=F HP`, `newmont`, `EQS`, `MA`, `WEI`. Canada is `RY CAN` (`CN` is
+the news function). A link opens a command directly:
+`http://localhost:8501/?cmd=AAPL%20FA`. The sidebar (» top left) holds the portfolios,
+the watchlist and the dollar/gold switch; it starts closed.
+
 ## Data
 
 * **Fundamentals:** the SEC's XBRL bulk files. 6.1 million facts, every one carrying its
@@ -92,8 +114,8 @@ and stores one aircraft count per run. The live aircraft map comes from the Open
 Network (non-commercial use, attribution shown in the app).
 
 Live single ships (optional): sign in with GitHub at https://aisstream.io/account,
-create a key and add `AISSTREAM_API_KEY=...` to `.env.local`. In COMMODITIES, pick
-"ships live", a region, and press Listen.
+create a key and add `AISSTREAM_API_KEY=...` to `.env.local`. In WORLD & LOGISTICS,
+pick the LIVE AIS layer, a region, and press Listen.
 
 Then:
 
@@ -200,7 +222,7 @@ build prints — per country, and the number of US listings that ended.
 
 ## Options snapshots (optional)
 
-The OPTIONS section of RESEARCH shows the put-call volatility spread, a signal that held
+The OPTIONS section of SECURITY shows the put-call volatility spread, a signal that held
 up in published data but has not been tested on this app's own data. Yahoo only serves
 today's option chain, so the only way to test it later is to record it every day:
 

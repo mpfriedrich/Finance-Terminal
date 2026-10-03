@@ -1413,6 +1413,92 @@ ohne den `_clean()`-Fix der Schiffs-Sitzung sind Ketten vor der US-Eröffnung of
 geprüft wurde die Anzeige mit diesem Fix vorübergehend eingespielt (AAPL: 27 Strikes,
 Spread zwischen 28 und 35 Tagen interpoliert), danach wieder entfernt.
 
+## Audit Bloomberg-Annäherung 02.10.2026 (lokale Sitzung, Branch `claude/bloomberg-ux`)
+
+**Auftrag:** UX- und Tempo-Audit des ganzen Terminals (drei Lese-Agenten auf
+`main@b1cbaa4`), danach umgesetzt in einem eigenen Worktree. Entscheidung des Nutzers:
+Stufe 1 (Fehler und Tempo) **und** Stufe 2 (Kommandozeile, globaler Wertpapier-Kontext,
+13 → 6 Tabs). COMMODITIES entfällt.
+
+**Bestand vorher:** 13 Tabs (SCREEN MONITOR RESEARCH OPTIONS STRATEGY LAB BOOKS DEALS
+MACRO COMMODITIES MAP CALENDAR NEWS), alle bei jedem Klick vollständig ausgeführt, mit
+ihren Netzaufrufen; RESEARCH mit 10 Unterreitern, ebenfalls alle ausgeführt; drei
+fest verdrahtete AAPL-Vorgaben; Screen-Filter in der Seitenleiste.
+
+**Doppelungen (Matrix, gekürzt) und was daraus wurde:**
+
+| Doppelt | vorher | jetzt |
+|---|---|---|
+| Rendite-/Risiko-Zeile (1M … MAX DD, BETA) | 5× in 3 Varianten, Beschriftung uneinheitlich | `_risk_cells` |
+| Backtest-Ergebnisblock (Kopfzeile, Kurve, R9-Tabelle) | Stufe B, Stufe A, LAB je eigene Kopie | `_result_block` |
+| Korrelations-Heatmap | Risiko je Buch, Compare | `_corr_heatmap` |
+| „Bewegt sich mit“ (commodity_sensitivity) | 3× (RESEARCH, Preis-Symbole, COMMODITIES) | `_links_table` + `_commodity_links` (gecacht) |
+| Rohstoff-Board | MONITOR und COMMODITIES | nur MARKETS & MACRO → BOARDS, Weizen und Mais ergänzt |
+| Zinssatz | DCF las `^TNX` selbst, OPTIONS/Builder `current_risk_free`, je eigener Weg | `_risk_free_now`: kurzer Satz (13-Wochen-Bill) für Optionen, langer (10 Jahre) für die Kapitalkosten, beide mit Quelle beschriftet |
+| Einheit USD/Gold | Seitenleiste und eigener Schalter im MONITOR | nur Seitenleiste |
+| Papierbuch-Liste | in jedem Tab erneut bewertet | nur PORTFOLIOS → BOOKS; anderswo „Buch eröffnen“ |
+| Plotly-Layout | ~10 Kopien | `_layout` |
+
+**Neue Tabs:** SECURITY (OVERVIEW mit Preistabelle HP, FINANCIALS mit Dividenden und
+geschätztem nächstem Berichtstermin, VALUATION mit Präzedenzfällen aus DEALS, OPTIONS
+mit dem Positions-Builder, EXPOSURE mit Zins-Sensitivität, Ereignisstudie und den
+10-K-Gegenparteien, ANALYSTS, OWNERSHIP, NEWS & FILINGS) · SCREEN & BACKTEST (SCREEN,
+BACKTEST — Stufe B zuerst, RULE = alter LAB, SAVINGS PLAN = alte STRATEGY) · PORTFOLIOS
+(BOOKS, TRACKING, WATCHLIST & ALERTS, COMMODITY LINKS) · MARKETS & MACRO (BOARDS,
+COMPARE, ECONOMY, RATES) · WORLD & LOGISTICS (MAP unverändert) · EVENTS & NEWS
+(BRIEFING, CALENDAR, FILING SEARCH). Nichts Eigenes gestrichen: Stufe B mit Holdout und
+Sensitivität, Survivorship-Hinweise, 20-Tage-Risikospanne, Restatements,
+point-in-time-Präzedenzfälle — nur verschoben. Namen in `layout.py`.
+
+**Kommandozeile:** `command.py` (rein, ohne Streamlit; gebaut von einem parallelen Agenten
+auf `claude/bloomberg-command`, hier eingemergt; ein eigener Entwurf dieses Branches,
+Commit `e8345dc`, wurde dadurch ersetzt). `SYMBOL [MARKT] [YELLOW] [FUNKTION] [GO]`,
+Bloomberg-Börsencodes und ISO-3 (`SAP GR` = `SAP.DEU`), Yahoo-Suffix wird zuerst als
+Speicherzeile versucht (`SAP.DE` → `SAP.DEU`), Aliase (SPX, XAU, XBT …), Namenssuche
+ohne automatische Wahl, Verlauf von 10 mit ◀ BACK, Deep-Link `?cmd=`. Bekannte Eigenheit:
+`CN` ist die News-Funktion, Kanada heißt deshalb `RY CAN`. Funktionen ohne eigenen
+Abschnitt in `command.py` (EQS, BTST, WEI …) öffnen den Abschnitt aus
+`layout.SUB_SECTION`.
+
+**Stufe-1-Fehler, behoben (jeder mit Test, der auf `main@b1cbaa4` fehlschlägt):**
+1. Netzaufrufe ohne Cache bzw. mit gecachtem Fehlschlag (`_insider_trades` speicherte
+   „SEC nicht erreichbar“ 6 h, `_yahoo_bars` ein leeres Frame 1 h) → `appcache.py`:
+   Fehler werden geworfen, nie gespeichert, und als „unreachable“ angezeigt, getrennt von
+   „keine Daten“.
+2. Alle Tabs liefen bei jedem Klick (die Karte fragte OpenSky auch im SCREEN ab) → lazy.
+3. `submissions.zip` (1,56 GB) bei jedem Zugriff neu geöffnet, im Kalender je Ticker →
+   einmal je Dateiversion (`research.submission`).
+4. Kein Portfolio → `st.stop()`, alle Tabs weg; ein Fehler in einem Tab beendete die Seite
+   → jede Ansicht einzeln geschützt, Fehlermeldung ohne URLs (`ui.error_text`).
+5. OPTIONS-Builder bewertete gespeicherte Beine zum Kurs des *gerade getippten*
+   Basiswerts; ohne gespeicherten Kurs TypeError. Builder rechnete ohne Dividendenrendite.
+6. Excel-Exporte bei jedem Klick gebaut (~0,5 s je Knopf) → erst beim Klick, aus Daten im
+   Speicher (kein DB-Zugriff im fremden Thread).
+7. Nach einem Datei-Tausch (Neuaufbau bei offener App) blieben Marktliste, Branchen,
+   Survivorship-Text und Options-Snapshot bis zu 1 h alt. **Und gemessen:** DuckDB gibt
+   einem neuen `connect()` auf denselben Pfad die noch offene, *ersetzte* Datenbank — die
+   Tausch-Erkennung hat also nie die neue Datei gezeigt. Jetzt wird die alte Verbindung
+   geschlossen und alles Gecachte geleert.
+8. Briefing-Text des Modells (aus fremden Schlagzeilen) als rohes HTML gerendert → escaped;
+   ebenso Zitate aus dem 10-K und Quellenangaben der Nachrichten.
+9. Zwei Sätze Bewertungsannahmen (Seitenleiste 0 % Wachstum, DCF 3 %) → ein Satz, DCF
+   startet bei den Screen-Annahmen, Abzinsung mit WACC ausdrücklich beschriftet.
+10. Kalender und Rohstoff-Bezug ignorierten die Watchlist → `store.everything_followed()`.
+11. Portfolio löschen und Tracking verwerfen ohne Rückfrage → Bestätigung im Popover;
+    stabile Widget-Schlüssel; Datumsformat überall ISO.
+
+**Gemessen:** Testsuite 801 bestanden, 15 übersprungen (vorher ~700). Die App läuft
+headless (`AppTest`) in jedem Tab und Abschnitt auf Fixture-Daten ohne Fehler, mit
+gesperrtem Netz — dabei aufgefallen: yfinance läuft über curl_cffi und umgeht eine
+reine Socket-Sperre; die Test-Fixture sperrt jetzt auch yfinance und requests. Im
+Browser auf Port 8611 geprüft (Deep-Link `?cmd=AAA US FA`, `WEI`, `BTST`).
+
+**Nicht geprüft / offen:** nichts davon gegen die echten Daten auf dem Mac (Welt-Store,
+echtes `submissions.zip`, echte Optionsketten); Tempo nicht neu gemessen; die
+Fragmente (`st.fragment`) aus dem Audit sind nicht umgesetzt — Lazy-Tabs und Caches
+nehmen den größten Teil davon weg; CACS/MMAP/SEAG nicht gebaut; Telefonansicht der
+neuen Kommandozeile nicht geprüft.
+
 ## Geplant: Hebel und Derivate (vorgemerkt am 25.09.2026, noch nicht begonnen)
 
 Auf Frage des Nutzers („gibt es die Option für Derivate und Leverage?“) nur in den Plan

@@ -63,9 +63,16 @@ World store (WRDS): `build_wrds.py`. See section 7.
 ## 5. Map of the code
 
 ```
-app.py                      Streamlit UI, ~3.9k lines. Tabs: SCREEN MONITOR RESEARCH OPTIONS
-                            STRATEGY LAB BOOKS DEALS MACRO COMMODITIES CALENDAR NEWS
+app.py                      Streamlit UI, ~4.7k lines. Six tabs (layout.py): SECURITY,
+                            SCREEN & BACKTEST, PORTFOLIOS, MARKETS & MACRO, WORLD &
+                            LOGISTICS, EVENTS & NEWS, each with lazy sections; a command
+                            line on top (`AAPL US FA`, `?cmd=` links). Every view is a
+                            function run through `_guarded` (one failure stays local)
 src/portfolio_lab/
+  layout.py                 tab and section names; SUB_SECTION for non-security tabs
+  command.py                command line: parse -> resolve -> dispatch, history (pure)
+  appcache.py               EVERY network call of the app, cached; failures are raised,
+                            never cached; call sites use `ac.attempt()`
   config.py                 paths (MARKET_DB, PAID_DB, WORLD_DB, USER_DB), Settings, secret()
   data/schema.py            MARKET_MIGRATIONS / USER_MIGRATIONS: append-only, named by what
                             they create; open_market_for_rebuild + finish_rebuild (build on a
@@ -213,6 +220,14 @@ ticker; ended lines use their last CRSP ticker, with `-permno` appended on a col
   own branch while the other was working. A second session works in its own worktree:
   `git worktree add -b <branch> ../portfolio-lab-<name> origin/main`, then symlink
   `data` and `.env.local` into it (add `/data` to `.git/info/exclude`).
+- **Reopening a DuckDB file that was replaced while open returns the OLD file** as long
+  as the old connection is open in the process (measured 02.10.2026): `_market_source`
+  closes it before reopening. A test (`test_a_replaced_store_is_read_afresh`) covers it.
+- **yfinance does not use Python's socket module** (curl_cffi): blocking sockets in a
+  test does not block it. `tests/app_fixture.run()` patches yfinance and requests too.
+- App tests: `tests/app_fixture.py` runs the whole app headless on fixture stores
+  (AppTest), with config paths pointed at a temp dir. Widget state of a tab that is not
+  drawn is forgotten; persist settings with `_kept`/`_keep` in app.py.
 - In `app.py`, `listing` is a local variable name. Import `data.listing` names directly
   (`MARKET_NAMES`).
 - Every screening frame has `country`: the ISO-3 code of the market where the line
@@ -277,6 +292,11 @@ the gold toggle, memory-safe ingest, analyst tools 1–12, the pit-cache re-warm
 20-day risk range (volforecast.py), ship/aircraft data (PortWatch, OpenSky; port tonnes and freighters in PR #7) and euro
 unemployment from Eurostat. Forecast models tested and rejected: PLAN.md → „Geprüft und
 verworfen“.
+
+**On branch `claude/bloomberg-ux`, not merged yet:** the UX/speed audit and the
+Bloomberg restructuring of 02.10.2026 (PLAN.md → „Audit Bloomberg-Annäherung
+02.10.2026“): 13 tabs → 6, command line, appcache, lazy tabs, error isolation, the
+store-swap fix. Not yet run against the real stores on the Mac.
 
 **On branch `claude/audit-review`, not merged yet:** the whole-terminal audit of
 02.10.2026 (PLAN.md → „Audit 02.10.2026“): thread-safe DB access, last-year volatility,

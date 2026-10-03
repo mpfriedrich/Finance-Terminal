@@ -8,7 +8,6 @@ and is shown as "unreachable".
 """
 from __future__ import annotations
 
-import datetime as dt
 import shutil
 import socket
 from pathlib import Path
@@ -98,7 +97,3 @@ def texts(at: AppTest) -> str:
     for kind in ("markdown", "caption", "info", "warning", "error", "success"):
         parts += [str(e.value) for e in getattr(at, kind)]
     return "\n".join(parts)
-
-
-def today() -> dt.date:
-    return dt.date.today()

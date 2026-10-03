@@ -4445,8 +4445,8 @@ def _view_briefing() -> None:
     followed = store.everything_followed()
     if not followed:
         st.info(
-            "Nothing followed yet. Add names to the watchlist on the left, or track a "
-            "portfolio on the SCREEN tab — the briefing is written about what you hold "
+            "Nothing followed yet. Add names to the watchlist in the sidebar, or track a "
+            "portfolio in PORTFOLIOS → TRACKING — the briefing is written about what you hold "
             "and watch, not about the market in general."
         )
     else:
