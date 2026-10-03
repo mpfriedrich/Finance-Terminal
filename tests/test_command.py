@@ -160,7 +160,10 @@ def test_name_hits_are_narrowed_to_the_market(con):
 
 
 def test_nothing_found(con):
-    for text in ("ZZZZQ", "QQ"):           # QQ: too short for a name search
+    # Neither can be a US ticker (six letters; a digit), so Yahoo is not asked; Q1 is
+    # also too short for a name search. A ticker-shaped word such as ZZZZQ now goes to
+    # Yahoo instead (review F3), which then has prices or says it has none.
+    for text in ("ZZZZQX", "Q1"):
         res = resolve(con, parse(text))
         assert res == Resolution(None)
         action = dispatch(parse(text), res, "AAPL")
@@ -180,6 +183,55 @@ def test_world_store_line_from_the_compustat_fixture(tmp_path):
     assert resolve(world.con, parse("DMA GR FA")) == Resolution("DMA.DEU", source="store")
     assert resolve(world.con, parse("DMA.DE")).symbol == "DMA.DEU"
     assert resolve(world.con, parse("6701 JT")).symbol == "6701.JPN"
+
+
+@pytest.mark.parametrize("text, symbol", [
+    ("SPY", "SPY"), ("QQQ", "QQQ"), ("GLD", "GLD"), ("SPY US", "SPY"),
+    ("spy us gp", "SPY"), ("SPY EQUITY", "SPY"),
+    ("BRK.B", "BRK-B"),            # Yahoo writes share classes with a dash
+    ("GOOGL", "GOOGL"),            # five letters: no name matches, then Yahoo
+])
+def test_a_us_ticker_outside_the_store_is_a_yahoo_line(con, text, symbol):
+    """Review F3 (03.10.2026): ETFs are not in the store and gave "No security found"."""
+    p = parse(text)
+    res = resolve(con, p)
+    assert res == Resolution(symbol, source="yahoo")
+    a = dispatch(p, res, None)
+    assert a.symbol == symbol and a.message.endswith("is not in the store: prices only.")
+
+
+def test_the_us_fallback_never_overrides_the_store_or_a_name_word(con):
+    assert resolve(con, parse("AAPL")).source == "store"
+    assert resolve(con, parse("SPX")) == Resolution("SPX", source="store")
+    assert resolve(con, parse("BTC")) == Resolution("BTC-USD", source="alias")
+    assert resolve(con, parse("motor")).choices == ["7203.JPN", "F", "GM"]
+    assert resolve(con, parse("motor US")).choices == ["F", "GM"]
+    assert resolve(con, parse("BMW GR")) == Resolution("BMW.DE", source="yahoo")
+
+
+def test_a_bare_ticker_finds_its_only_compustat_line(con):
+    assert resolve(con, parse("7203")) == Resolution("7203.JPN", source="store")
+    assert resolve(con, parse("7203 US")) == Resolution(None)    # US: not the JPN line
+
+
+def test_a_bare_ticker_with_several_compustat_lines_is_choices(con):
+    con.executemany("INSERT INTO securities (cik, ticker, name) VALUES (?, ?, ?)",
+                    [(1_000_000_010, "VOW.DEU", "VOLKSWAGEN AG"),
+                     (1_000_000_011, "VOW.CHE", "VOLKSWAGEN AG (SIX)"),
+                     (6, "VOWX.B", "NOT A MARKET SUFFIX")])
+    res = resolve(con, parse("VOW"))
+    assert res.symbol is None and res.choices == ["VOW.CHE", "VOW.DEU"]
+    assert "Several matches" in dispatch(parse("VOW"), res, "AAPL").message
+    assert resolve(con, parse("VOW GR")) == Resolution("VOW.DEU", source="store")
+
+
+def test_a_bare_compustat_ticker_in_the_world_fixture(tmp_path):
+    from tests.wrds_fixture import build_store
+
+    world, _ = build_store(tmp_path)
+    assert resolve(world.con, parse("DMA")) == Resolution("DMA.DEU", source="store")
+    assert resolve(world.con, parse("DMA FA")).symbol == "DMA.DEU"
+    assert resolve(world.con, parse("6701")).symbol == "6701.JPN"
 
 
 # --- dispatch -------------------------------------------------------------------------

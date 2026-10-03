@@ -132,6 +132,14 @@ ALIASES: dict[str, str] = {
 _SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9.\-=^]*$|^\^[A-Z0-9.\-=]+$")
 _GO = {"GO", "<GO>"}
 NAME_SEARCH_MIN = 3  # shorter text matches half the store by name
+# A US ticker: one to five letters, optionally a share class (BRK.B, BRK-B). Review F3
+# (03.10.2026): SPY, QQQ and GLD are not in the store (ETFs) and gave "No security found".
+_US_TICKER = re.compile(r"^([A-Z]{1,5})(?:[.-]([A-Z]{1,2}))?$")
+# Up to this length a ticker-shaped word is taken as a ticker before any name search:
+# "SPY" by name finds SPYR INC, "FORD" finds FORD MOTOR CO although FORD is its own
+# symbol. Five letters are as often a word ("motor") as a ticker (GOOGL), so there the
+# store's names are asked first and Yahoo only when no name matches.
+TICKER_FIRST_MAX = 4
 MAX_CHOICES = 25
 HISTORY_KEY = "sec_history"
 HISTORY_MAX = 10
@@ -255,6 +263,32 @@ def _yahoo_fallback(parsed: Parsed) -> str | None:
     return None
 
 
+def _us_yahoo(parsed: Parsed) -> str | None:
+    """The Yahoo symbol of a US ticker the store does not hold (SPY, BRK.B -> BRK-B),
+    or None when the command names another market or the word is not ticker-shaped.
+    Yahoo writes share classes with a dash."""
+    if parsed.market not in (None, "USA"):
+        return None
+    m = _US_TICKER.match(parsed.symbol or "")
+    if not m:
+        return None
+    return f"{m.group(1)}-{m.group(2)}" if m.group(2) else m.group(1)
+
+
+def _compustat_lines(con, parsed: Parsed) -> list[str]:
+    """``TIC.ISO3`` store lines for a bare ticker without a market: DMA -> DMA.DEU in
+    the world store. Only suffixes that are markets count, so BRK does not match a
+    share class BRK.B."""
+    if parsed.market or "." in (parsed.symbol or ""):
+        return []
+    rows = con.execute(
+        "SELECT ticker FROM securities WHERE starts_with(ticker, ?) ORDER BY ticker",
+        [parsed.symbol + "."],
+    ).fetchall()
+    found = [r[0] for r in rows if r[0].rpartition(".")[2] in MARKETS_ISO3]
+    return list(dict.fromkeys(found))[:MAX_CHOICES]
+
+
 def _in_market(ticker: str, market: str | None) -> bool:
     if not market:
         return True
@@ -266,10 +300,12 @@ def _in_market(ticker: str, market: str | None) -> bool:
 def resolve(con, parsed: Parsed) -> Resolution:
     """Find the security the command means, against the ``securities`` table on `con`.
 
-    Order: store tickers from ``candidates``, then an alias, then a Yahoo symbol for a
-    non-US market, then a name search. Several name hits come back as ``choices`` and
-    are never picked automatically: guessing between two companies is how a screen
-    ends up showing the wrong one. `con` is used and not kept.
+    Order: store tickers from ``candidates``, then an alias, then the ``TIC.ISO3``
+    lines of a bare ticker (several are choices), then a Yahoo symbol for a non-US
+    market or a short US ticker, then a name search, then a longer US ticker on Yahoo.
+    Several name hits come back as ``choices`` and are never picked automatically:
+    guessing between two companies is how a screen ends up showing the wrong one.
+    `con` is used and not kept.
     """
     if parsed.error or not parsed.symbol:
         return Resolution(None)
@@ -282,22 +318,32 @@ def resolve(con, parsed: Parsed) -> Resolution:
             return Resolution(row[0], source="store")
     if parsed.symbol in ALIASES:
         return Resolution(ALIASES[parsed.symbol], source="alias")
+    lines = _compustat_lines(con, parsed)
+    if len(lines) == 1:
+        return Resolution(lines[0], source="store")
+    if lines:
+        return Resolution(None, choices=lines, source="store")
     fallback = _yahoo_fallback(parsed)
     if fallback:
         return Resolution(fallback, source="yahoo")
-    if len(parsed.symbol) < NAME_SEARCH_MIN:
-        return Resolution(None)
-    hits = [r[0] for r in con.execute(
-        "SELECT DISTINCT ticker FROM securities WHERE name ILIKE '%' || ? || '%' "
-        "ORDER BY ticker LIMIT ?",
-        [parsed.symbol, MAX_CHOICES],
-    ).fetchall()]
+    us = _us_yahoo(parsed)
+    if us and len(us.split("-")[0]) <= TICKER_FIRST_MAX:
+        return Resolution(us, source="yahoo")
+    hits = []
+    if len(parsed.symbol) >= NAME_SEARCH_MIN:
+        hits = [r[0] for r in con.execute(
+            "SELECT DISTINCT ticker FROM securities WHERE name ILIKE '%' || ? || '%' "
+            "ORDER BY ticker LIMIT ?",
+            [parsed.symbol, MAX_CHOICES],
+        ).fetchall()]
     local = [t for t in hits if _in_market(t, parsed.market)]
     hits = local or hits
     if len(hits) == 1:
         return Resolution(hits[0], source="name")
     if hits:
         return Resolution(None, choices=hits, source="name")
+    if us:
+        return Resolution(us, source="yahoo")
     return Resolution(None)
 
 
