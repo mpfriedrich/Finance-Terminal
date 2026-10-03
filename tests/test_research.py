@@ -146,3 +146,25 @@ def test_volatility_is_last_year_and_last_60_sessions_not_the_whole_history():
     out = rs.price_stats(c, "X")
     assert out["volatility"] == pytest.approx(0.03 * np.sqrt(252), rel=0.02)
     assert out["volatility_60d"] == pytest.approx(0.03 * np.sqrt(252), rel=0.02)
+
+
+def test_the_price_table_is_on_one_basis():
+    """F7: HP showed the traded close (499) next to split-adjusted open/high/low (124):
+    AAPL, 2020-08-28, the day before its 4-for-1 split. Hand-made bars in the store's
+    layout: close is split-adjusted, close_raw as traded, close_adj also net of
+    dividends (factor 0.96)."""
+    bars = pd.DataFrame({
+        "date": [D(2020, 8, 27), D(2020, 8, 28), D(2020, 8, 31)],
+        "open": [126.0, 126.0, 127.0], "high": [127.0, 128.0, 131.0],
+        "low": [125.0, 124.0, 126.0], "close": [125.0, 125.0, 129.0],
+        "close_raw": [500.0, 500.0, 129.0], "close_adj": [120.0, 120.0, 123.84],
+        "volume": [1e6, 1e6, 2e6]})
+    view = rs.price_table(bars, "day", "1M")
+    day = view.loc[pd.Timestamp("2020-08-28")]
+    assert day.high == pytest.approx(128 * 0.96) and day.close == pytest.approx(120.0)
+    assert day.high >= day.close >= day.low
+    assert day.traded == 500.0                        # the close as it printed
+    assert view.loc[pd.Timestamp("2020-08-31")].change == pytest.approx(123.84 / 120 - 1)
+    assert list(view.index) == sorted(view.index, reverse=True)
+    # Yahoo's bars have no traded close: no column is made up for them.
+    assert "traded" not in rs.price_table(bars.drop(columns="close_raw"), "week", "1M")

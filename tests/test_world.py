@@ -79,7 +79,21 @@ def test_a_yahoo_ticker_comes_back_with_an_adjusted_open():
 
 
 def test_an_unknown_yahoo_ticker_is_empty():
-    assert world.fetch_history("NOPE", downloader=lambda *a: pd.DataFrame()).empty
+    asked = []
+    bars = world.fetch_history("NOPE", downloader=lambda *a: pd.DataFrame(),
+                               probe=asked.append)            # Yahoo answered
+    assert bars.empty and asked == ["NOPE"]
+
+
+def test_an_empty_download_from_an_unreachable_yahoo_raises():
+    """yf.download returns an empty frame on a network failure too (review F6)."""
+    from portfolio_lab.data.prices import YahooUnreachable
+
+    def down(symbol):
+        raise YahooUnreachable("Yahoo could not be reached (ConnectError)")
+
+    with pytest.raises(YahooUnreachable):
+        world.fetch_history("SPY", downloader=lambda *a: pd.DataFrame(), probe=down)
 
 
 def test_stats_from_bars_alone():

@@ -36,6 +36,48 @@ import pandas as pd
 BENCHMARK_CANDIDATES = ("^SP500TR", "SPY")
 
 
+class YahooUnreachable(ConnectionError):
+    """Yahoo did not answer: no connection, a timeout, a rate limit or a server error.
+
+    Raised so that a cache wrapper does not store the failure as "no data" (review F6,
+    03.10.2026). A ConnectionError, so `except ConnectionError` catches it too."""
+
+
+def yahoo_answers(symbol: str, timeout: float = 10) -> None:
+    """Return when Yahoo's chart endpoint answers for `symbol`; raise YahooUnreachable
+    when it does not.
+
+    Why a separate request: yfinance 1.7 never raises on a failed download. With its
+    default `debug.hide_exceptions = True` a dropped connection during the timezone
+    lookup is logged and turned into "possibly delisted; no timezone found" — the very
+    same soft error an unknown symbol gets — and `download()` keeps that in a per-call
+    context it does not return (`multi._DownloadCtx`; `shared._ERRORS` is no longer
+    filled). `Ticker.dividends` is None in both cases. So the result of yfinance alone
+    cannot tell "unreachable" from "no such symbol"; this probe can, at the cost of one
+    small request that is only made after an empty answer.
+
+    What counts as an answer: any HTTP status below 500 except 429 — 404 is Yahoo
+    saying it has no such symbol, 200 a symbol that exists. What cannot be told apart:
+    Yahoo failing for the download and recovering a moment later for the probe reads as
+    "no data" (one cached empty answer, for the cache's lifetime); and a symbol Yahoo
+    knows but serves no bars for in the window reads as "no data", which it is.
+
+    The message names the error type only, never the address (R24).
+    """
+    try:
+        from yfinance.const import _BASE_URL_
+        from yfinance.data import YfData
+
+        response = YfData().get(f"{_BASE_URL_}/v8/finance/chart/{symbol}",
+                                params={"range": "5d", "interval": "1d"}, timeout=timeout)
+        status = int(response.status_code)
+    except Exception as exc:                                        # noqa: BLE001
+        raise YahooUnreachable(f"Yahoo could not be reached ({type(exc).__name__})") \
+            from None
+    if status >= 500 or status == 429:
+        raise YahooUnreachable(f"Yahoo could not be reached (HTTP {status})")
+
+
 def _download(tickers: list[str], start: dt.date, end: dt.date) -> pd.DataFrame:
     import yfinance as yf
 

@@ -11,9 +11,11 @@ what came out — including what it had to leave out.
 from __future__ import annotations
 
 import datetime as dt
+import html
 import sys
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 
 # A Streamlit app is served, not executed. Pressing VS Code's plain "Run Python File"
 # button runs `python app.py`, which either fails on a missing dependency (wrong
@@ -39,9 +41,14 @@ if not st.runtime.exists():
         "In VS Code: Run and Debug -> 'Portfolio Lab (app)', or press Shift-Cmd-B.\n"
     )
 
+import plotly.graph_objects as go
+
 from portfolio_lab import charts, ui
-from portfolio_lab.config import ALERTS_STATE, CACHE_DIR, USER_DB, CostModel, Settings, secret
-from portfolio_lab.data import history as hist, industry
+from portfolio_lab import appcache as ac
+from portfolio_lab import command, layout
+from portfolio_lab import config as cfg
+from portfolio_lab.config import CostModel, Settings, secret
+from portfolio_lab.data import history as data_history, industry
 from portfolio_lab.data.listing import COUNTRIES as MARKET_NAMES
 from portfolio_lab.data.paid import MissingKey
 from portfolio_lab.data.schema import open_user
@@ -54,7 +61,7 @@ from portfolio_lab.screen.valuation import Assumptions, add_valuation
 
 from portfolio_lab import backtest as bktest
 from portfolio_lab import holdout
-from portfolio_lab import sensitivity as sens
+from portfolio_lab import sensitivity
 from portfolio_lab import stage_b as bstage
 from portfolio_lab.pit_cache import FrameCache
 from portfolio_lab import coverage as cov
@@ -78,23 +85,31 @@ from portfolio_lab import wacc as W
 from portfolio_lab import summary as ai_summary
 from portfolio_lab import volforecast as vfc
 
-st.set_page_config(page_title="Portfolio Lab", page_icon="◫", layout="wide")
+# The sidebar starts closed: it holds the portfolio list, the watchlist and the unit,
+# and the screen's filters moved into SCREEN (02.10.2026). » at the top left opens it.
+st.set_page_config(page_title="Portfolio Lab", page_icon="◫", layout="wide",
+                   initial_sidebar_state="collapsed")
 st.markdown(ui.CSS, unsafe_allow_html=True)
+
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 # Streamlit re-runs this file on every interaction; cached resources survive that, so the
-# database connections are opened once per session instead of once per click.
+# database connections are opened once per session instead of once per click. The paths
+# are read from `config` at call time (not bound at import), so a test can point the app
+# at a store built from fixtures.
 @st.cache_resource
 def _market():
     # Read-only: the app never writes market data, and holding the write lock would stop
     # every build script from running while the app is open.
     # Which store is opened is a setting (Phase 10): the free one by default, the paid
     # Sharadar store with PORTFOLIO_LAB_SOURCE=paid.
-    source, path = open_selected(Settings(), read_only=True)
+    source, path = open_selected(Settings(), read_only=True, market_db=cfg.MARKET_DB,
+                                 paid_db=cfg.PAID_DB, world_db=cfg.WORLD_DB)
     return source, path, path.stat().st_ino
 
 
-def _market_source():
+def _market_source(rerun: bool = True):
     """The market connection, reopened if the file underneath it was replaced.
 
     A price rebuild that ran while this app was open swaps a freshly built file into
@@ -102,13 +117,29 @@ def _market_source():
     follows the inode, not the name — so without this check the app would show yesterday
     prices indefinitely and give no sign that anything had changed. Comparing the inode
     is how you notice a file was replaced rather than edited.
+
+    Every cached answer was computed from the old file, so all of them go, not just the
+    screening frame: until 02.10.2026 the market list, the industry vocabulary, the
+    survivorship verdict and the options snapshot stayed stale for up to an hour.
     """
     source, path, opened_inode = _market()
     try:
         if path.stat().st_ino != opened_inode:
+            # Close the old connection first. DuckDB hands a new connect() to the same
+            # path the database that is still open in this process, i.e. the REPLACED
+            # file: measured 02.10.2026, the reopen saw the old rows until the old
+            # connection was closed. So the swap check never showed the new build.
+            source.con.close()
             _market.clear()
-            _frame.clear()
-            st.rerun()
+            st.cache_data.clear()
+            # In the body of the script the page may already show old figures, so it
+            # starts again. A widget callback runs before anything is drawn: there the
+            # store is just reopened. st.rerun() inside the command line's callback
+            # threw the command away, so the first command after every price build did
+            # nothing (review 03.10.2026, F10).
+            if rerun:
+                st.rerun()
+            source = _market()[0]
     except OSError:
         pass  # Mid-swap. The next rerun will see the new file.
     return per_thread(source)
@@ -116,7 +147,7 @@ def _market_source():
 
 @st.cache_resource
 def _shared_store():
-    return Store(open_user(USER_DB))
+    return Store(open_user(cfg.USER_DB))
 
 
 def _store():
@@ -124,65 +155,98 @@ def _store():
     return per_thread(_shared_store())
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner=False)
-def _insider_trades(cik: int) -> pd.DataFrame | None:
-    """Form 4 trades from EDGAR; None when the SEC cannot be reached."""
+def _guarded(label: str, view, *args, **kwargs) -> None:
+    """Draw one view; if it fails, say so in its own place and carry on.
+
+    Before 02.10.2026 an exception (or the `st.stop()` for a missing portfolio) ended the
+    whole script, so a broken option chain or an empty store took every tab after it
+    down too. The message names the error type and text without addresses (R24)."""
     try:
-        return insiders.fetch(int(cik))
-    except Exception:                                                # noqa: BLE001
-        return None
+        view(*args, **kwargs)
+    except Exception as exc:                                        # noqa: BLE001
+        st.error(f"{label} could not be drawn — {ui.error_text(exc)}. "
+                 "The other views are unaffected.")
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def _yahoo_bars(symbol: str) -> pd.DataFrame:
-    """Five years of daily bars for any Yahoo ticker, held in memory, never stored:
-    a name typed into the research box is not part of the screen's universe."""
-    try:
-        return world.fetch_history(symbol)
-    except Exception:                                                # noqa: BLE001
-        return pd.DataFrame()
+def _keep(name: str, default):
+    """The persisted value of a setting whose widget may not be drawn on this run.
+
+    Tabs render lazily, and Streamlit forgets a widget's state when it is not drawn. So
+    a widget writes its value to its own session key through `_kept` and is seeded from
+    it again, and every reader asks `_keep` rather than the widget."""
+    return st.session_state.get(name, default)
+
+
+def _persist(name: str) -> None:
+    st.session_state[name] = st.session_state[f"w_{name}"]
+
+
+def _kept(name: str, default, field: str = "value") -> dict:
+    """Keyword arguments that tie a widget to the persisted setting `name`.
+
+    The seed value is passed only when the widget has no state of its own yet; passing
+    it as well makes Streamlit warn that the value was set twice."""
+    kwargs = {"key": f"w_{name}", "on_change": _persist, "args": (name,)}
+    if f"w_{name}" not in st.session_state:
+        kwargs[field] = _keep(name, default)
+    return kwargs
+
+
+def _kept_choice(name: str, options: list, default) -> dict:
+    """_kept for a radio, which is seeded with an index rather than a value."""
+    kwargs = _kept(name, default)
+    if "value" in kwargs:
+        value = kwargs.pop("value")
+        kwargs["index"] = options.index(value if value in options else default)
+    return kwargs
 
 
 @st.cache_data(ttl=600)
-def _frame(asof: dt.date) -> pd.DataFrame:
+def _frame(asof: dt.date, key: str) -> pd.DataFrame:
+    del key
     return _market_source().screening_frame(asof)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _option_snapshot() -> pd.DataFrame | None:
+def _option_snapshot(day: dt.date, stamp: tuple | None) -> pd.DataFrame | None:
     """The newest daily options snapshot (scripts/snapshot_options.py), if it is at most
-    four days old; the cross-section the put-call spread is ranked against."""
-    folder = CACHE_DIR / "options"
+    four days old; the cross-section the put-call spread is ranked against. `stamp`
+    (op.snapshot_stamp) is part of the cache key, so a new file is read at once."""
+    del stamp
+    folder = cfg.CACHE_DIR / "options"
     files = sorted(folder.glob("*.parquet")) if folder.exists() else []
     if not files:
         return None
-    day = dt.date.fromisoformat(files[-1].stem)
-    if (dt.date.today() - day).days > 4:
+    taken = dt.date.fromisoformat(files[-1].stem)
+    if (day - taken).days > 4:
         return None
     frame = pd.read_parquet(files[-1])
-    frame.attrs["day"] = day
+    frame.attrs["day"] = taken
     return frame if frame.smile_slope.notna().sum() >= 20 else None
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def _price_stats(ticker: str, asof: dt.date) -> dict:
-    """research.price_stats once per ticker and data date. RESEARCH, the WACC beta and
+def _price_stats(ticker: str, asof: dt.date, key: str) -> dict:
+    """research.price_stats once per ticker and data build. RESEARCH, the WACC beta and
     OPTIONS each asked for it on every rerun, each time reading the full price history
-    and the benchmark again (audit 02.10.2026). `asof` is part of the key, so a price
-    update is never served from yesterday's entry."""
+    and the benchmark again (audit 02.10.2026). The build key is part of the cache key,
+    so a price update is never served from yesterday's entry."""
+    del asof, key
     return rs.price_stats(_market_source().con, ticker)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _vol_model(asof: dt.date) -> "vfc.Model | None":
+def _vol_model(asof: dt.date, key: str) -> "vfc.Model | None":
     """The pooled Log-HAR fit (volforecast.py) on data up to `asof`: ~1 s, once a day."""
+    del key
     return vfc.fit_from_store(_market_source().con, asof)
 
 
 @st.cache_data(ttl=3600)
-def _universe_verdict() -> str:
+def _universe_verdict(key: str) -> str:
     """What the historical universe actually is, from the last measurement (Phase 7) —
     or, on a source that holds ended listings (Sharadar, CRSP), that it holds them."""
+    del key
     source = _market_source()
     if getattr(source, "survivorship_free", False):
         ended = source.con.execute(
@@ -192,14 +256,14 @@ def _universe_verdict() -> str:
                 "trading, with their prices to the last day, so backtests are not run on "
                 "survivors only; where the data records what holders received at the end "
                 "(CRSP), that return is used instead of the assumed loss.")
-    return hist.universe_verdict(hist.stored_recovery(source.con))
+    return data_history.universe_verdict(data_history.stored_recovery(source.con))
 
 
 @st.cache_data(ttl=3600)
-def _markets() -> list[str]:
+def _markets(key: str) -> list[str]:
     """The markets the store holds lines in, USA first."""
-    con = _market_source().con
-    rows = con.execute(
+    del key
+    rows = _market_source().con.execute(
         "SELECT DISTINCT CASE WHEN cik BETWEEN 1000000000 AND 1999999999 "
         "THEN upper(exchange) ELSE 'USA' END FROM securities").fetchall()
     found = sorted({r[0] for r in rows if r[0]})
@@ -207,12 +271,109 @@ def _markets() -> list[str]:
 
 
 @st.cache_data(ttl=3600)
-def _sectors() -> list[str]:
+def _sectors(key: str) -> list[str]:
     """The real industry vocabulary, handed to the translator so it cannot invent one."""
+    del key
     return [r[0] for r in _market_source().con.execute(
         "SELECT sector FROM securities WHERE sector IS NOT NULL "
         "GROUP BY 1 ORDER BY COUNT(*) DESC"
     ).fetchall()]
+
+
+# Pure views of the store, cached per data build: the boards are read on every rerun of
+# their tab otherwise, each a scan over a year of prices (audit 02.10.2026).
+@st.cache_data(ttl=3600, show_spinner=False)
+def _monitor(unit_key: str, key: str) -> dict:
+    del key
+    return world.monitor(_market_source().con, unit=unit_key)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fred_board(key: str) -> pd.DataFrame:
+    del key
+    return fred.dashboard(_market_source().con)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _rates(key: str) -> tuple[pd.DataFrame, dict]:
+    del key
+    con = _market_source().con
+    return mc.rate_snapshot(con), mc.fed_funds_expectation(con)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _ship_boards(key: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    del key
+    con = _market_source().con
+    return shipping.dashboard(con), shipping.port_board(con)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _valued(book: dict, key: str) -> dict:
+    """paper.value_book per book and data build; a book is frozen once opened."""
+    del key
+    return paper.value_book(_market_source().con, _store().con, book)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _risk_measures(positions: pd.DataFrame, asof: dt.date, key: str) -> dict:
+    del key
+    return risk.measures(_market_source().con, positions, asof)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _commodity_links(ticker: str, key: str) -> pd.DataFrame:
+    """research.commodity_sensitivity, the one helper behind every 'moves with' table."""
+    del key
+    return rs.commodity_sensitivity(_market_source().con, ticker)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _risk_free_now(key: str) -> dict:
+    """Both rates the app uses, read once per build and labelled where they differ.
+
+    Options and the Sharpe ratios use the 13-week bill (the horizon of an option); the
+    cost of equity uses the 10-year yield (the horizon of a company). Before 02.10.2026
+    each section read its own and nothing said why they differed."""
+    del key
+    con = _market_source().con
+    short, short_src = mx.current_risk_free(con, Settings().risk_free_fallback)
+    tnx = con.execute(
+        "SELECT close, date FROM prices WHERE ticker = '^TNX' "
+        "AND close IS NOT NULL ORDER BY date DESC LIMIT 1").fetchone()
+    long_, long_src = ((tnx[0] / 100.0, f"US 10-year yield (^TNX) of {tnx[1]}") if tnx
+                       else (short, short_src + "; no 10-year yield stored"))
+    return {"short": short, "short_source": short_src,
+            "long": long_, "long_source": long_src}
+
+
+def _last_close(ticker: str) -> float | None:
+    """The newest stored close of `ticker` (exact match first, then any case)."""
+    con = _market_source().con
+    for sql in ("SELECT close FROM prices WHERE ticker = ? AND close IS NOT NULL "
+                "ORDER BY date DESC LIMIT 1",
+                "SELECT close FROM prices WHERE upper(ticker) = upper(?) "
+                "AND close IS NOT NULL ORDER BY date DESC LIMIT 1"):
+        row = con.execute(sql, [ticker]).fetchone()
+        if row and row[0] is not None:
+            return float(row[0])
+    return None
+
+
+def _spot(ticker: str) -> tuple[float | None, str]:
+    """The price an option view uses: the live quote, else the last stored close."""
+    quote, _ = ac.attempt(ac.live_quote, ticker)
+    if quote and quote.get("price"):
+        return float(quote["price"]), "live quote"
+    close = _last_close(ticker)
+    if close:
+        return close, "last stored close"
+    # A symbol outside the store (SPY, QQQ): Yahoo's last daily close, so the position
+    # builder works on it too (review 03.10.2026, F2).
+    bars, _ = ac.attempt(ac.yahoo_bars, ticker.upper())
+    if bars is not None and not bars.empty and pd.notna(bars["close"].iloc[-1]):
+        return float(bars["close"].iloc[-1]), f"Yahoo close of {bars['date'].iloc[-1]}"
+    return None, ""
 
 
 # Size bands in billions. "Any" leaves the screen alone; the rest write a filter that
@@ -227,6 +388,35 @@ CAP_BANDS = {
     "Mega (> $200bn)": (200.0, 0.0),
 }
 
+
+def _band_changed() -> None:
+    """Choosing a size band writes its bounds into the two number fields; typing a bound
+    afterwards refines it. Before, the fields had no key and the band reset them on
+    every rerun without saying so."""
+    _persist("band")
+    lo_b, hi_b = CAP_BANDS[st.session_state["band"]]
+    st.session_state["cap_min"] = st.session_state["w_cap_min"] = float(lo_b)
+    st.session_state["cap_max"] = st.session_state["w_cap_max"] = float(hi_b)
+
+
+def _assumptions() -> Assumptions:
+    """The screen's intrinsic-value assumptions: the P/IV column of the screen and the
+    price/intrinsic line of a company's overview read these, and the DCF starts its
+    growth forever here. The DCF's growth in the forecast years is its own input with
+    its own default (3 %), deliberately: the screen grows EARNINGS from 0 % so it ranks
+    on what is there, the DCF grows CASH FLOW over a few named years (the user's
+    decision of 03.10.2026, review F13; for one day both started at 0 %)."""
+    return Assumptions(discount_rate=_keep("iv_disc", 10) / 100,
+                       growth_rate=_keep("iv_grow", 0) / 100,
+                       terminal_growth=_keep("iv_term", 2.0) / 100)
+
+
+def _filters() -> tuple[float, float, list[str], list[str]]:
+    """(min $bn, max $bn, industry groups, markets) from the screen filters."""
+    return (float(_keep("cap_min", 0.0)), float(_keep("cap_max", 0.0)),
+            list(_keep("groups", [])), list(_keep("markets", [])))
+
+
 try:
     src = _market_source()
 except (MissingKey, SourceNotReady) as exc:
@@ -236,7 +426,13 @@ except (MissingKey, SourceNotReady) as exc:
 store, settings = _store(), Settings()
 asof = src.latest_equity_date()
 age = (dt.date.today() - asof).days if asof else None
-counts = src.snapshot().row_counts
+# Read once per run. It was computed three to five times (the bar, stage B, the research
+# summary, LAB twice), each a count over every table.
+snapshot = src.snapshot()
+data_fp = snapshot.fingerprint()
+counts = snapshot.row_counts
+# The key every cached view of the store carries: a new build is a new key.
+DATA_KEY = f"{data_fp}|{asof}"
 
 st.markdown(
     ui.bar("PORTFOLIO LAB", {
@@ -271,9 +467,15 @@ with st.sidebar:
             except ValueError as exc:
                 st.error(str(exc))
 
-    if chosen and st.button("Delete portfolio", width="stretch"):
-        store.delete(chosen)
-        st.rerun()
+    if chosen:
+        # A popover: deleting takes the chat, the screen, the ticks and the tracking
+        # with it, and a single click next to "Create" did that without asking.
+        with st.popover("Delete portfolio", width="stretch"):
+            st.caption(f"Deletes '{names[chosen]}' with its screen, conversation and "
+                       "tracking. Paper books stay.")
+            if st.button("Delete for good", type="primary", key="delete_portfolio"):
+                store.delete(chosen)
+                st.rerun()
 
     st.markdown("#### Watchlist")
     wl = store.watchlist()
@@ -283,9 +485,10 @@ with st.sidebar:
         for row in wl.itertuples():
             wc1, wc2 = st.columns([4, 1])
             wc1.markdown(
-                f"<span style='color:{ui.AMBER};font-weight:600'>{row.ticker}</span>"
-                + (f" <span style='color:{ui.MUTED};font-size:0.68rem'>{row.note}</span>"
-                   if row.note else ""),
+                f"<span style='color:{ui.AMBER};font-weight:600'>"
+                f"{html.escape(row.ticker)}</span>"
+                + (f" <span style='color:{ui.MUTED};font-size:0.68rem'>"
+                   f"{html.escape(row.note)}</span>" if row.note else ""),
                 unsafe_allow_html=True,
             )
             if wc2.button("×", key=f"unwatch_{row.ticker}"):
@@ -311,22 +514,10 @@ with st.sidebar:
     st.caption(
         "US common stock on NYSE, Nasdaq and CBOE. Funds, commodity trusts and blank-"
         "cheque shells are excluded by the filer's own SEC industry code; REITs are kept. "
-        + world_note + _universe_verdict()
+        + world_note + _universe_verdict(DATA_KEY)
     )
     if not secret("ANTHROPIC_API_KEY"):
         st.error("ANTHROPIC_API_KEY missing from .env.local. Chat is off.")
-
-    st.markdown("#### Market cap")
-    band = st.select_slider(
-        "Size band", options=list(CAP_BANDS), value=st.session_state.get("band", "Any"),
-        label_visibility="collapsed", key="band",
-    )
-    lo, hi = CAP_BANDS[band]
-    c1, c2 = st.columns(2)
-    lo = c1.number_input("Min $bn", value=float(lo or 0.0), min_value=0.0, step=0.1)
-    hi = c2.number_input("Max $bn", value=float(hi or 0.0), min_value=0.0, step=0.1,
-                         help="0 means no upper limit")
-    st.caption("Applies on top of anything you said in chat.")
 
     st.markdown("#### Unit")
     unit = st.radio(
@@ -336,60 +527,145 @@ with st.sidebar:
     )
     if unit == nm.GOLD:
         st.caption(
-            "Charts and backtest curves are divided by the gold price of the same day. "
-            "Ratios and the eligibility floors stay in dollars — see the note under any "
-            "converted chart."
+            "Charts, boards and backtest curves are divided by the gold price of the same "
+            "day. Ratios and the eligibility floors stay in dollars — see the note under "
+            "any converted chart."
         )
 
-    st.markdown("#### Industry")
-    groups = st.multiselect(
-        "Industry groups", options=list(industry.GROUPS),
-        label_visibility="collapsed", key="groups",
-        placeholder="Any industry",
-    )
-    st.caption(
-        "Grouped from the filer's own SEC code — the SEC's own wording stays visible "
-        "in the table. Also applies on top of the chat."
-    )
-
-    # Markets appear only when the store holds more than one (the world store).
-    markets_available = _markets()
-    markets: list[str] = []
-    if len(markets_available) > 1:
-        st.markdown("#### Market")
-        markets = st.multiselect(
-            "Markets", options=markets_available, label_visibility="collapsed",
-            key="markets", placeholder="Every market",
-            format_func=lambda c: f"{c} · {MARKET_NAMES.get(c, c)}")
-        st.caption("Where the stock trades: a Japanese company's New York ADR is USA, "
-                   "its Tokyo line JPN. Also applies on top of the chat.")
-
-    st.markdown("#### Intrinsic value")
-    st.caption("A model, not a measurement. These assumptions decide the answer.")
-    # Sliders work in whole percent. Streamlit formats the raw value, so a 0.10 shown
-    # with "%.0f%%" renders as "0%" — the number has to carry the percent, not the label.
-    disc = st.slider("Required return %", 4, 20, 10, 1)
-    grow = st.slider("Growth assumed % a year", -5, 15, 0, 1)
-    term = st.slider("Growth forever after %", 0.0, 4.0, 2.0, 0.5)
-    assumptions = Assumptions(
-        discount_rate=disc / 100, growth_rate=grow / 100, terminal_growth=term / 100
-    )
-    if not assumptions.valid():
-        st.error("Perpetual growth must stay below the required return, or value is infinite.")
-    else:
-        st.caption(assumptions.describe())
-
 # ---------------------------------------------------------------- main
-if not chosen:
-    st.markdown("#### Start")
-    st.write(
-        "Create a portfolio on the left, then describe it in plain language — "
-        "*10 US stocks, price to book max 2, market cap under 2bn*. "
-        "Each message refines the same screen rather than starting over."
-    )
-    st.stop()
+spec = store.get_spec(chosen) if chosen else None
 
-spec = store.get_spec(chosen)
+
+def _need_portfolio(what: str) -> bool:
+    """Views that act on the open portfolio say so instead of stopping the whole app:
+    until 02.10.2026 a missing portfolio ended the script before any tab was drawn,
+    MONITOR and MAP included."""
+    if chosen:
+        return True
+    st.info("No portfolio open. Create one in the sidebar (the » arrow at the top left "
+            f"opens it) — {what}")
+    return False
+
+
+def _yahoo_bars(symbol: str) -> tuple[pd.DataFrame, str | None]:
+    """(bars, None) for a symbol outside the store — empty when Yahoo has none — or
+    (empty, error text) when Yahoo was not reached. The two read differently on screen:
+    until the review of 03.10.2026 (F6) both came back as an empty frame, and a dropped
+    connection was shown, and cached, as "no price history"."""
+    bars, err = ac.attempt(ac.yahoo_bars, symbol)
+    return (bars if bars is not None else pd.DataFrame()), err
+
+
+# ------------------------------------------------------------- shared view helpers
+# Each of these replaced two to five hand-copied blocks (audit 02.10.2026), which had
+# drifted apart: "MAX DRAWDOWN" here, "MAX DD" there, a total-return row in one result
+# table and not the next.
+PALETTE = [ui.AMBER, ui.CYAN, ui.UP, "#C792EA", "#F78C6C", "#FFCB6B", "#89DDFF", ui.DOWN]
+CHART_HEIGHT = 250
+
+
+def _layout(fig, height: int = CHART_HEIGHT, **extra):
+    """The terminal look for a plotly figure: black, monospace, thin grid."""
+    fig.update_layout(
+        height=height, margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor=ui.BG,
+        plot_bgcolor=ui.BG, font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
+        **extra)
+    return fig
+
+
+def _risk_cells(stats: dict, drawdown_label: str = "MAX DD") -> list:
+    """The return/risk strip. Takes research.price_stats keys (return_1m …) or
+    world.stats keys (1M …), so a share, an index and a Yahoo symbol read alike."""
+    cells = []
+    for label in ("1M", "3M", "6M", "1Y"):
+        v = stats.get(f"return_{label.lower()}", stats.get(label))
+        if v is not None and not pd.isna(v):
+            cells.append((label, ui.pct(v, 1), "up" if v >= 0 else "down"))
+    vol = stats.get("volatility")
+    if vol is not None and not pd.isna(vol):
+        cells.append(("VOL 1Y", f"{vol:.0%}", ""))
+    if stats.get("max_drawdown") is not None:
+        cells.append((drawdown_label, ui.pct(stats["max_drawdown"], 1), "down"))
+    if stats.get("beta") is not None:
+        cells.append(("BETA", ui.num(stats["beta"]), ""))
+    return cells
+
+
+def _corr_heatmap(corr: pd.DataFrame, key: str, annotate: bool = False) -> None:
+    if corr.empty or corr.shape[0] < 2:
+        return
+    heat = go.Figure(go.Heatmap(
+        z=corr.values, x=list(corr.columns), y=list(corr.index), zmin=-1, zmax=1,
+        colorscale=[[0, ui.CYAN], [0.5, ui.BG], [1, ui.AMBER]],
+        **({"text": corr.round(2).values, "texttemplate": "%{text}"} if annotate else {})))
+    st.plotly_chart(_layout(heat, min(120 + 30 * len(corr), 520)), width="stretch",
+                    key=f"corr_{key}")
+
+
+def _links_table(links: pd.DataFrame, first: str = "series", limit: int = 10) -> None:
+    """A 'moves with' table from research.commodity_sensitivity."""
+    st.markdown(ui.grid(pd.DataFrame({
+        first: links.commodity,
+        "correlation": links.correlation.map(lambda v: f"{v:+.2f}"),
+        "beta": links.beta.map(lambda v: f"{v:+.2f}"),
+        "days": links.days.astype(str),
+    }).head(limit), numeric={"days"}, signed={"correlation", "beta"}, ticker_col=first),
+        unsafe_allow_html=True)
+
+
+def _result_block(out, *, name: str, cells: list, turnover: float,
+                  total_return: bool = False, lines: dict | None = None,
+                  height: int = 280) -> None:
+    """Headline strip, curve against the index, and the R9 table for any backtest:
+    point-in-time (stage B), buy and hold (stage A) and a rule (LAB). Portfolio and
+    index side by side, both from metrics.summary, so the yardstick cannot differ from
+    the thing it measures."""
+    m = out.metrics
+    st.markdown(ui.stats([
+        ("FROM", str(pd.Timestamp(out.dates[0]).date()), ""),
+        ("YEARS", f"{out.years:.1f}", ""),
+        (f"{name.upper()} P.A.", ui.pct(m["annual_return"]),
+         "up" if m["annual_return"] >= 0 else "down"),
+        ("S&P 500 TR P.A.", ui.pct(m.get("benchmark_annual_return")), ""),
+        ("EXCESS P.A.", ui.pct(m.get("excess_annual")),
+         "up" if (m.get("excess_annual") or 0) >= 0 else "down"),
+    ] + cells), unsafe_allow_html=True)
+    curve = pd.DataFrame({name: out.portfolio}, index=out.dates)
+    colours = [ui.AMBER]
+    for label, (series, colour) in (lines or {}).items():
+        curve[label] = series
+        colours.append(colour)
+    if out.benchmark:
+        curve[out.benchmark_symbol] = out.benchmark
+        colours.append(ui.CYAN)
+    st.line_chart(curve, height=height, color=colours)
+    rows = [("Return p.a.", m["annual_return"], m.get("benchmark_annual_return"))]
+    if total_return:
+        rows.append(("Total return", m["total_return"], m.get("benchmark_total_return")))
+    rows += [
+        ("Volatility p.a.", m["volatility"], m.get("benchmark_volatility")),
+        ("Max drawdown", m["max_drawdown"], m.get("benchmark_max_drawdown")),
+        ("Deviation from index", m.get("tracking_error"), None),
+    ]
+    st.markdown(ui.grid(pd.DataFrame({
+        "metric": [r[0] for r in rows] + ["Sharpe", "Turnover p.a."],
+        name.lower(): [ui.pct(r[1]) for r in rows] + [ui.num(m["sharpe"]), ui.pct(turnover)],
+        out.benchmark_symbol or "index":
+            [ui.pct(r[2]) if r[2] is not None else "—" for r in rows]
+            + [ui.num(m.get("benchmark_sharpe")), "—"],
+    }), numeric=set(), ticker_col="metric"), unsafe_allow_html=True)
+
+
+def _workbook_button(label: str, sheets, title: str, source: str, stem: str,
+                     key: str) -> None:
+    """An Excel download built only when it is clicked. `sheets` is a callable that
+    returns frames already in memory: Streamlit runs it in another thread, where the
+    database must not be touched (sources.per_thread). Building the workbook on every
+    rerun cost ~0.5 s per button (audit 02.10.2026)."""
+    st.download_button(
+        label, data=lambda: export.workbook(sheets(), title=title, source=source,
+                                            as_of=asof),
+        file_name=export.filename(stem, asof), mime=XLSX, key=key)
 
 
 def _lab_price_chart(con, ticker: str, result, rule) -> None:
@@ -410,7 +686,10 @@ def _lab_price_chart(con, ticker: str, result, rule) -> None:
     if px_rule.empty:
         # A Yahoo ticker outside the store: the same bars the rule ran on, on the same
         # adjusted basis, so the markers sit on the line.
-        yb = _yahoo_bars(ticker)
+        yb, y_err = _yahoo_bars(ticker)
+        if y_err:
+            st.caption(f"The chart of {ticker} needs Yahoo, which could not be reached "
+                       f"({y_err}).")
         if not yb.empty:
             factor = yb["close_adj"] / yb["close"].where(yb["close"] != 0)
             px_rule = pd.DataFrame({
@@ -446,7 +725,7 @@ def _paper_rows(book_frame: pd.DataFrame) -> list[dict]:
     out = []
     for _, row in book_frame.iterrows():
         try:
-            v = paper.value_book(src.con, store.con, row.to_dict())
+            v = _valued(row.to_dict(), DATA_KEY)
         except Exception as exc:                                  # noqa: BLE001
             v = {"empty": True, "book": row.to_dict(), "error": str(exc)}
         out.append(v)
@@ -475,10 +754,8 @@ def _paper_table(valued: list[dict]) -> pd.DataFrame:
 
 def _risk_block(positions: pd.DataFrame, key: str) -> None:
     """Risk of a set of positions at their weights: historical, three years (risk.py)."""
-    import plotly.graph_objects as go
-
     st.markdown("**Risk at these weights**")
-    m = risk.measures(src.con, positions, asof)
+    m = _risk_measures(positions, asof, DATA_KEY)
     if not m or m.get("error"):
         st.caption(m.get("error", "No price history for these names.") if m else
                    "No price history for these names.")
@@ -488,7 +765,7 @@ def _risk_block(positions: pd.DataFrame, key: str) -> None:
         ("BETA", ui.num(m.get("beta")), ""),
         ("VAR 95% (1 DAY)", f"{m['var_95']:.2%}", "down"),
         ("CVAR 95%", f"{m['cvar_95']:.2%}", "down"),
-        ("MAX DRAWDOWN", f"{m['max_drawdown']:.1%}", "down"),
+        ("MAX DD", f"{m['max_drawdown']:.1%}", "down"),
         ("LARGEST", f"{m['largest_weight']:.0%}", ""),
         ("EFFECTIVE NAMES", f"{m['effective_names']:.1f}", ""),
     ]), unsafe_allow_html=True)
@@ -514,27 +791,18 @@ def _risk_block(positions: pd.DataFrame, key: str) -> None:
             ticker_col="crisis"), unsafe_allow_html=True)
         st.caption("Return over each crisis, peak to trough of the S&P 500, had these "
                    "weights been held; 'covered' is the weight that had prices then.")
-    corr = m["correlation"]
-    if corr.shape[0] > 1:
-        heat = go.Figure(go.Heatmap(z=corr.values, x=list(corr.columns),
-                                    y=list(corr.index), zmin=-1, zmax=1,
-                                    colorscale=[[0, ui.CYAN], [0.5, ui.BG], [1, ui.AMBER]]))
-        heat.update_layout(height=min(120 + 26 * len(corr), 520),
-                           margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor=ui.BG,
-                           plot_bgcolor=ui.BG,
-                           font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10))
-        st.plotly_chart(heat, width="stretch", key=f"corr_{key}")
+    _corr_heatmap(m["correlation"], key)
 
 
 def _paper_section(origin: str, key: str, opener, default_name: str,
                    what: str, amount_label: str | None = "Amount ($)") -> None:
-    """A closed-off paper-money area for one tab: buy, and see this tab's books.
+    """Open a paper book from here; every book is listed and compared in PORTFOLIOS.
 
     `opener(name, amount)` opens the book and returns its id. The purchase is frozen at
     the latest stored close; from then on the book is only valued, never re-decided.
+    Until 02.10.2026 each tab also listed and valued its own books again here.
     """
-    with st.container(border=True):
-        st.markdown(f"#### Paper money · {origin}")
+    with st.expander(f"Paper money · open a book from {origin}"):
         st.caption(what)
         c1, c2, c3 = st.columns([1.1, 2, 1])
         amount = (c1.number_input(amount_label, min_value=100.0, max_value=1e9,
@@ -547,23 +815,96 @@ def _paper_section(origin: str, key: str, opener, default_name: str,
             try:
                 opener(name, amount)
                 st.success(f"Opened '{name}'. It is valued on every visit; compare all "
-                           "books in the BOOKS tab.")
+                           "books in PORTFOLIOS → BOOKS.")
             except ValueError as exc:
                 st.error(str(exc))
-        mine = paper.books(store.con)
-        mine = mine[mine.origin == origin]
-        if not mine.empty:
-            st.markdown(ui.grid(_paper_table(_paper_rows(mine)), ticker_col="book"),
-                        unsafe_allow_html=True)
 
 
-(tab_screen, tab_monitor, tab_research, tab_options, tab_strategy, tab_lab, tab_books,
- tab_deals, tab_macro, tab_commodities, tab_map, tab_calendar, tab_news) = st.tabs(
-    ["SCREEN", "MONITOR", "RESEARCH", "OPTIONS", "STRATEGY", "LAB", "BOOKS", "DEALS",
-     "MACRO", "COMMODITIES", "MAP", "CALENDAR", "NEWS"]
-)
+def _screen_filters() -> None:
+    """Size, industry, market and the intrinsic-value assumptions — on top of the chat.
 
-with tab_screen:
+    In the sidebar until 02.10.2026, where they sat apart from the screen they change.
+    Every value is persisted (`_kept`), so it holds while another tab is open."""
+    lo, hi, groups, markets = _filters()
+    shown = []
+    if lo > 0 or hi > 0:
+        shown.append("size")
+    if groups:
+        shown.append("industry")
+    if markets:
+        shown.append("market")
+    with st.expander("Filters on top of the chat"
+                     + (f" · active: {', '.join(shown)}" if shown else "")):
+        c1, c2, c3 = st.columns([2, 1, 1])
+        c1.select_slider("Market cap band", options=list(CAP_BANDS),
+                         **{**_kept("band", "Any"), "on_change": _band_changed,
+                            "args": ()})
+        c2.number_input("Min $bn", min_value=0.0, step=0.1, **_kept("cap_min", 0.0))
+        c3.number_input("Max $bn", min_value=0.0, step=0.1,
+                        help="0 means no upper limit", **_kept("cap_max", 0.0))
+        st.multiselect(
+            "Industry groups", options=list(industry.GROUPS), placeholder="Any industry",
+            help="Grouped from the filer's own SEC code — the SEC's own wording stays "
+                 "visible in the table.", **_kept("groups", [], "default"))
+        # Markets appear only when the store holds more than one (the world store).
+        available = _markets(DATA_KEY)
+        if len(available) > 1:
+            st.multiselect(
+                "Markets", options=available, placeholder="Every market",
+                format_func=lambda c: f"{c} · {MARKET_NAMES.get(c, c)}",
+                help="Where the stock trades: a Japanese company's New York ADR is USA, "
+                     "its Tokyo line JPN.", **_kept("markets", [], "default"))
+        st.markdown("**Intrinsic value** — a model, not a measurement. These assumptions "
+                    "decide the P/IV column and a company's price/intrinsic line; a "
+                    "company's DCF starts its growth forever here and has its own "
+                    "cash-flow growth.")
+        # Sliders work in whole percent. Streamlit formats the raw value, so a 0.10 shown
+        # with "%.0f%%" renders as "0%" — the number has to carry the percent.
+        i1, i2, i3 = st.columns(3)
+        i1.slider("Required return %", 4, 20, step=1, **_kept("iv_disc", 10))
+        i2.slider("Screen: earnings growth for intrinsic value, % a year", -5, 15,
+                  step=1, **_kept("iv_grow", 0))
+        i3.slider("Growth forever after %", 0.0, 4.0, step=0.5, **_kept("iv_term", 2.0))
+        a = _assumptions()
+        if not a.valid():
+            st.error("Perpetual growth must stay below the required return, or value is "
+                     "infinite.")
+        else:
+            st.caption(a.describe() + ". All filters apply on top of the chat.")
+
+
+def _effective_spec(spec):
+    """The chat's spec with the filters above layered on (hand-picked names ignore the
+    size and industry filters: they were chosen on purpose)."""
+    lo, hi, groups, markets = _filters()
+    effective = spec
+    if spec.is_hand_picked:
+        lo = hi = 0.0
+    elif groups:
+        effective = effective.with_filter(Filter("industry_group", "in", groups))
+    if markets and not spec.is_hand_picked:
+        effective = effective.with_filter(Filter("country", "in", markets))
+    if lo > 0:
+        effective = effective.with_filter(Filter("market_cap", ">=", lo * 1e9))
+    if hi > 0:
+        effective = effective.with_filter(Filter("market_cap", "<=", hi * 1e9))
+    return effective
+
+
+def _picks(spec):
+    """What the open portfolio holds: the ticks of the last screen drawn in this session,
+    else the stored selection run through the screen again. Tracking and the backtests
+    read this, so they no longer depend on the screen table being on the same page."""
+    held = st.session_state.get(f"held_picks_{chosen}")
+    if held is not None and st.session_state.get(f"held_spec_{chosen}") == spec:
+        return held
+    return run_screen(_frame(asof, DATA_KEY), _effective_spec(spec), _assumptions()).picks
+
+
+def _view_screen() -> None:
+    if not _need_portfolio("a screen is saved with its portfolio."):
+        return
+    spec = store.get_spec(chosen)
     history = store.messages(chosen)
     if history:
         st.markdown(
@@ -576,7 +917,7 @@ with tab_screen:
         st.markdown(ui.log([("user", prompt)]), unsafe_allow_html=True)
         try:
             with st.spinner("Translating"):
-                result = T.translate(prompt, spec, sectors=_sectors())
+                result = T.translate(prompt, spec, sectors=_sectors(DATA_KEY))
             spec = result.spec
             store.save_spec(chosen, spec)
             reply = "\n".join(f"- {c}" for c in result.changed) or "- filters unchanged"
@@ -585,9 +926,11 @@ with tab_screen:
                 reply += "\n".join(f"- {u}" for u in spec.unsupported)
             store.add_message(chosen, "assistant", reply, spec)
             st.markdown(ui.log([("assistant", reply)]), unsafe_allow_html=True)
-        except Exception as exc:
-            st.error(f"Could not translate that: {exc}")
+        except Exception as exc:                                    # noqa: BLE001
+            st.error(f"Could not translate that: {ui.error_text(exc)}")
 
+    _screen_filters()
+    lo, hi, groups, markets = _filters()
     left, right = st.columns([1, 2.3], gap="medium")
 
     with left:
@@ -628,30 +971,21 @@ with tab_screen:
                 bounds.append(f"≥ ${lo:g}bn")
             if hi > 0:
                 bounds.append(f"≤ ${hi:g}bn")
-            st.markdown(f"- market cap {' and '.join(bounds)} *(from the sidebar)*")
+            st.markdown(f"- market cap {' and '.join(bounds)} *(from the filters)*")
         if groups:
-            st.markdown(f"- industry one of {', '.join(groups)} *(from the sidebar)*")
+            st.markdown(f"- industry one of {', '.join(groups)} *(from the filters)*")
         if markets:
-            st.markdown(f"- market one of {', '.join(markets)} *(from the sidebar)*")
+            st.markdown(f"- market one of {', '.join(markets)} *(from the filters)*")
         if spec.unsupported:
             st.warning("Not applied: " + "; ".join(spec.unsupported))
 
     with right:
         if asof is None:
-            st.stop()
-        effective = spec
-        if spec.is_hand_picked:
-            lo = hi = 0.0
-        elif groups:
-            effective = effective.with_filter(
-                Filter("industry_group", "in", list(groups)))
-        if markets and not spec.is_hand_picked:
-            effective = effective.with_filter(Filter("country", "in", list(markets)))
-        if lo > 0:
-            effective = effective.with_filter(Filter("market_cap", ">=", lo * 1e9))
-        if hi > 0:
-            effective = effective.with_filter(Filter("market_cap", "<=", hi * 1e9))
-        res = run_screen(_frame(asof), effective, assumptions)
+            st.info("No prices stored yet, so nothing can be screened. Run the build "
+                    "scripts (README).")
+            return
+        effective = _effective_spec(spec)
+        res = run_screen(_frame(asof, DATA_KEY), effective, _assumptions())
 
         # Criterion 1(e): coverage was measured in phase 1 and written to a table. A
         # measurement nobody reads protects nobody, so the filters that depend on a
@@ -688,11 +1022,9 @@ with tab_screen:
                     unsafe_allow_html=True,
                 )
 
-
     # The candidate table needs the whole page: fifteen metric columns do not
     # fit beside the chat panel, and a screen that passes 300 names is meant to be
     # read, not squinted at.
-
     picks = res.picks
     if res.n_passing:
         r = res.ranked
@@ -711,14 +1043,16 @@ with tab_screen:
             st.rerun()
 
         if not spec.is_hand_picked:
+            # Stable keys: the ALL button's label carries the count, and a key taken
+            # from the label remounted the button whenever the count changed.
             quick = st.columns(5)
             for col, n in zip(quick, (10, 25, 50)):
-                if col.button(f"TOP {n}", width="stretch",
+                if col.button(f"TOP {n}", width="stretch", key=f"top_{n}",
                               disabled=res.n_passing <= n and n != 10):
                     _choose(r.ticker.astype(str).head(n))
-            if quick[3].button(f"ALL {res.n_passing}", width="stretch"):
+            if quick[3].button(f"ALL {res.n_passing}", width="stretch", key="pick_all"):
                 _choose(r.ticker.astype(str))
-            if quick[4].button("NONE", width="stretch"):
+            if quick[4].button("NONE", width="stretch", key="pick_none"):
                 _choose(())
 
         def _col(name: str) -> pd.Series:
@@ -763,7 +1097,11 @@ with tab_screen:
                 "ticker": st.column_config.TextColumn(width="small", pinned=True),
                 "px": two,
                 "mkt cap": st.column_config.NumberColumn(format="compact"),
-                "p/b": two, "p/e": two, "p/s": two, "p/fcf": two, "p/iv": two,
+                "p/b": two, "p/e": two, "p/s": two, "p/fcf": two,
+                "p/iv": st.column_config.NumberColumn(
+                    "p/iv", format="%.2f",
+                    help="Price over intrinsic value under the assumptions in the "
+                         "filters above."),
                 "d/e": two,
                 "margin": st.column_config.NumberColumn(format="percent"),
                 "age": st.column_config.NumberColumn(
@@ -775,13 +1113,14 @@ with tab_screen:
 
         # The ticks are the truth from here on: weights, the tracking button and the
         # stored spec all follow this one list rather than what the screen proposed.
-        # They speak only for the rows on screen, though — see merge_selection: a sidebar
+        # They speak only for the rows on screen, though — see merge_selection: a
         # filter hides names, and hidden is not the same as unticked.
         ticked = tuple(edited.loc[edited["hold"], "ticker"].astype(str))
         live = merge_selection(spec.selected, edited["ticker"].astype(str), ticked)
         picks = res.select(live, spec.weighting)
         if set(ticked) != held and not spec.is_hand_picked:
-            store.save_spec(chosen, replace(spec, selected=live))
+            spec = replace(spec, selected=live)
+            store.save_spec(chosen, spec)
 
         if len(picks):
             st.caption(
@@ -791,21 +1130,23 @@ with tab_screen:
             )
         else:
             st.caption("Nothing ticked. Tick a row, or use the buttons above.")
-        st.download_button(
+        ranked, held_now, excluded = res.ranked, picks, res.exclusions
+        filters_now = list(spec.filters)
+        _workbook_button(
             "Export screen to Excel",
-            data=export.workbook(
-                {"Passed": res.ranked, "Held": picks,
-                 "Excluded": pd.DataFrame(
-                     [{"reason": k, "names": v} for k, v in res.exclusions.items()]),
-                 "Filters": pd.DataFrame([{"metric": f.metric, "op": f.op,
-                                           "value": str(f.value)} for f in spec.filters])},
-                title="Screen: " + "; ".join(spec.describe()),
-                source="SEC XBRL as first filed, daily closes; USD", as_of=asof),
-            file_name=export.filename("screen", asof),
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            lambda: {"Passed": ranked, "Held": held_now,
+                     "Excluded": pd.DataFrame(
+                         [{"reason": k, "names": v} for k, v in excluded.items()]),
+                     "Filters": pd.DataFrame([{"metric": f.metric, "op": f.op,
+                                               "value": str(f.value)}
+                                              for f in filters_now])},
+            title="Screen: " + "; ".join(spec.describe()),
+            source="SEC XBRL as first filed, daily closes; USD", stem="screen",
             key="export_screen")
     else:
-        st.info("Nothing passed. The breakdown below names the binding rule.")
+        st.info("Nothing passed. The breakdown above names the binding rule.")
+    st.session_state[f"held_picks_{chosen}"] = picks
+    st.session_state[f"held_spec_{chosen}"] = spec
 
     headline.markdown(
         ui.stats([
@@ -819,96 +1160,6 @@ with tab_screen:
         ]),
         unsafe_allow_html=True,
     )
-
-    # ---------------------------------------------------------------- live tracking
-    st.markdown("#### Live tracking")
-    info = store.tracking_info(chosen)
-
-    if info is None:
-        st.write(
-            "Freeze this selection at today's prices and follow it forward against the "
-            "S&P 500 total return. The picks are fixed before the outcome exists, so no "
-            "survivorship bias, no look-ahead and no amount of filter-tweaking can flatter "
-            "the result. It only needs time to pass."
-        )
-        thesis = st.text_input(
-            "What are you testing?",
-            placeholder="cheap small caps beat the index over 12 months",
-        )
-        if age and age > 1:
-            st.warning(
-                f"Entry would use the closes of {asof}, {age} days ago — not what you would "
-                "pay this morning. Refresh prices first if the entry needs to match a real trade."
-            )
-        can = len(picks) > 0
-        if st.button(f"Start tracking {len(picks)} positions",
-                     type="primary", disabled=not can, width="stretch"):
-            n = store.start_tracking(chosen, picks, asof, spec_to_json(spec), thesis,
-                                     cost_of=settings.cost.round_trip_cost)
-            st.success(f"Tracking {n} positions from {asof}.")
-            st.rerun()
-        if not can:
-            st.caption(
-                "Nothing to track — no security passed the filters."
-                if not res.n_passing else
-                f"Nothing ticked. {res.n_passing:,} names passed; choose the ones to hold above."
-            )
-    else:
-        holdings = store.holdings(chosen)
-        perf = performance(src.con, holdings, info["started_on"])
-
-        if perf.get("empty"):
-            st.info("No price history since the start date yet.")
-        else:
-            tone = "up" if perf["portfolio_return"] >= 0 else "down"
-            cells = [
-                ("SINCE", str(info["started_on"]), ""),
-                ("DAYS", str(perf["days"]), ""),
-                ("POSITIONS", str(len(holdings)), ""),
-                ("PORTFOLIO", ui.pct(perf["portfolio_return"]), tone),
-            ]
-            if perf["benchmark_return"] is not None:
-                cells.append(("S&P 500 TR", ui.pct(perf["benchmark_return"]), ""))
-                cells.append(("EXCESS", ui.pct(perf["excess"]),
-                              "up" if perf["excess"] >= 0 else "down"))
-            st.markdown(ui.stats(cells), unsafe_allow_html=True)
-            if info["thesis"]:
-                st.caption(f"Thesis — {info['thesis']}")
-
-            curve = pd.DataFrame({"Portfolio": perf["portfolio"]}, index=perf["dates"])
-            if perf["benchmark"]:
-                curve[perf["benchmark_symbol"]] = perf["benchmark"]
-            st.line_chart(curve, height=260, color=[ui.AMBER, ui.CYAN])
-            st.caption(
-                "Both lines are total return, rebased to 100 at entry. Entry costs are "
-                "charged to the portfolio and not to the index, so the comparison runs "
-                "slightly against you. Buy and hold — no rebalancing."
-            )
-
-            d = perf["detail"]
-            if d["stopped_trading"].any():
-                st.warning(
-                    f"{int(d['stopped_trading'].sum())} position(s) stopped trading, held at "
-                    "last observed price. Delisting proceeds are not modelled."
-                )
-            table = pd.DataFrame({
-                "ticker": d.ticker,
-                "name": d.name.astype(str).str.slice(0, 28),
-                "wt": d.weight.map(lambda v: f"{v:.1%}"),
-                "entry": d.entry_price.map(ui.num),
-                "last": d.last_price.map(ui.num),
-                "return": d["return"].map(ui.pct),
-                "contrib": d.contribution.map(ui.pct),
-            })
-            st.markdown(
-                ui.grid(table, numeric={"wt", "entry", "last"},
-                        signed={"return", "contrib"}),
-                unsafe_allow_html=True,
-            )
-
-        if st.button("Stop tracking and discard", width="stretch"):
-            store.stop_tracking(chosen)
-            st.rerun()
 
     def _open_screen_book(name, amount):
         if picks.empty:
@@ -925,1527 +1176,1643 @@ with tab_screen:
         "entry cost charged once, then hold. Open as many books as you like — each is "
         "its own frozen purchase.")
 
-    # ------------------------------------------------------------- backtest (stage B)
-    def _stage_b_section():
-        """Point-in-time: re-screen at every date, buy at the next open (Phase 8)."""
-        st.markdown("#### Backtest — stage B (point-in-time)")
-        st.caption(
-            "Stage A runs today's basket backwards, which is hindsight. This re-runs the "
-            "screen at every rebalance date on only the filings published by then, and "
-            "fills at the next session's open. It answers a different question: would "
-            "the RULE have worked, not would these names have worked."
+
+def _view_tracking() -> None:
+    """Live tracking of the open portfolio's ticked names against the S&P 500 TR."""
+    if not _need_portfolio("tracking follows the names ticked in its screen."):
+        return
+    spec = store.get_spec(chosen)
+    st.markdown("#### Live tracking")
+    info = store.tracking_info(chosen)
+
+    if info is None:
+        picks = _picks(spec) if asof else pd.DataFrame()
+        st.write(
+            "Freeze this selection at today's prices and follow it forward against the "
+            "S&P 500 total return. The picks are fixed before the outcome exists, so no "
+            "survivorship bias, no look-ahead and no amount of filter-tweaking can flatter "
+            "the result. It only needs time to pass."
         )
-        snapshot = src.snapshot()
-        cache = FrameCache(src, CACHE_DIR / "pit", snapshot.fingerprint())
-
-        c1, c2, c3 = st.columns([1.1, 1, 1.1])
-        pit_start = c1.date_input(
-            "From", value=dt.date(2011, 1, 3), min_value=dt.date(2011, 1, 3),
-            max_value=asof, key=f"pit_start_{chosen}",
-            help="2011 is where XBRL coverage becomes usable — measured in phase 1.")
-        frequency = c2.selectbox(
-            "Rebalance", ["quarterly", "annual", "buy_and_hold"], index=0,
-            key=f"pit_freq_{chosen}")
-        # R21: the last two years are out of the picture until someone says otherwise.
-        unlock = st.checkbox(
-            f"Unlock the withheld period (the last {settings.holdout_years} years)",
-            value=False, key=f"pit_unlock_{chosen}",
-            help="Tune on what you can see; open this once at the end. Opening it is "
-                 "recorded on the run.")
-        try:
-            hw = holdout.window(asof, pit_start, settings.holdout_years, unlock)
-        except ValueError as exc:
-            st.error(str(exc))
-            return
-        st.caption(hw.describe())
-        burned = holdout.burn_count(store, spec.fingerprint(), snapshot.fingerprint())
-        if burned:
-            st.warning(holdout.burn_warning(burned))
-
-        dates = bstage.rebalance_dates(hw.start, hw.end, frequency)
-        ready = sum(1 for d in dates if cache.path_for(d).exists())
-        c4, c5 = st.columns([1, 1])
-        go_pit = c4.button("Run point-in-time", width="stretch",
-                           key=f"pit_go_{chosen}")
-        go_sens = c5.button("Run with sensitivity checks", width="stretch",
-                            key=f"pit_sens_{chosen}",
-                            help="The same run started six months earlier and later, and "
-                                 "again without the holding it leaned on most.")
-
-        if ready < len(dates):
+        thesis = st.text_input(
+            "What are you testing?", key=f"thesis_{chosen}",
+            placeholder="cheap small caps beat the index over 12 months",
+        )
+        if age and age > 1:
             st.warning(
-                f"{len(dates) - ready} of {len(dates)} dates are not cached yet. Each one "
-                "costs 6-10 seconds to assemble, almost all of it the point-in-time "
-                "fundamentals — so a cold run takes minutes, not seconds. Warm it once "
-                "with `uv run python scripts/warm_pit_cache.py`; every later run, with "
-                "any screen, is then fast. The cache changes speed and nothing else."
+                f"Entry would use the closes of {asof}, {age} days ago — not what you would "
+                "pay this morning. Refresh prices first if the entry needs to match a real trade."
             )
+        can = len(picks) > 0
+        # A stable key; the label carries the count and changed with every tick.
+        if st.button(f"Start tracking {len(picks)} positions", key=f"track_go_{chosen}",
+                     type="primary", disabled=not can, width="stretch"):
+            n = store.start_tracking(chosen, picks, asof, spec_to_json(spec), thesis,
+                                     cost_of=settings.cost.round_trip_cost)
+            st.success(f"Tracking {n} positions from {asof}.")
+            st.rerun()
+        if not can:
+            st.caption("Nothing to track — tick names in SCREEN first.")
+        return
 
-        if go_pit or go_sens:
-            shared = dict(
-                costs=settings.cost, frequency=frequency,
-                risk_free=mx.risk_free_rate(
-                    src.con, hw.start, hw.end, settings.risk_free_fallback)[0],
-                label=bstage.stage_b_label(_universe_verdict()),
-                data_fingerprint=snapshot.fingerprint(), frame_for=cache.frame_for,
+    holdings = store.holdings(chosen)
+    perf = performance(src.con, holdings, info["started_on"])
+
+    if perf.get("empty"):
+        st.info("No price history since the start date yet.")
+    else:
+        tone = "up" if perf["portfolio_return"] >= 0 else "down"
+        cells = [
+            ("SINCE", str(info["started_on"]), ""),
+            ("DAYS", str(perf["days"]), ""),
+            ("POSITIONS", str(len(holdings)), ""),
+            ("PORTFOLIO", ui.pct(perf["portfolio_return"]), tone),
+        ]
+        if perf["benchmark_return"] is not None:
+            cells.append(("S&P 500 TR", ui.pct(perf["benchmark_return"]), ""))
+            cells.append(("EXCESS", ui.pct(perf["excess"]),
+                          "up" if perf["excess"] >= 0 else "down"))
+        st.markdown(ui.stats(cells), unsafe_allow_html=True)
+        if info["thesis"]:
+            st.caption(f"Thesis — {info['thesis']}")
+
+        curve = pd.DataFrame({"Portfolio": perf["portfolio"]}, index=perf["dates"])
+        if perf["benchmark"]:
+            curve[perf["benchmark_symbol"]] = perf["benchmark"]
+        st.line_chart(curve, height=CHART_HEIGHT, color=[ui.AMBER, ui.CYAN][:len(curve.columns)])
+        st.caption(
+            "Both lines are total return, rebased to 100 at entry. Entry costs are "
+            "charged to the portfolio and not to the index, so the comparison runs "
+            "slightly against you. Buy and hold — no rebalancing."
+        )
+
+        d = perf["detail"]
+        if d["stopped_trading"].any():
+            st.warning(
+                f"{int(d['stopped_trading'].sum())} position(s) stopped trading, held at "
+                "last observed price. Delisting proceeds are not modelled."
             )
-            with st.spinner(f"Re-screening {len(dates)} dates"):
-                started = time.time()
-                out = bstage.run(src, spec, hw.start, hw.end, **shared)
-                report = (sens.run(src, spec, hw.start, hw.end, **shared)
-                          if go_sens else None)
-                st.session_state[f"pit_result_{chosen}"] = out
-                st.session_state[f"pit_sens_{chosen}_result"] = report
-                st.session_state[f"pit_seconds_{chosen}"] = time.time() - started
-            if out is not None:
-                store.record_run(
-                    chosen, "stage_b", spec.fingerprint(), snapshot.fingerprint(),
-                    out.dates[0], out.dates[-1],
-                    {"frequency": frequency, "dates": len(dates),
-                     "sensitivity": bool(go_sens)}, out.metrics,
-                    holdout_unlocked=unlock)
+        table = pd.DataFrame({
+            "ticker": d.ticker,
+            "name": d.name.astype(str).str.slice(0, 28),
+            "wt": d.weight.map(lambda v: f"{v:.1%}"),
+            "entry": d.entry_price.map(ui.num),
+            "last": d.last_price.map(ui.num),
+            "return": d["return"].map(ui.pct),
+            "contrib": d.contribution.map(ui.pct),
+        })
+        st.markdown(
+            ui.grid(table, numeric={"wt", "entry", "last"},
+                    signed={"return", "contrib"}),
+            unsafe_allow_html=True,
+        )
 
-        out = st.session_state.get(f"pit_result_{chosen}")
-        if out is None and go_pit:
-            st.info("Nothing passed the screen at any rebalance date in that window.")
-        elif out is not None:
-            m = out.metrics
-            st.markdown(ui.stats([
-                ("FROM", str(out.dates[0]), ""),
-                ("YEARS", f"{out.years:.1f}", ""),
-                ("PORTFOLIO P.A.", ui.pct(m["annual_return"]),
-                 "up" if m["annual_return"] >= 0 else "down"),
-                ("S&P 500 TR P.A.", ui.pct(m.get("benchmark_annual_return")), ""),
-                ("EXCESS P.A.", ui.pct(m.get("excess_annual")),
-                 "up" if (m.get("excess_annual") or 0) >= 0 else "down"),
-                ("TURNOVER P.A.", ui.pct(out.turnover), ""),
-                ("REBALANCES", f"{len(out.rebalances):,}", ""),
-            ]), unsafe_allow_html=True)
+    # A confirmation: this throws away the frozen entry, which cannot be re-created.
+    with st.popover("Stop tracking and discard", width="stretch"):
+        st.caption("The frozen entry prices and the record so far are deleted. A new "
+                   "tracking starts at the prices of its own day.")
+        if st.button("Discard for good", type="primary", key=f"track_stop_{chosen}"):
+            store.stop_tracking(chosen)
+            st.rerun()
 
-            curve = pd.DataFrame({"Portfolio": out.portfolio}, index=out.dates)
-            if out.benchmark:
-                curve[out.benchmark_symbol] = out.benchmark
-            st.line_chart(curve, height=300, color=[ui.AMBER, ui.CYAN])
 
-            rows = [
-                ("Return p.a.", m["annual_return"], m.get("benchmark_annual_return")),
-                ("Volatility p.a.", m["volatility"], m.get("benchmark_volatility")),
-                ("Max drawdown", m["max_drawdown"], m.get("benchmark_max_drawdown")),
-                ("Deviation from index", m.get("tracking_error"), None),
-            ]
-            st.markdown(ui.grid(pd.DataFrame({
-                "metric": [r[0] for r in rows] + ["Sharpe", "Turnover p.a."],
-                "portfolio": [ui.pct(r[1]) for r in rows]
-                             + [ui.num(m["sharpe"]), ui.pct(out.turnover)],
-                out.benchmark_symbol or "index":
-                    [ui.pct(r[2]) if r[2] is not None else "—" for r in rows]
-                    + [ui.num(m.get("benchmark_sharpe")), "—"],
-            }), numeric=set(), ticker_col="metric"), unsafe_allow_html=True)
+def _stage_b_section(spec) -> None:
+    """Point-in-time: re-screen at every date, buy at the next open (Phase 8)."""
+    st.markdown("#### Backtest — stage B (point-in-time)")
+    st.caption(
+        "Stage A runs today's basket backwards, which is hindsight. This re-runs the "
+        "screen at every rebalance date on only the filings published by then, and "
+        "fills at the next session's open. It answers a different question: would "
+        "the RULE have worked, not would these names have worked."
+    )
+    cache = FrameCache(src, cfg.CACHE_DIR / "pit", data_fp)
 
-            if not out.rebalances.empty:
-                with st.expander(f"What it held, {len(out.rebalances)} rebalances"):
-                    reb = out.rebalances
-                    st.markdown(ui.grid(pd.DataFrame({
-                        "screened": reb.screened_on.astype(str),
-                        "filled": reb.filled_on.astype(str),
-                        "names": reb.names.astype(int),
-                        "turnover": reb.turnover.map(ui.pct),
-                        "cost": reb.cost.map(lambda v: ui.pct(v, 2)),
-                    }), numeric={"names"}, ticker_col="screened"),
-                        unsafe_allow_html=True)
+    c1, c2, _ = st.columns([1.1, 1, 1.1])
+    pit_start = c1.date_input(
+        "From", value=dt.date(2011, 1, 3), min_value=dt.date(2011, 1, 3),
+        max_value=asof, key=f"pit_start_{chosen}", format="YYYY-MM-DD",
+        help="2011 is where XBRL coverage becomes usable — measured in phase 1.")
+    frequency = c2.selectbox(
+        "Rebalance", ["quarterly", "annual", "buy_and_hold"], index=0,
+        key=f"pit_freq_{chosen}")
+    # R21: the last two years are out of the picture until someone says otherwise.
+    unlock = st.checkbox(
+        f"Unlock the withheld period (the last {settings.holdout_years} years)",
+        value=False, key=f"pit_unlock_{chosen}",
+        help="Tune on what you can see; open this once at the end. Opening it is "
+             "recorded on the run.")
+    try:
+        hw = holdout.window(asof, pit_start, settings.holdout_years, unlock)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+    st.caption(hw.describe())
+    burned = holdout.burn_count(store, spec.fingerprint(), data_fp)
+    if burned:
+        st.warning(holdout.burn_warning(burned))
 
-            report = st.session_state.get(f"pit_sens_{chosen}_result")
-            if report is not None:
-                st.markdown("#### Does it survive being poked?")
-                table = sens.as_table(report)
+    dates = bstage.rebalance_dates(hw.start, hw.end, frequency)
+    ready = sum(1 for d in dates if cache.path_for(d).exists())
+    c4, c5 = st.columns([1, 1])
+    go_pit = c4.button("Run point-in-time", width="stretch",
+                       key=f"pit_go_{chosen}")
+    go_sens = c5.button("Run with sensitivity checks", width="stretch",
+                        key=f"pit_sens_{chosen}",
+                        help="The same run started six months earlier and later, and "
+                             "again without the holding it leaned on most.")
+
+    if ready < len(dates):
+        st.warning(
+            f"{len(dates) - ready} of {len(dates)} dates are not cached yet. Each one "
+            "costs 6-10 seconds to assemble, almost all of it the point-in-time "
+            "fundamentals — so a cold run takes minutes, not seconds. Warm it once "
+            "with `uv run python scripts/warm_pit_cache.py`; every later run, with "
+            "any screen, is then fast. The cache changes speed and nothing else."
+        )
+
+    if go_pit or go_sens:
+        shared = dict(
+            costs=settings.cost, frequency=frequency,
+            risk_free=mx.risk_free_rate(
+                src.con, hw.start, hw.end, settings.risk_free_fallback)[0],
+            label=bstage.stage_b_label(_universe_verdict(DATA_KEY)),
+            data_fingerprint=data_fp, frame_for=cache.frame_for,
+        )
+        with st.spinner(f"Re-screening {len(dates)} dates"):
+            started = time.time()
+            out = bstage.run(src, spec, hw.start, hw.end, **shared)
+            report = (sensitivity.run(src, spec, hw.start, hw.end, **shared)
+                      if go_sens else None)
+            st.session_state[f"pit_result_{chosen}"] = out
+            st.session_state[f"pit_sens_{chosen}_result"] = report
+            st.session_state[f"pit_seconds_{chosen}"] = time.time() - started
+        if out is not None:
+            store.record_run(
+                chosen, "stage_b", spec.fingerprint(), data_fp,
+                out.dates[0], out.dates[-1],
+                {"frequency": frequency, "dates": len(dates),
+                 "sensitivity": bool(go_sens)}, out.metrics,
+                holdout_unlocked=unlock)
+
+    out = st.session_state.get(f"pit_result_{chosen}")
+    if out is None and go_pit:
+        st.info("Nothing passed the screen at any rebalance date in that window.")
+    elif out is not None:
+        _result_block(out, name="Portfolio", turnover=out.turnover, height=300, cells=[
+            ("TURNOVER P.A.", ui.pct(out.turnover), ""),
+            ("REBALANCES", f"{len(out.rebalances):,}", ""),
+        ])
+        if not out.rebalances.empty:
+            with st.expander(f"What it held, {len(out.rebalances)} rebalances"):
+                reb = out.rebalances
                 st.markdown(ui.grid(pd.DataFrame({
-                    "variation": table["variation"],
-                    "return p.a.": table["return p.a."].map(ui.pct),
-                    "vs index": table["vs index"].map(ui.pct),
-                    "max drawdown": table["max drawdown"].map(ui.pct),
-                }), numeric=set(), ticker_col="variation"), unsafe_allow_html=True)
-                st.caption(report.verdict())
+                    "screened": reb.screened_on.astype(str),
+                    "filled": reb.filled_on.astype(str),
+                    "names": reb.names.astype(int),
+                    "turnover": reb.turnover.map(ui.pct),
+                    "cost": reb.cost.map(lambda v: ui.pct(v, 2)),
+                }), numeric={"names"}, ticker_col="screened"),
+                    unsafe_allow_html=True)
 
-            for note in out.notes[:5]:
-                st.warning(note)
-            st.warning(out.label)
-            if hw.unlocked:
-                st.warning(hw.describe())
-            seconds = st.session_state.get(f"pit_seconds_{chosen}", 0.0)
-            tried = store.backtest_count(spec.fingerprint(), out.data_fingerprint)
-            st.caption(
-                f"Ran in {seconds:.0f} seconds over {len(dates)} rebalance dates. This "
-                f"exact screen has been tested {tried}× against this data build."
-            )
+        report = st.session_state.get(f"pit_sens_{chosen}_result")
+        if report is not None:
+            st.markdown("#### Does it survive being poked?")
+            table = sensitivity.as_table(report)
+            st.markdown(ui.grid(pd.DataFrame({
+                "variation": table["variation"],
+                "return p.a.": table["return p.a."].map(ui.pct),
+                "vs index": table["vs index"].map(ui.pct),
+                "max drawdown": table["max drawdown"].map(ui.pct),
+            }), numeric=set(), ticker_col="variation"), unsafe_allow_html=True)
+            st.caption(report.verdict())
 
-    _stage_b_section()
+        for note in out.notes[:5]:
+            st.warning(note)
+        st.warning(out.label)
+        if hw.unlocked:
+            st.warning(hw.describe())
+        seconds = st.session_state.get(f"pit_seconds_{chosen}", 0.0)
+        tried = store.backtest_count(spec.fingerprint(), out.data_fingerprint)
+        st.caption(
+            f"Ran in {seconds:.0f} seconds over {len(dates)} rebalance dates. This "
+            f"exact screen has been tested {tried}× against this data build."
+        )
 
-    st.markdown("#### Backtest — stage A")
+
+def _stage_a_section(spec, picks) -> None:
+    st.markdown("#### Backtest — stage A (today's ticks, held backwards)")
     if picks.empty:
         st.caption(
-            "Nothing held yet. The backtest runs on the names ticked above, not on "
+            "Nothing held yet. The backtest runs on the names ticked in SCREEN, not on "
             "everything that passed."
         )
-    else:
-        bt_tickers = [str(x) for x in picks.ticker]
-        span = src.con.execute(
-            "SELECT MIN(date), MAX(date) FROM prices WHERE ticker IN (SELECT UNNEST(?))",
-            [bt_tickers],
-        ).fetchone()
-        first_bar, last_bar = (span or (None, None))
-        if not first_bar:
-            st.info("No stored price history for these names.")
-        else:
-            c1, c2, c3 = st.columns([1.1, 1.1, 1.2])
-            start_on = c1.date_input(
-                "Start", value=first_bar, min_value=first_bar, max_value=last_bar,
-                key=f"bt_start_{chosen}",
-            )
-            charge = c2.toggle("Trading costs", value=True, key=f"bt_costs_{chosen}",
-                               help="Tiered by market cap; switch off to see what they cost you.")
-            go = c3.button("Run backtest", width="stretch", key=f"bt_go_{chosen}")
-
-            if go:
-                snapshot = src.snapshot()
-                model = settings.cost if charge else CostModel(
-                    commission=0.0, spread_tiers=((float("inf"), 0.0),))
-                rate, rate_source = mx.risk_free_rate(
-                    src.con, start_on, last_bar, settings.risk_free_fallback)
-                gold = (nm.gold_series(src.con, start_on, last_bar)
-                        if unit == nm.GOLD else pd.Series(dtype=float))
-                if unit == nm.GOLD and not nm.covers(gold, start_on, last_bar):
-                    st.warning(
-                        "No gold price stored for the whole window, so this run stays in "
-                        "dollars. `uv run python scripts/build_commodities.py` fills it."
-                    )
-                    gold = pd.Series(dtype=float)
-                result = bktest.buy_and_hold(
-                    src.con, picks, start_on, last_bar, costs=model,
-                    risk_free=rate, delisting_return=settings.delisting_return,
-                    data_fingerprint=snapshot.fingerprint(),
-                    universe_verdict=_universe_verdict(),
-                    numeraire=gold if len(gold) else None,
-                )
-                st.session_state[f"bt_unit_{chosen}"] = (
-                    nm.GOLD if len(gold) else nm.USD)
-                st.session_state[f"bt_rate_{chosen}"] = (rate, rate_source)
-                if result is None:
-                    st.session_state[f"bt_result_{chosen}"] = None
-                else:
-                    store.record_run(
-                        chosen, "stage_a", spec.fingerprint(), snapshot.fingerprint(),
-                        result.dates[0], result.dates[-1],
-                        {"costs_charged": charge, "positions": len(picks)},
-                        result.metrics,
-                    )
-                    st.session_state[f"bt_result_{chosen}"] = result
-
-            result = st.session_state.get(f"bt_result_{chosen}")
-            if result is None and go:
-                st.info("Not enough overlapping price history to run this basket.")
-            elif result is not None:
-                m = result.metrics
-                st.markdown(ui.stats([
-                    ("FROM", str(result.dates[0]), ""),
-                    ("YEARS", f"{result.years:.1f}", ""),
-                    ("PORTFOLIO P.A.", ui.pct(m["annual_return"]),
-                     "up" if m["annual_return"] >= 0 else "down"),
-                    ("S&P 500 TR P.A.", ui.pct(m.get("benchmark_annual_return")), ""),
-                    ("EXCESS P.A.", ui.pct(m.get("excess_annual")),
-                     "up" if (m.get("excess_annual") or 0) >= 0 else "down"),
-                    ("ENTRY COST", ui.pct(result.entry_cost_total), ""),
-                ]), unsafe_allow_html=True)
-
-                curve = pd.DataFrame({"Portfolio": result.portfolio}, index=result.dates)
-                if result.benchmark:
-                    curve[result.benchmark_symbol] = result.benchmark
-                st.line_chart(curve, height=280, color=[ui.AMBER, ui.CYAN])
-                run_unit = st.session_state.get(f"bt_unit_{chosen}", nm.USD)
-                if run_unit == nm.GOLD:
-                    st.caption(nm.note(nm.GOLD))
-
-                # Every figure R9 asks for, portfolio and index side by side, both
-                # computed by the same function so the yardstick cannot differ from the
-                # thing it measures.
-                rows = [
-                    ("Return p.a.", m["annual_return"], m.get("benchmark_annual_return")),
-                    ("Total return", m["total_return"], m.get("benchmark_total_return")),
-                    ("Volatility p.a.", m["volatility"], m.get("benchmark_volatility")),
-                    ("Max drawdown", m["max_drawdown"], m.get("benchmark_max_drawdown")),
-                    ("Deviation from index", m.get("tracking_error"), None),
-                ]
-                table = pd.DataFrame({
-                    "metric": [r[0] for r in rows] + ["Sharpe", "Turnover"],
-                    "portfolio": [ui.pct(r[1]) for r in rows]
-                                 + [ui.num(m["sharpe"]), "0.00"],
-                    result.benchmark_symbol or "index":
-                        [ui.pct(r[2]) if r[2] is not None else "—" for r in rows]
-                        + [ui.num(m.get("benchmark_sharpe")), "—"],
-                })
-                st.markdown(ui.grid(table, numeric=set(), ticker_col="metric"),
-                            unsafe_allow_html=True)
-                rate, rate_source = st.session_state.get(
-                    f"bt_rate_{chosen}", (settings.risk_free_fallback, "settings"))
-                st.caption(
-                    "Turnover is zero by construction: stage A buys once and holds, so "
-                    "costs are charged at entry only (R16b). Deviation from the index is "
-                    "the annualised standard deviation of the daily difference — how "
-                    "differently the portfolio travelled, not how far behind it ended. "
-                    f"Sharpe uses a risk-free rate of {rate:.2%} ({rate_source})."
-                )
-
-                for note in result.notes:
-                    st.warning(note)
-                st.warning(result.label)
-
-                tried = store.backtest_count(spec.fingerprint(), result.data_fingerprint)
-                other = store.other_data_builds(spec.fingerprint(), result.data_fingerprint)
-                st.caption(
-                    f"This exact screen has been tested {tried}× against this data build "
-                    f"(`{bktest.short_build_id(result.data_fingerprint)}`). The more "
-                    "attempts, the more the "
-                    "best-looking curve is a product of the search rather than of the rule."
-                )
-                if other:
-                    st.warning(
-                        f"{other} earlier run(s) of this screen read a DIFFERENT data "
-                        "build. Free price sources restate adjusted closes, so those "
-                        "curves and this one are not directly comparable (R22)."
-                    )
-
-with tab_research:
-    st.markdown('<div class="tl-cmd"><span class="p">&gt;</span></div>', unsafe_allow_html=True)
-    query = st.text_input(
-        "Company", placeholder="ticker or name — AAPL, newmont, american airlines",
-        label_visibility="collapsed", key="research_query",
+        return
+    bt_tickers = [str(x) for x in picks.ticker]
+    span = src.con.execute(
+        "SELECT MIN(date), MAX(date) FROM prices WHERE ticker IN (SELECT UNNEST(?))",
+        [bt_tickers],
+    ).fetchone()
+    first_bar, last_bar = (span or (None, None))
+    if not first_bar:
+        st.info("No stored price history for these names.")
+        return
+    c1, c2, c3 = st.columns([1.1, 1.1, 1.2])
+    start_on = c1.date_input(
+        "Start", value=first_bar, min_value=first_bar, max_value=last_bar,
+        key=f"bt_start_{chosen}", format="YYYY-MM-DD",
     )
+    charge = c2.toggle("Trading costs", value=True, key=f"bt_costs_{chosen}",
+                       help="Tiered by market cap; switch off to see what they cost you.")
+    run_bt = c3.button("Run backtest", width="stretch", key=f"bt_go_{chosen}")
 
-    if not query.strip():
-        st.caption(
-            "Look one company up. Reported figures are as first filed, not as later "
-            "restated, so you see what the market saw at the time. The quote is live."
-        )
-    else:
-        matches = rs.find_ticker(src.con, query)
-        non_equity = rs.price_only_symbols(src.con)
-        hit = non_equity[non_equity.symbol.str.upper() == query.strip().upper()]
-
-        if matches.empty and len(hit):
-            # Crypto, a commodity or an index: price history and nothing behind it.
-            sym = hit.iloc[0]
-            st.markdown(ui.kv([
-                (sym["name"], "", False),
-                ("Symbol", sym.symbol, False),
-                ("Kind", sym["kind"], False),
-                ("History", f"{sym['from']} to {sym['to']} ({sym.bars:,} bars)", False),
-            ]), unsafe_allow_html=True)
-            st.info(
-                f"**{sym['name']} has no financial statements.** Not missing — there is "
-                "no issuer filing accounts, so book value, earnings and every ratio "
-                "built on them do not exist for it. What does work: the price chart and "
-                "risk figures below, the commodity and macro links, and the whole "
-                "STRATEGY tab, where you can test regular buying or dip-buying against "
-                "its actual history."
-            )
-            ph = src.con.execute(
-                "SELECT date, close_adj FROM prices WHERE ticker = ? ORDER BY date",
-                [sym.symbol],
-            ).fetch_df()
-            if len(ph) > 10:
-                ph["date"] = pd.to_datetime(ph["date"])
-                st.line_chart(ph.set_index("date")[["close_adj"]].rename(
-                    columns={"close_adj": sym.symbol}), height=250, color=[ui.AMBER])
-            stats_np = _price_stats(sym.symbol, asof)
-            if stats_np:
-                cells = []
-                for label, key in (("1M", "return_1m"), ("3M", "return_3m"),
-                                   ("6M", "return_6m"), ("1Y", "return_1y")):
-                    v = stats_np.get(key)
-                    if v is not None and not pd.isna(v):
-                        cells.append((label, ui.pct(v, 1), "up" if v >= 0 else "down"))
-                if stats_np.get("volatility") and not pd.isna(stats_np["volatility"]):
-                    cells.append(("VOL 1Y", f"{stats_np['volatility']:.0%}", ""))
-                if stats_np.get("max_drawdown") is not None:
-                    cells.append(("MAX DRAWDOWN", ui.pct(stats_np["max_drawdown"], 1), "down"))
-                if stats_np.get("beta") is not None:
-                    cells.append(("BETA vs S&P", ui.num(stats_np["beta"]), ""))
-                st.markdown(ui.stats(cells), unsafe_allow_html=True)
-            sens_np = rs.commodity_sensitivity(src.con, sym.symbol)
-            if not sens_np.empty:
-                st.markdown("#### Moves with")
-                st.markdown(ui.grid(pd.DataFrame({
-                    "series": sens_np.commodity,
-                    "correlation": sens_np.correlation.map(lambda v: f"{v:+.2f}"),
-                    "beta": sens_np.beta.map(lambda v: f"{v:+.2f}"),
-                    "days": sens_np.days.astype(str),
-                }).head(6), numeric={"days"}, signed={"correlation", "beta"},
-                    ticker_col="series"), unsafe_allow_html=True)
-        elif matches.empty and not (ybars := _yahoo_bars(query.strip().upper())).empty:
-            # Any Yahoo ticker outside the US universe: BHP.AX, SAP.DE, 7203.T. Price
-            # and volume only — there are no SEC filings behind it (world.py, stage 2).
-            ysym = query.strip().upper()
-            yquote = rs.live_quote(ysym) or {}
-            ycur = yquote.get("currency") or "the listing's currency"
-            st.markdown(ui.kv([
-                ("Symbol", ysym, False),
-                ("Currency", ycur, False),
-                ("History", f"{ybars.date.iloc[0]} to {ybars.date.iloc[-1]} "
-                            f"({len(ybars):,} days, from Yahoo)", False),
-            ]), unsafe_allow_html=True)
-            if yquote.get("price"):
-                tone = "up" if (yquote.get("change") or 0) >= 0 else "down"
-                cells = [("LAST", ui.num(yquote["price"]), tone)]
-                if yquote.get("change") is not None:
-                    cells.append(("CHANGE", ui.pct(yquote["change"]), tone))
-                st.markdown(ui.stats(cells), unsafe_allow_html=True)
-            st.info(
-                f"**{ysym} is outside the US universe**, so there are no SEC filings "
-                "behind it: no fundamentals, no screen, no point-in-time backtest. What "
-                f"works: the chart and risk figures below, in {ycur}, and a buy/sell "
-                "rule on it in LAB → Single stock."
-            )
-            yspan = st.selectbox("Range", ["6M", "1Y", "5Y"], index=1,
-                                 label_visibility="collapsed", key=f"yspan_{ysym}")
-            yview = ybars.join(rs.bollinger(ybars)).tail(
-                {"6M": 126, "1Y": 252, "5Y": 1260}[yspan])
-            ybands = st.toggle("Bollinger 20d", value=False, key=f"ybands_{ysym}")
-            st.plotly_chart(charts.price_figure(yview, ysym, bands=ybands),
-                            width="stretch", key=f"ychart_{ysym}")
-            ystats = world.stats(ybars)
-            cells = [(k, ui.pct(ystats[k], 1), "up" if ystats[k] >= 0 else "down")
-                     for k in ("1M", "3M", "6M", "1Y") if ystats.get(k) is not None]
-            if ystats.get("volatility"):
-                cells.append(("VOL 1Y", f"{ystats['volatility']:.0%}", ""))
-            if ystats.get("max_drawdown") is not None:
-                cells.append(("MAX DD 1Y", ui.pct(ystats["max_drawdown"], 1), "down"))
-            st.markdown(ui.stats(cells), unsafe_allow_html=True)
-        elif matches.empty:
+    if run_bt:
+        model = settings.cost if charge else CostModel(
+            commission=0.0, spread_tiers=((float("inf"), 0.0),))
+        rate, rate_source = mx.risk_free_rate(
+            src.con, start_on, last_bar, settings.risk_free_fallback)
+        gold = (nm.gold_series(src.con, start_on, last_bar)
+                if unit == nm.GOLD else pd.Series(dtype=float))
+        if unit == nm.GOLD and not nm.covers(gold, start_on, last_bar):
             st.warning(
-                f"Nothing matches '{query}'. It is not a US listing in this app, and "
-                "Yahoo returned no prices for it — either it has none under that symbol "
-                "or it could not be reached. Other exchanges need Yahoo's suffix, e.g. "
-                "BHP.AX (ASX), SAP.DE (Xetra), 7203.T (Tokyo)."
+                "No gold price stored for the whole window, so this run stays in "
+                "dollars. `uv run python scripts/build_commodities.py` fills it."
             )
-            if not non_equity.empty:
-                st.caption(
-                    "Price-only symbols available: "
-                    + ", ".join(non_equity.symbol.tolist())
-                )
+            gold = pd.Series(dtype=float)
+        result = bktest.buy_and_hold(
+            src.con, picks, start_on, last_bar, costs=model,
+            risk_free=rate, delisting_return=settings.delisting_return,
+            data_fingerprint=data_fp,
+            universe_verdict=_universe_verdict(DATA_KEY),
+            numeraire=gold if len(gold) else None,
+        )
+        st.session_state[f"bt_unit_{chosen}"] = (
+            nm.GOLD if len(gold) else nm.USD)
+        st.session_state[f"bt_rate_{chosen}"] = (rate, rate_source)
+        if result is None:
+            st.session_state[f"bt_result_{chosen}"] = None
         else:
-            ticker = matches.iloc[0].ticker
-            if len(matches) > 1:
-                names = matches.set_index("ticker")["name"]
-                ticker = st.radio(
-                    "Matches", options=matches.ticker.tolist(),
-                    format_func=lambda t: f"{t} · {names.loc[t][:26]}",
-                    horizontal=True, key="research_pick",
-                )
-            prof = rs.profile(src.con, ticker)
-            cik = int(prof["cik"])
-            quote = rs.live_quote(ticker)
-            enriched = add_valuation(derive_metrics(_frame(asof)), assumptions)
-            me = enriched[enriched.ticker.astype(str).str.upper() == ticker.upper()]
-            me = me.iloc[0] if len(me) else None
+            store.record_run(
+                chosen, "stage_a", spec.fingerprint(), data_fp,
+                result.dates[0], result.dates[-1],
+                {"costs_charged": charge, "positions": len(picks)},
+                result.metrics,
+            )
+            st.session_state[f"bt_result_{chosen}"] = result
 
-            # Quote strip — always on top, whichever section is open.
-            if quote:
-                tone = "up" if (quote.get("change") or 0) >= 0 else "down"
-                cells = [("LAST", ui.num(quote["price"]), tone)]
-                if quote.get("change") is not None:
-                    cells.append(("CHANGE", ui.pct(quote["change"]), tone))
-                for label, key in (("OPEN", "open"), ("HIGH", "day_high"),
-                                   ("LOW", "day_low"), ("52W HIGH", "year_high"),
-                                   ("52W LOW", "year_low")):
-                    if quote.get(key):
-                        cells.append((label, ui.num(quote[key]), ""))
-                st.markdown(ui.stats(cells), unsafe_allow_html=True)
+    result = st.session_state.get(f"bt_result_{chosen}")
+    if result is None and run_bt:
+        st.info("Not enough overlapping price history to run this basket.")
+    elif result is not None:
+        _result_block(result, name="Portfolio", turnover=0.0, total_return=True, cells=[
+            ("ENTRY COST", ui.pct(result.entry_cost_total), "")])
+        if st.session_state.get(f"bt_unit_{chosen}", nm.USD) == nm.GOLD:
+            st.caption(nm.note(nm.GOLD))
+        rate, rate_source = st.session_state.get(
+            f"bt_rate_{chosen}", (settings.risk_free_fallback, "settings"))
+        st.caption(
+            "Turnover is zero by construction: stage A buys once and holds, so "
+            "costs are charged at entry only (R16b). Deviation from the index is "
+            "the annualised standard deviation of the daily difference — how "
+            "differently the portfolio travelled, not how far behind it ended. "
+            f"Sharpe uses a risk-free rate of {rate:.2%} ({rate_source})."
+        )
+
+        for note in result.notes:
+            st.warning(note)
+        st.warning(result.label)
+
+        tried = store.backtest_count(spec.fingerprint(), result.data_fingerprint)
+        other = store.other_data_builds(spec.fingerprint(), result.data_fingerprint)
+        st.caption(
+            f"This exact screen has been tested {tried}× against this data build "
+            f"(`{bktest.short_build_id(result.data_fingerprint)}`). The more "
+            "attempts, the more the "
+            "best-looking curve is a product of the search rather than of the rule."
+        )
+        if other:
+            st.warning(
+                f"{other} earlier run(s) of this screen read a DIFFERENT data "
+                "build. Free price sources restate adjusted closes, so those "
+                "curves and this one are not directly comparable (R22)."
+            )
+
+
+def _view_backtest() -> None:
+    """Stage B first (the honest one: point in time, holdout, sensitivity), then A."""
+    if not _need_portfolio("a backtest runs the portfolio's screen."):
+        return
+    if asof is None:
+        st.info("No prices stored yet.")
+        return
+    spec = store.get_spec(chosen)
+    _stage_b_section(spec)
+    _stage_a_section(spec, _picks(spec))
+
+
+SUBMISSIONS = "submissions.zip"
+
+
+def _sec_overview(c) -> None:
+    """DES and GP: who the company is, its chart, return and risk, the 20-day range."""
+    ticker, cik, prof, me = c.ticker, c.cik, c.prof, c.me
+    details = rs.company_details(cfg.CACHE_DIR / SUBMISSIONS, cik)
+    left_c, right_c = st.columns([1, 2], gap="medium")
+    with left_c:
+        pairs = [
+            (prof["name"][:40], "", False),
+            ("Sector", prof.get("sector") or "—", False),
+            ("Exchange", prof.get("exchange") or "—", False),
+        ]
+        if details.get("incorporated_in"):
+            pairs.append(("Incorporated", details["incorporated_in"], False))
+        if details.get("fiscal_year_end"):
+            pairs.append(("Fiscal year ends", details["fiscal_year_end"], False))
+        if details.get("former_names"):
+            pairs.append(("Formerly", details["former_names"][0][:28], False))
+        if me is not None:
+            pairs += [
+                ("Market cap", ui.money(me.market_cap), True),
+                ("P/E", ui.num(me.price_to_earnings), False),
+                ("P/B", ui.num(me.price_to_book), False),
+                ("P/S", ui.num(me.price_to_sales), False),
+                ("Net margin", ui.pct(me.net_margin, 1), False),
+                ("Debt/equity", ui.num(me.debt_to_equity), False),
+                ("Price/intrinsic", ui.num(me.price_to_intrinsic), False),
+            ]
+        st.markdown(ui.kv(pairs), unsafe_allow_html=True)
+        if me is not None:
+            st.caption("Price/intrinsic under the screen's assumptions: "
+                       + _assumptions().describe() + ".")
+    with right_c:
+        px_hist = rs.price_history(src.con, ticker, years=5)
+        if px_hist.empty:
+            st.info("No stored price history.")
+        else:
+            c_a, c_b, c_c = st.columns([1.2, 1, 1.4])
+            span = c_a.segmented_control(
+                "Range", ["6M", "1Y", "5Y"], default="1Y",
+                label_visibility="collapsed", key=f"span_{ticker}",
+            ) or "1Y"
+            # Bands are computed on the FULL history and only then cropped to
+            # the visible span. Computing them on the crop would leave the
+            # first 20 sessions of every view without an envelope.
+            chart_px = px_hist
+            chart_unit = nm.USD
+            if unit == nm.GOLD:
+                gold_px = nm.gold_series(src.con)
+                if not gold_px.empty:
+                    priced = chart_px.set_index("date")[
+                        ["open", "high", "low", "close"]]
+                    converted = nm.convert(priced, gold_px).dropna(how="all")
+                    if not converted.empty:
+                        chart_px = (chart_px.set_index("date")
+                                    .drop(columns=["open", "high", "low", "close"])
+                                    .join(converted, how="right")
+                                    .reset_index())
+                        chart_unit = nm.GOLD
+            # Bands are computed on the SAME series the candles are drawn
+            # from, so they follow the unit rather than sitting in dollars
+            # around a chart in ounces.
+            view = chart_px.join(rs.bollinger(chart_px))
+            view = view.tail({"6M": 126, "1Y": 252, "5Y": 1260}[span])
+            # Judged on what is actually on screen: older bars predate the
+            # high/low columns, so a long view can fall back to a line while
+            # a short one draws candles.
+            can_candle = rs.has_intraday_range(view)
+            candles = c_b.toggle(
+                "Candles", value=False, disabled=not can_candle,
+                key=f"candles_{ticker}_{span}",
+                help="Candles instead of the line. Volume stays underneath "
+                     "either way." if can_candle else
+                "Stored bars carry no high/low for this range.",
+            )
+            bands = c_c.toggle(
+                "Bollinger 20d", value=False, key=f"bands_{ticker}",
+                help="20-day average with a 2-standard-deviation envelope.",
+            )
+
+            fig = charts.price_figure(view, ticker, bands=bands,
+                                      candles=candles)
+            st.plotly_chart(fig, width="stretch",
+                            key=f"pxchart_{ticker}")
+            if chart_unit == nm.GOLD:
+                st.caption(nm.note(nm.GOLD))
+            if not can_candle:
                 st.caption(
-                    "Live quote for this company only. The screener stays on one common "
-                    f"date ({asof}); mixing a live price into a ranking would favour it."
+                    "Line, not candles: the bars in this range carry no high "
+                    "or low. `uv run python scripts/build_prices.py --full` "
+                    "backfills the intraday range for the stored window."
+                )
+            elif bands:
+                st.caption(
+                    "Bands are 20-day average ± 2 population standard "
+                    "deviations of the unadjusted close — the same series the "
+                    "candles are drawn from. About one session in twenty closes "
+                    "outside them even when nothing is happening; that is what "
+                    "two standard deviations means, not a signal."
+                )
+        stats_now = _price_stats(ticker, asof, DATA_KEY)
+        if stats_now:
+            st.markdown(ui.stats(_risk_cells(stats_now)), unsafe_allow_html=True)
+            bits = [f"{lab} {stats_now[k]:,.2f}" for lab, k in
+                    (("50d avg", "ma50"), ("200d avg", "ma200"))
+                    if stats_now.get(k) and not pd.isna(stats_now[k])]
+            st.caption(
+                (" · ".join(bits) + " · " if bits else "")
+                + f"{stats_now['days']} stored days to {stats_now['to']}; max drawdown "
+                "over all of them, volatility over the last year. Beta describes the "
+                "past and is noisy on a short window."
+            )
+        # Width of the next 20 sessions, never the direction (volforecast.py).
+        # Measured on US shares only, so foreign lines (TIC.CTY) get no number.
+        if "." not in ticker and not ticker.startswith("^"):
+            vf_model = _vol_model(asof, DATA_KEY)
+            vf_now = (vfc.for_ticker(src.con, vf_model, ticker)
+                      if vf_model else None)
+            if vf_now:
+                st.markdown(ui.stats([
+                    ("VOL MODEL 20D", f"{vf_now['volatility']:.0%}", "amber"),
+                    ("VOL 60D", f"{vf_now['trailing_60d']:.0%}", ""),
+                    ("80% RANGE", f"{vf_now['low']:,.2f} – {vf_now['high']:,.2f}", ""),
+                ]), unsafe_allow_html=True)
+                st.caption(
+                    f"Range for the close 20 sessions after {vf_now['date']}, "
+                    "centred on today's close: it describes how far the price "
+                    "may move, not which way. Pooled Log-HAR on "
+                    f"{vf_model.series} US shares, fitted on data to "
+                    f"{vf_model.asof}. "
+                    "Measured 2014–2026 on 200 US shares, refitted yearly: "
+                    "21 % lower forecast error than the 60-day figure, and the "
+                    "range held 78 % of the time (75–83 % by year). A frozen "
+                    "price or under a year of history gives no number."
                 )
 
-            # ------------------------------------------------------------ AI summary
-            data_fp = src.snapshot().fingerprint()
-            have = ai_summary.stored(store.con, ticker, data_fp)
-            with st.container(border=True):
-                a1, a2 = st.columns([3, 1])
-                a1.markdown("#### AI summary")
-                label = "Write again" if have else "Write AI summary"
-                if a2.button(label, key=f"ai_sum_{ticker}", width="stretch"):
-                    if not secret("ANTHROPIC_API_KEY"):
-                        st.error("ANTHROPIC_API_KEY missing from .env.local.")
-                    else:
-                        with st.spinner("Reading the filings and prices…"):
-                            try:
-                                sheet = ai_summary.data_sheet(
-                                    src.con, ticker, cik, me, asof, frame=enriched)
-                                result = ai_summary.summarize(sheet)
-                            except Exception as exc:                 # noqa: BLE001
-                                result = {"text": None, "error": str(exc)}
-                        if result.get("text"):
-                            ai_summary.save(store.con, ticker, data_fp, result)
-                            have = ai_summary.stored(store.con, ticker, data_fp)
-                        else:
-                            st.error(result.get("error") or "No summary came back.")
-                shown = have or ai_summary.latest(store.con, ticker)
-                if shown:
-                    st.markdown(shown["text"])
-                    stamp = pd.Timestamp(shown["created_at"]).strftime("%Y-%m-%d %H:%M")
-                    st.caption(
-                        f"Written {stamp} by {shown['model']} from this app's own figures "
-                        "only — no outside news, no recommendation."
-                        + ("" if have else " Written on an older data build; the numbers "
-                           "may have moved since. Press the button for a fresh one.")
-                    )
-                else:
-                    st.caption(
-                        "A short write-up from the figures on this page — valuation, the "
-                        "history as first filed, restatements, price behaviour and peers. "
-                        "The model may only argue from those numbers and does not "
-                        "recommend buying or selling. Uses your Anthropic API key."
-                    )
 
-            def _open_research_book(name, amount):
-                last = src.con.execute(
-                    "SELECT COALESCE(close_raw, close) FROM prices WHERE ticker = ? "
-                    "AND date <= ? ORDER BY date DESC LIMIT 1", [ticker, asof],
-                ).fetchone()
-                if not last or not last[0]:
-                    raise ValueError(f"No stored price for {ticker}.")
-                cap = float(me["market_cap"]) if me is not None and "market_cap" in me \
-                    and not pd.isna(me["market_cap"]) else 0.0
-                return paper.open_hold(
-                    store.con, name, "RESEARCH",
-                    pd.DataFrame({"ticker": [ticker], "weight": [1.0],
-                                  "price": [float(last[0])],
-                                  "cost": [settings.cost.round_trip_cost(cap)]}),
-                    asof, amount)
-
-            _paper_section(
-                "RESEARCH", f"research_{ticker}", _open_research_book,
-                f"{ticker} {asof}",
-                f"Buy {ticker} at the {asof} close and hold it. Every paper book lands "
-                "in the BOOKS tab next to the others.")
-
-            sections = st.tabs([
-                "OVERVIEW", "FINANCIALS", "RELATIONSHIPS", "VALUATION", "OPTIONS",
-                "EXPOSURE", "ANALYSTS", "OWNERSHIP", "NEWS", "FILINGS",
-            ])
-
-            # ---------------------------------------------------------------- overview
-            with sections[0]:
-                details = rs.company_details(CACHE_DIR / "submissions.zip", cik)
-                left_c, right_c = st.columns([1, 2], gap="medium")
-                with left_c:
-                    pairs = [
-                        (prof["name"][:40], "", False),
-                        ("Sector", prof.get("sector") or "—", False),
-                        ("Exchange", prof.get("exchange") or "—", False),
-                    ]
-                    if details.get("incorporated_in"):
-                        pairs.append(("Incorporated", details["incorporated_in"], False))
-                    if details.get("fiscal_year_end"):
-                        pairs.append(("Fiscal year ends", details["fiscal_year_end"], False))
-                    if details.get("former_names"):
-                        pairs.append(("Formerly", details["former_names"][0][:28], False))
-                    if me is not None:
-                        pairs += [
-                            ("Market cap", ui.money(me.market_cap), True),
-                            ("P/E", ui.num(me.price_to_earnings), False),
-                            ("P/B", ui.num(me.price_to_book), False),
-                            ("P/S", ui.num(me.price_to_sales), False),
-                            ("Net margin", ui.pct(me.net_margin, 1), False),
-                            ("Debt/equity", ui.num(me.debt_to_equity), False),
-                            ("Price/intrinsic", ui.num(me.price_to_intrinsic), False),
-                        ]
-                    st.markdown(ui.kv(pairs), unsafe_allow_html=True)
-                with right_c:
-                    px_hist = rs.price_history(src.con, ticker, years=5)
-                    if px_hist.empty:
-                        st.info("No stored price history.")
-                    else:
-                        import plotly.graph_objects as go
-
-                        c_a, c_b, c_c = st.columns([1, 1, 1.4])
-                        span = c_a.selectbox(
-                            "Range", ["6M", "1Y", "5Y"], index=1,
-                            label_visibility="collapsed", key=f"span_{ticker}",
-                        )
-                        # Bands are computed on the FULL history and only then cropped to
-                        # the visible span. Computing them on the crop would leave the
-                        # first 20 sessions of every view without an envelope.
-                        chart_px = px_hist
-                        chart_unit = nm.USD
-                        if unit == nm.GOLD:
-                            gold_px = nm.gold_series(src.con)
-                            if not gold_px.empty:
-                                priced = chart_px.set_index("date")[
-                                    ["open", "high", "low", "close"]]
-                                converted = nm.convert(priced, gold_px).dropna(how="all")
-                                if not converted.empty:
-                                    chart_px = (chart_px.set_index("date")
-                                                .drop(columns=["open", "high", "low", "close"])
-                                                .join(converted, how="right")
-                                                .reset_index())
-                                    chart_unit = nm.GOLD
-                        # Bands are computed on the SAME series the candles are drawn
-                        # from, so they follow the unit rather than sitting in dollars
-                        # around a chart in ounces.
-                        view = chart_px.join(rs.bollinger(chart_px))
-                        view = view.tail({"6M": 126, "1Y": 252, "5Y": 1260}[span])
-                        # Judged on what is actually on screen: older bars predate the
-                        # high/low columns, so a long view can fall back to a line while
-                        # a short one draws candles.
-                        can_candle = rs.has_intraday_range(view)
-                        candles = c_b.toggle(
-                            "Candles", value=False, disabled=not can_candle,
-                            key=f"candles_{ticker}_{span}",
-                            help="Candles instead of the line. Volume stays underneath "
-                                 "either way." if can_candle else
-                            "Stored bars carry no high/low for this range.",
-                        )
-                        bands = c_c.toggle(
-                            "Bollinger 20d", value=False, key=f"bands_{ticker}",
-                            help="20-day average with a 2-standard-deviation envelope.",
-                        )
-
-                        fig = charts.price_figure(view, ticker, bands=bands,
-                                                  candles=candles)
-                        st.plotly_chart(fig, width="stretch",
-                                        key=f"pxchart_{ticker}")
-                        if chart_unit == nm.GOLD:
-                            st.caption(nm.note(nm.GOLD))
-                        if not can_candle:
-                            st.caption(
-                                "Line, not candles: the bars in this range carry no high "
-                                "or low. `uv run python scripts/build_prices.py --full` "
-                                "backfills the intraday range for the stored window."
-                            )
-                        elif bands:
-                            st.caption(
-                                "Bands are 20-day average ± 2 population standard "
-                                "deviations of the unadjusted close — the same series the "
-                                "candles are drawn from. About one session in twenty closes "
-                                "outside them even when nothing is happening; that is what "
-                                "two standard deviations means, not a signal."
-                            )
-                    stats_now = _price_stats(ticker, asof)
-                    if stats_now:
-                        cells = []
-                        for label, key in (("1M", "return_1m"), ("3M", "return_3m"),
-                                           ("6M", "return_6m"), ("1Y", "return_1y")):
-                            v = stats_now.get(key)
-                            if v is not None and not pd.isna(v):
-                                cells.append((label, ui.pct(v, 1), "up" if v >= 0 else "down"))
-                        if stats_now.get("volatility") and not pd.isna(stats_now["volatility"]):
-                            cells.append(("VOL 1Y", f"{stats_now['volatility']:.0%}", ""))
-                        if stats_now.get("max_drawdown") is not None:
-                            cells.append(("MAX DD", ui.pct(stats_now["max_drawdown"], 1), "down"))
-                        if stats_now.get("beta") is not None:
-                            cells.append(("BETA", ui.num(stats_now["beta"]), ""))
-                        st.markdown(ui.stats(cells), unsafe_allow_html=True)
-                        bits = [f"{lab} {stats_now[k]:,.2f}" for lab, k in
-                                (("50d avg", "ma50"), ("200d avg", "ma200"))
-                                if stats_now.get(k) and not pd.isna(stats_now[k])]
-                        st.caption(
-                            (" · ".join(bits) + " · " if bits else "")
-                            + f"{stats_now['days']} stored days to {stats_now['to']}. "
-                            "Beta describes the past and is noisy on a short window."
-                        )
-                    # Width of the next 20 sessions, never the direction (volforecast.py).
-                    # Measured on US shares only, so foreign lines (TIC.CTY) get no number.
-                    if "." not in ticker and not ticker.startswith("^"):
-                        vf_model = _vol_model(asof)
-                        vf_now = (vfc.for_ticker(src.con, vf_model, ticker)
-                                  if vf_model else None)
-                        if vf_now:
-                            st.markdown(ui.stats([
-                                ("VOL MODEL 20D", f"{vf_now['volatility']:.0%}", "amber"),
-                                ("VOL 60D", f"{vf_now['trailing_60d']:.0%}", ""),
-                                ("80% RANGE", f"{vf_now['low']:,.2f} – {vf_now['high']:,.2f}", ""),
-                            ]), unsafe_allow_html=True)
-                            st.caption(
-                                f"Range for the close 20 sessions after {vf_now['date']}, "
-                                "centred on today's close: it describes how far the price "
-                                "may move, not which way. Pooled Log-HAR on "
-                                f"{vf_model.series} US shares, fitted on data to "
-                                f"{vf_model.asof}. "
-                                "Measured 2014–2026 on 200 US shares, refitted yearly: "
-                                "21 % lower forecast error than the 60-day figure, and the "
-                                "range held 78 % of the time (75–83 % by year). A frozen "
-                                "price or under a year of history gives no number."
-                            )
-
-            # -------------------------------------------------------------- financials
-            with sections[1]:
-                hist = rs.annual_history(src.con, cik)
-                filed_in = rs.reporting_currency(src.con, cik)
-                if filed_in != "USD":
-                    st.caption(
-                        f"Figures below are in {filed_in}, as filed. The screen and the "
-                        "valuation convert them to USD at the exchange rate of their date."
-                    )
-                if hist.empty:
-                    st.info("No annual XBRL figures for this filer.")
-                else:
-                    show = hist.sort_values("year", ascending=False).head(12)
-                    st.markdown(ui.grid(pd.DataFrame({
-                        "year": show.year.astype(int).astype(str),
-                        "revenue": show.revenue.map(ui.money),
-                        "net income": show.net_income.map(ui.money),
-                        "op cash flow": show.operating_cash_flow.map(ui.money),
-                        "capex": show.capex.map(ui.money),
-                        "free cash flow": show.free_cash_flow.map(ui.money),
-                        "equity": show.book_value.map(ui.money),
-                        "assets": show.total_assets.map(ui.money),
-                        "margin": show.net_margin.map(lambda v: ui.pct(v, 1)),
-                        "roe": show.return_on_equity.map(lambda v: ui.pct(v, 1)),
-                    }), numeric={"revenue", "net income", "op cash flow", "capex",
-                                 "free cash flow", "equity", "assets"},
-                        signed={"margin", "roe"}, ticker_col="year"),
-                        unsafe_allow_html=True)
-                    st.caption("As first reported. Later revisions appear below, not here.")
-
-                qt = rs.quarterly_trend(src.con, cik)
-                if not qt.empty and "revenue" in qt:
-                    st.markdown("#### By quarter")
-                    st.bar_chart(qt.set_index("period_end")[["revenue"]],
-                                 height=180, color=[ui.AMBER])
-                    st.caption(
-                        "A company can grow every year while shrinking for three straight "
-                        "quarters. Annual rows hide that.")
-
-                eh = rs.earnings_history(ticker)
-                if not eh.empty:
-                    st.markdown("#### Earnings against expectations")
-                    dcol = eh.columns[0]
-                    st.markdown(ui.grid(pd.DataFrame({
-                        "date": eh[dcol].dt.date.astype(str),
-                        "estimate": eh.get("EPS Estimate", pd.Series(dtype=float)).map(ui.num),
-                        "reported": eh.get("Reported EPS", pd.Series(dtype=float)).map(ui.num),
-                        "surprise": eh.get("Surprise(%)", pd.Series(dtype=float)).map(
-                            lambda v: "—" if pd.isna(v) else f"{v:+.1f}%"),
-                    }), numeric={"estimate", "reported"}, signed={"surprise"},
-                        ticker_col="date"), unsafe_allow_html=True)
-                    st.caption("Consensus estimates, so this section is opinion meeting fact.")
-
-                rest = rs.restatements(src.con, cik)
-                if not rest.empty:
-                    st.markdown("#### Restated after the fact")
-                    top = rest.head(10)
-                    st.markdown(ui.grid(pd.DataFrame({
-                        "metric": top.metric,
-                        "period": top.period_end.astype(str),
-                        "first said": top.first_reported.map(ui.money),
-                        "later said": top.later_value.map(ui.money),
-                        "change": top.change.map(lambda v: ui.pct(v, 1)),
-                        "revised on": top.later_filed.astype(str),
-                    }), numeric={"first said", "later said"}, signed={"change"},
-                        ticker_col="metric"), unsafe_allow_html=True)
-                    st.caption(
-                        "Revisions are routine and usually small. A large one, or a "
-                        "pattern of them, is something a screen cannot see.")
-
-            # ----------------------------------------------------------- relationships
-            with sections[2]:
-                st.write(
-                    "Who this company says it depends on — read out of its own annual "
-                    "report. Every line carries a passage copied from the filing, and "
-                    "each passage is checked against the document in code before it is "
-                    "shown. A relationship the filing does not state does not appear "
-                    "here, however well known it is."
-                )
-                tenk = rs.filings(CACHE_DIR / "submissions.zip", cik, forms=["10-K"], limit=1)
-                if tenk.empty and is_compustat(cik):
-                    st.info("A Compustat Global company has no SEC annual report to read.")
-                elif tenk.empty:
-                    st.info(
-                        "No 10-K in the local archive for this filer. Foreign issuers "
-                        "file a 20-F instead, which this does not read yet."
-                    )
-                elif not secret("ANTHROPIC_API_KEY"):
-                    st.warning("Needs ANTHROPIC_API_KEY in .env.local.")
-                else:
-                    row = tenk.iloc[0]
-                    st.caption(f"From the 10-K filed {row.filed} for the period {row.period}.")
-                    if st.button("Read the filing", key="read_10k", width="stretch"):
-                        with st.spinner("Downloading and reading Item 1"):
-                            try:
-                                text = bz.fetch_filing_text(row.url)
-                                found = bz.extract(text, prof["name"])
-                            except Exception as exc:
-                                found = None
-                                st.error(f"Could not read that filing: {exc}")
-                        if found is not None:
-                            st.session_state[f"rel_{ticker}"] = found
-
-                    found = st.session_state.get(f"rel_{ticker}")
-                    if found:
-                        rel = found["relationships"]
-                        st.markdown(ui.stats([
-                            ("NAMED", str(len(rel)), "amber" if len(rel) else ""),
-                            ("UNNAMED NOTES", str(len(found["notes"])), ""),
-                            ("QUOTES REJECTED", str(found["rejected"]),
-                             "down" if found["rejected"] else "up"),
-                        ]), unsafe_allow_html=True)
-                        if found["rejected"]:
-                            st.caption(
-                                f"{found['rejected']} claim(s) were dropped because the "
-                                "quote could not be found in the filing. That is the "
-                                "check working, not a failure."
-                            )
-                        if len(rel):
-                            for r in rel.itertuples():
-                                st.markdown(
-                                    f"**{r.counterparty}** — {r.relationship}",
-                                )
-                                st.markdown(
-                                    f"<div style='border-left:2px solid {ui.AMBER_DIM};"
-                                    f"padding-left:0.7rem;color:{ui.MUTED};"
-                                    f"font-size:0.74rem;margin-bottom:0.5rem'>"
-                                    f"“{r.quote}”</div>",
-                                    unsafe_allow_html=True,
-                                )
-                        else:
-                            st.info(
-                                "The filing names no counterparty. That is common and "
-                                "informative: large companies often describe suppliers "
-                                "only in the abstract, so the household names you may "
-                                "expect are genuinely not in the document."
-                            )
-                        if found["notes"]:
-                            st.markdown("#### Dependencies stated without a name")
-                            for n in found["notes"]:
-                                st.markdown(
-                                    f"<div style='border-left:2px solid {ui.RULE};"
-                                    f"padding-left:0.7rem;color:{ui.DATA};"
-                                    f"font-size:0.74rem;margin-bottom:0.4rem'>“{n}”</div>",
-                                    unsafe_allow_html=True,
-                                )
-                        st.caption(f"[Open the filing at the SEC]({row.url})")
-
-            # --------------------------------------------------------------- valuation
-            with sections[3]:
-                val = rs.valuation_history(src.con, ticker, cik)
-                if val.empty:
-                    st.info("Not enough history to rebuild past multiples.")
-                else:
-                    st.line_chart(val.set_index("year")[["price_to_earnings", "price_to_book"]],
-                                  height=210, color=[ui.AMBER, ui.CYAN])
-                    st.caption(
-                        "Each year's multiple uses that year's price and the figures public "
-                        "then. Today's price against old earnings would describe nothing "
-                        "that ever happened.")
-                    st.markdown(ui.grid(pd.DataFrame({
-                        "year": val.year.astype(str),
-                        "price": val.price.map(ui.num),
-                        "mkt cap": val.market_cap.map(ui.money),
-                        "p/e": val.price_to_earnings.map(ui.num),
-                        "p/b": val.price_to_book.map(ui.num),
-                        "p/s": val.price_to_sales.map(ui.num),
-                    }), numeric={"price", "mkt cap", "p/e", "p/b", "p/s"},
-                        ticker_col="year"), unsafe_allow_html=True)
-
-                # --------------------------------------------------- trading comps
-                st.markdown("#### Trading comps")
-                suggested = rs.peers(enriched, ticker).ticker.astype(str).tolist()[:8]
-                chosen_peers = st.multiselect(
-                    "Peers", options=sorted(enriched.ticker.astype(str).unique()),
-                    default=suggested, key=f"peers_{ticker}",
-                    help="Suggested: same SEC industry, closest in size. Add or remove "
-                         "names — a comps set is a judgement, not a formula.")
-                sheet = comps.sheet(enriched, ticker, chosen_peers) if chosen_peers else {}
-                if not sheet:
-                    st.info("Pick at least one peer.")
-                else:
-                    labels = {c: l for c, l, _ in comps.COLUMNS}
-                    pct_cols = {"ebitda_margin", "return_on_invested_capital",
-                                "revenue_growth"}
-
-                    def _fmt(col, v):
-                        if v is None or pd.isna(v):
-                            return "—"
-                        return ui.pct(v, 1) if col in pct_cols else f"{v:,.1f}x"
-
-                    def _vs(col, v):
-                        if v is None or pd.isna(v):
-                            return "—"
-                        if col in pct_cols:
-                            return f"{v * 100:+.1f} pp"
-                        if col == "net_debt_to_ebitda":
-                            return f"{v:+.1f}x"
-                        return ui.pct(v, 0)
-
-                    shown = [c for c, _, _ in comps.COLUMNS if c in sheet["rows"].columns]
-                    body = pd.DataFrame({
-                        "company": sheet["rows"].ticker.astype(str),
-                        "mkt cap": sheet["rows"].market_cap.map(ui.money),
-                        "EV": sheet["rows"].enterprise_value.map(ui.money),
-                        **{labels[c]: [_fmt(c, v) for v in sheet["rows"][c]] for c in shown},
-                    })
-                    summary = pd.DataFrame({
-                        "company": ["peer median", "peer mean", "peer high", "peer low",
-                                    f"{ticker} vs median"],
-                        "mkt cap": [""] * 5, "EV": [""] * 5,
-                        **{labels[c]: [_fmt(c, sheet["stats"].at[k, c])
-                                       for k in ("median", "mean", "high", "low")]
-                           + [_vs(c, sheet["vs_median"].get(c))] for c in shown},
-                    })
-                    st.markdown(ui.grid(pd.concat([body, summary], ignore_index=True),
-                                        numeric=set(labels.values()) | {"mkt cap", "EV"},
-                                        ticker_col="company"), unsafe_allow_html=True)
-                    st.caption(
-                        f"First row is {ticker}; statistics are over the peers only. "
-                        "Point-in-time figures in USD as of the screen date.")
-
-                    implied_v = comps.implied(enriched, ticker, sheet["stats"])
-                    if not implied_v.empty:
-                        st.markdown("#### What the peer multiples imply")
-                        st.markdown(ui.grid(pd.DataFrame({
-                            "multiple": implied_v["multiple"],
-                            "peer median": implied_v["peer median"].map(
-                                lambda v: f"{v:,.1f}x"),
-                            "applied to": implied_v["applied to"].str.replace("_ttm", " TTM")
-                                .str.replace("_", " "),
-                            "implied equity": implied_v["implied equity value"].map(ui.money),
-                            "per share": implied_v["implied price"].map(ui.num),
-                            "vs price": implied_v["vs price"],
-                        }).assign(**{"vs price": lambda d: d["vs price"].map(
-                            lambda v: ui.pct(v, 0))}),
-                            numeric={"peer median", "implied equity", "per share"},
-                            signed={"vs price"}, ticker_col="multiple"),
-                            unsafe_allow_html=True)
-                        st.caption(
-                            "Median multiple × the company's own figure. EV multiples are "
-                            "taken to equity by subtracting net debt; equity multiples are "
-                            "not. A multiple is skipped where the company's figure is not "
-                            "positive. The spread between rows is the honest answer: "
-                            "comps give a range, not a price.")
-
-                if me is not None:
-                    zs = comps.against_history(val, me)
-                    if not zs.empty:
-                        st.markdown("#### Against its own history")
-                        st.markdown(ui.grid(pd.DataFrame({
-                            "multiple": zs["multiple"],
-                            "now": zs["now"].map(lambda v: f"{v:,.1f}x"),
-                            "own average": zs["own average"].map(lambda v: f"{v:,.1f}x"),
-                            "years": zs["years"].astype(str),
-                            "z-score": zs["z-score"].map(lambda v: f"{v:+.1f}"),
-                        }), numeric={"now", "own average", "years"}, signed={"z-score"},
-                            ticker_col="multiple"), unsafe_allow_html=True)
-                        st.caption("How many standard deviations today's multiple sits "
-                                   "from the company's own yearly average. Past years "
-                                   "use the price and figures of their own date.")
-
-                # ------------------------------------------ cost of capital and DCF
-                if me is not None:
-                    st.markdown("#### Cost of capital and DCF")
-                    tnx = src.con.execute(
-                        "SELECT close, date FROM prices WHERE ticker = '^TNX' "
-                        "AND close IS NOT NULL ORDER BY date DESC LIMIT 1").fetchone()
-                    rf_default = (tnx[0] / 100.0) if tnx else mx.current_risk_free(
-                        src.con, settings.risk_free_fallback)[0]
-                    beta_raw = (_price_stats(ticker, asof) or {}).get("beta")
-                    w1, w2, w3, w4 = st.columns(4)
-                    rf_in = w1.number_input(
-                        "Risk-free %", 0.0, 15.0, round(rf_default * 100, 2), 0.05,
-                        key=f"rf_{ticker}",
-                        help=f"US 10-year yield{' of ' + str(tnx[1]) if tnx else ''}.")
-                    beta_in = w2.number_input(
-                        "Beta (raw)", -1.0, 4.0, round(float(beta_raw or 1.0), 2), 0.05,
-                        key=f"beta_{ticker}",
-                        help="Daily returns against the S&P 500 total return over the "
-                             "stored history." if beta_raw else "No beta measured; 1.0.")
-                    erp_in = w3.number_input("Equity risk premium %", 2.0, 9.0,
-                                             W.DEFAULT_ERP * 100, 0.25, key=f"erp_{ticker}")
-                    blume = w4.toggle("Blume-adjusted beta", value=True, key=f"blume_{ticker}")
-                    g1, g2, g3 = st.columns(3)
-                    growth_in = g1.number_input("FCFF growth %/yr", -10.0, 30.0, 3.0, 0.5,
-                                                key=f"g_{ticker}")
-                    years_in = g2.number_input("Years", 1, 15, 5, 1, key=f"yrs_{ticker}")
-                    tg_in = g3.number_input("Growth forever %", -2.0, 5.0, 2.0, 0.25,
-                                            key=f"tg_{ticker}")
-                    w_inputs = W.Inputs(risk_free=rf_in / 100, beta=beta_in,
-                                        equity_risk_premium=erp_in / 100, adjust_beta=blume,
-                                        growth=growth_in / 100, years=int(years_in),
-                                        terminal_growth=tg_in / 100)
-                    b = W.build(me, w_inputs)
-                    st.markdown(ui.grid(pd.DataFrame({
-                        "component": ["Cost of equity (CAPM)", "Cost of debt, pre-tax",
-                                      "Tax rate", "Weight of equity", "Weight of debt",
-                                      "WACC"],
-                        "value": [f"{b['cost_of_equity']:.2%}",
-                                  f"{b['cost_of_debt_pre_tax']:.2%}",
-                                  f"{b['tax_rate']:.1%}", f"{b['weight_equity']:.1%}",
-                                  f"{b['weight_debt']:.1%}", f"{b['wacc']:.2%}"],
-                        "from": [f"{rf_in:.2f}% + {b['beta']:.2f} × {erp_in:.2f}%",
-                                 b["cost_of_debt_source"], str(b["tax_rate_source"]),
-                                 f"market cap {ui.money(b['equity_value'])}",
-                                 f"book debt {ui.money(b['debt_value'])}", ""],
-                    }), numeric={"value"}, ticker_col="component"),
-                        unsafe_allow_html=True)
-                    out_dcf = W.dcf(me, b["wacc"], w_inputs)
-                    if "error" in out_dcf:
-                        st.info(f"No DCF: {out_dcf['error']}.")
-                    else:
-                        tone = "up" if out_dcf["vs_price"] >= 0 else "down"
-                        st.markdown(ui.stats([
-                            ("FCFF TTM", ui.money(out_dcf["fcff"]), ""),
-                            ("ENTERPRISE VALUE", ui.money(out_dcf["enterprise_value"]), ""),
-                            ("EQUITY VALUE", ui.money(out_dcf["equity_value"]), ""),
-                            ("PER SHARE", ui.num(out_dcf["per_share"]), tone),
-                            ("VS PRICE", ui.pct(out_dcf["vs_price"], 0), tone),
-                            ("TERMINAL SHARE", f"{out_dcf['terminal_share']:.0%}", ""),
-                        ]), unsafe_allow_html=True)
-                        grid = W.sensitivity(me, b["wacc"], w_inputs)
-                        st.markdown("Per share — WACC down the side, growth forever across")
-                        st.markdown(ui.grid(
-                            grid.map(ui.num).reset_index().rename(columns={"index": "WACC"}),
-                            numeric=set(grid.columns), ticker_col="WACC"),
-                            unsafe_allow_html=True)
-                        st.caption(
-                            "FCFF = operating cash flow − capex + interest × (1 − tax), "
-                            "grown for the stated years, then forever; discounted at the "
-                            "WACC, less net debt, per listed share. Debt is weighted at "
-                            "book value. When the terminal share is high, the answer is "
-                            "mostly the growth-forever guess — which is what the grid shows.")
-
-                st.download_button(
-                    f"Export {ticker} to Excel",
-                    data=export.workbook(
-                        {"Annual as filed": rs.annual_history(src.con, cik),
-                         "Quarterly": rs.quarterly_trend(src.con, cik),
-                         "Valuation history": val,
-                         "Comps": (sheet or {}).get("rows", pd.DataFrame()),
-                         "Comps stats": (sheet or {}).get("stats", pd.DataFrame())
-                             .reset_index(names="statistic")
-                             if (sheet or {}).get("stats") is not None else pd.DataFrame(),
-                         "Implied by peers": locals().get("implied_v", pd.DataFrame()),
-                         "WACC": pd.DataFrame([locals().get("b") or {}]),
-                         "DCF": pd.DataFrame([{k: v for k, v in
-                                               (locals().get("out_dcf") or {}).items()}]),
-                         "DCF sensitivity": (locals().get("grid", pd.DataFrame())
-                                             .reset_index(names="wacc")
-                                             if isinstance(locals().get("grid"),
-                                                           pd.DataFrame) else pd.DataFrame())},
-                        title=f"{ticker} — research",
-                        source=f"SEC XBRL as first filed (history in "
-                               f"{rs.reporting_currency(src.con, cik)}); screen figures "
-                               "in USD; daily closes",
-                        as_of=asof),
-                    file_name=export.filename(f"{ticker}_research", asof),
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"export_{ticker}")
-
-            # ----------------------------------------------------------------- options
-            with sections[4]:
-                spot = (quote or {}).get("price") or prof.get("price")
-                if not spot:
-                    st.info("No price available, so nothing can be backed out.")
-                else:
-                    # The rate is not an opinion. It is quoted every day, it is already
-                    # downloaded, and a slider on it is a knob for tuning a fair value
-                    # until it says what you hoped.
-                    rate, rate_src = mx.current_risk_free(
-                        src.con, settings.risk_free_fallback)
-                    st.caption(f"Risk-free rate {rate:.2%} — {rate_src}.")
-                    # Trailing dividend yield from the store: solved with none, a payer's
-                    # puts look dearer than its calls for no other reason (options.py).
-                    div_q = op.trailing_dividend_yield(src.con, ticker)
-                    with st.spinner("Reading the option chain"):
-                        surf = op.surface(ticker, spot, max_expiries=10, risk_free=rate,
-                                          dividend_yield=div_q)
-                    if surf.empty:
-                        st.info(
-                            "No usable option contracts. Either this company has no "
-                            "listed options, or nothing in the chain carried a price "
-                            "that a volatility could be solved from."
-                        )
-                    else:
-                        st.caption(
-                            f"{len(surf)} contracts kept · source: {surf.attrs.get('mode')} · "
-                            "volatility is solved from the option price here, not taken "
-                            "from the data provider's own field, which was measured empty."
-                        )
-                        ts = op.term_structure(surf)
-
-                        pick_row = ts[ts.days.between(20, 120)]
-                        default_expiry = (pick_row.iloc[0] if len(pick_row) else ts.iloc[-1]).expiry
-                        expiry = st.selectbox(
-                            "Expiry", options=ts.expiry.tolist(),
-                            index=ts.expiry.tolist().index(default_expiry),
-                            format_func=lambda e: f"{e}  ({int(ts.set_index('expiry').loc[e,'days'])}d)",
-                            key="opt_expiry",
-                        )
-                        one = surf[surf["expiry"] == expiry]
-                        atm = op.atm_volatility(one)
-                        days = int(ts.set_index("expiry").loc[expiry, "days"])
-
-                        if atm:
-                            em = op.expected_move(spot, atm, max(days, 1))
-                            st.markdown(ui.stats([
-                                ("SPOT", ui.num(spot), ""),
-                                ("ATM VOL", f"{atm:.1%}", "amber"),
-                                ("DAYS", str(days), ""),
-                                ("EXPECTED MOVE", f"±{em['pct']:.2%}", ""),
-                                ("1 SIGMA LOW", ui.num(em["low_1"]), "down"),
-                                ("1 SIGMA HIGH", ui.num(em["high_1"]), "up"),
-                            ]), unsafe_allow_html=True)
-                            st.caption(
-                                f"The market is pricing roughly a two-in-three chance of "
-                                f"{ticker} finishing between {em['low_1']:,.2f} and "
-                                f"{em['high_1']:,.2f} on {expiry}, and about 95% between "
-                                f"{em['low_2']:,.2f} and {em['high_2']:,.2f}. That rests on "
-                                "returns being normally distributed, which they are not — "
-                                "real markets produce big moves more often than the curve "
-                                "allows, so the outer band is the optimistic reading."
-                            )
-                            # --- the cone: the market's range for every day ---------
-                            cone = op.expected_move_cone(spot, ts)
-                            if not cone.empty:
-                                import plotly.graph_objects as go
-
-                                today = dt.date.today()
-                                x = [today + dt.timedelta(days=int(d)) for d in cone.day]
-                                fig_c = go.Figure()
-                                for lo, hi, shade, name in (
-                                    ("low_2", "high_2", "rgba(255, 158, 27, 0.10)", "95%"),
-                                    ("low_1", "high_1", "rgba(255, 158, 27, 0.22)", "68%"),
-                                ):
-                                    fig_c.add_trace(go.Scatter(
-                                        x=x, y=cone[hi], name=name, mode="lines",
-                                        line=dict(color=ui.AMBER_DIM, width=0.5),
-                                        hoverinfo="skip"))
-                                    fig_c.add_trace(go.Scatter(
-                                        x=x, y=cone[lo], name=name, mode="lines",
-                                        line=dict(color=ui.AMBER_DIM, width=0.5),
-                                        fill="tonexty", fillcolor=shade, hoverinfo="skip"))
-                                fig_c.add_trace(go.Scatter(
-                                    x=x, y=cone["mid"], name="spot today", mode="lines",
-                                    line=dict(color=ui.DATA, width=1, dash="dot")))
-                                # Where options actually exist. Between them the width is
-                                # interpolated, and saying so is the difference between a
-                                # measurement and a drawing.
-                                fig_c.add_trace(go.Scatter(
-                                    x=[today + dt.timedelta(days=int(d)) for d in ts.days],
-                                    y=[spot] * len(ts),
-                                    mode="markers", name="expiries",
-                                    marker=dict(color=ui.CYAN, size=6, symbol="line-ns-open"),
-                                    hovertext=[f"{e} · ATM {v:.1%}"
-                                               for e, v in zip(ts.expiry, ts.atm_iv)],
-                                    hoverinfo="text"))
-                                fig_c.update_layout(
-                                    height=300, margin=dict(l=0, r=0, t=6, b=0),
-                                    paper_bgcolor=ui.BG, plot_bgcolor=ui.BG,
-                                    showlegend=False, hovermode="x unified",
-                                    font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
-                                    xaxis=dict(gridcolor=ui.RULE, color=ui.MUTED),
-                                    yaxis=dict(gridcolor=ui.RULE, color=ui.MUTED, side="right"),
-                                )
-                                st.markdown("#### Where the market thinks the price will be")
-                                st.plotly_chart(fig_c, width="stretch",
-                                                key=f"cone_{ticker}")
-                                widest = cone.iloc[-1]
-                                st.caption(
-                                    f"The band opens with the square root of time, because "
-                                    f"uncertainty accumulates with time and not with its "
-                                    f"square. By {x[-1]} the market is charging for a "
-                                    f"two-in-three range of {widest.low_1:,.2f} to "
-                                    f"{widest.high_1:,.2f}. Width comes from the at-the-money "
-                                    "volatility of the nearest expiries on each side "
-                                    "(marked), interpolated in between. It is what options "
-                                    "cost, not a forecast — and the outer band is the "
-                                    "optimistic reading, because real returns have fatter "
-                                    "tails than the bell curve it assumes."
-                                )
-
-                            stats_now = _price_stats(ticker, asof)
-                            # the last 60 sessions: the horizon of the nearest expiries
-                            cmp_ = op.implied_vs_realised(atm, stats_now.get("volatility_60d"))
-                            if cmp_:
-                                tone = "up" if cmp_["premium"] > 0 else "down"
-                                st.markdown(ui.stats([
-                                    ("IMPLIED", f"{cmp_['implied']:.1%}", "amber"),
-                                    ("REALISED", f"{cmp_['realised']:.1%}", ""),
-                                    ("PREMIUM", f"{cmp_['premium']:+.1%}", tone),
-                                ]), unsafe_allow_html=True)
-                                st.caption(
-                                    "Realised is the last 60 sessions, annualised. "
-                                    "Implied above realised is the normal state — option "
-                                    "sellers want paying for the risk. A large gap either "
-                                    "way is the interesting case, and neither direction is "
-                                    "a recommendation."
-                                )
-
-                        # --- the distribution the prices imply ----------------------
-                        dist = op.implied_distribution(one, spot, max(days, 1), rate, div_q)
-                        st.markdown(f"#### What the {expiry} prices imply")
-                        if dist.get("usable"):
-                            qd, rq = dist["quantiles"], dist["ref_quantiles"]
-                            st.markdown(ui.stats([
-                                ("MEDIAN", ui.num(qd[50]), "amber"),
-                                ("10% BELOW", ui.num(qd[10]), "down"),
-                                ("10% ABOVE", ui.num(qd[90]), "up"),
-                                ("P(< -10%)", f"{dist['p_down_10']:.0%}", "down"),
-                                ("P(> +10%)", f"{dist['p_up_10']:.0%}", "up"),
-                            ]), unsafe_allow_html=True)
-                            import plotly.graph_objects as go
-
-                            curve = dist["curve"]
-                            curve = curve[curve.price.between(qd[5] * 0.85, qd[95] * 1.15)]
-                            fig_d = go.Figure()
-                            fig_d.add_trace(go.Scatter(
-                                x=curve.price, y=curve.bell_curve, name="bell curve (ATM vol)",
-                                mode="lines", line=dict(color=ui.MUTED, width=1, dash="dot")))
-                            fig_d.add_trace(go.Scatter(
-                                x=curve.price, y=curve.density, name="from the chain",
-                                mode="lines", fill="tozeroy",
-                                fillcolor="rgba(255, 158, 27, 0.18)",
-                                line=dict(color=ui.AMBER, width=1.5)))
-                            fig_d.add_vline(x=spot, line=dict(color=ui.DATA, width=1, dash="dot"))
-                            fig_d.update_layout(
-                                height=260, margin=dict(l=0, r=0, t=6, b=0),
-                                paper_bgcolor=ui.BG, plot_bgcolor=ui.BG, hovermode="x unified",
-                                legend=dict(orientation="h", y=1.08, x=0),
-                                font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
-                                xaxis=dict(gridcolor=ui.RULE, color=ui.MUTED),
-                                yaxis=dict(gridcolor=ui.RULE, color=ui.MUTED, showticklabels=False),
-                            )
-                            st.plotly_chart(fig_d, width="stretch", key=f"dist_{ticker}")
-                            st.caption(
-                                f"The probability of each price on {expiry}, read from "
-                                f"{dist['contracts']} strikes (Breeden-Litzenberger), against "
-                                "the bell curve the expected move assumes. The chain puts "
-                                f"{dist['p_down_10']:.0%} on a fall of more than 10 % where "
-                                f"the bell curve has {dist['ref_p_down_10']:.0%}. These are "
-                                "risk-neutral odds: they include what buyers pay for "
-                                "protection, so they lean further to the downside than the "
-                                "real-world odds. What the market charges for, not a "
-                                f"forecast. {dist['beyond_quotes']:.0%} of the probability "
-                                "lies beyond the last quoted strikes and comes from holding "
-                                f"the smile flat there. Prices: {surf.attrs.get('mode', 'n/a')}."
-                            )
-                        else:
-                            st.caption(
-                                "Too few strikes on both sides of the price, or most of the "
-                                "probability would come from beyond the quoted strikes, so "
-                                "no distribution is drawn for this expiry."
-                            )
-
-                        # --- the put-call volatility spread (SmileSlope) ------------
-                        st.markdown("#### Put-call volatility spread")
-                        near_exp = sorted(
-                            [(e, int(d)) for e, d in zip(ts.expiry, ts.days) if 7 <= d <= 75],
-                            key=lambda x: abs(x[1] - op.SIGNAL_DAYS))[:2]
-                        with st.spinner("Reading full chains near 30 days"):
-                            full = [(d, op.chain(ticker, e, spot, rate, div_q))
-                                    for e, d in near_exp]
-                        slope = op.smile_slope([(d, c) for d, c in full if not c.empty],
-                                               r=rate, q=div_q)
-                        if slope.get("value") is not None:
-                            snap = _option_snapshot()
-                            pct = (op.percentile(slope["value"], snap.smile_slope)
-                                   if snap is not None else None)
-                            st.markdown(ui.stats([
-                                ("PUT - CALL VOL", f"{slope['value'] * 100:+.1f} pts", "amber"),
-                                ("AT", f"{slope['days']}d", ""),
-                                ("PAIRS", str(slope["pairs"]), ""),
-                                ("RANK", "—" if pct is None else f"{pct:.0%}", ""),
-                            ]), unsafe_allow_html=True)
-                            rank_note = (
-                                f"RANK places it among {len(snap)} US shares recorded on "
-                                f"{snap.attrs['day']}: 100 % = dearest puts. "
-                                if pct is not None else
-                                "No recent cross-section is recorded yet, so it cannot be "
-                                "ranked (scripts/snapshot_options.py collects one daily). ")
-                            st.caption(
-                                "Implied volatility of puts minus calls at the same strikes "
-                                f"near the money, {slope['method']}, dividend yield "
-                                f"{div_q:.1%} included. {rank_note}In published data "
-                                "(Yan 2011; Chen & Zimmermann's open replication, "
-                                "value-weighted tenths, measured 02.10.2026) shares with the "
-                                "dearest puts earned about 0.9 % a month less over the "
-                                "following month than those with the cheapest, 2015-2024 "
-                                "(t 2.8). It ranks shares against each other and says "
-                                "nothing certain about this one; it has not been tested on "
-                                "this app's own data, and the snapshots exist so that it can "
-                                "be."
-                            )
-                        else:
-                            st.caption(slope.get("rejected") or
-                                       "No expiry between 10 and 60 days with puts and calls "
-                                       "at the same strikes near the money.")
-
-                        # --- the surface, in three dimensions -----------------------
-                        try:
-                            import plotly.graph_objects as go
-
-                            grid_ = surf.pivot_table(
-                                index="days", columns="moneyness", values="iv", aggfunc="mean"
-                            ).sort_index()
-                            if grid_.shape[0] >= 2 and grid_.shape[1] >= 3:
-                                z = grid_.interpolate(axis=1, limit_direction="both").to_numpy()
-                                fig = go.Figure(go.Surface(
-                                    x=grid_.columns.to_numpy(), y=grid_.index.to_numpy(), z=z,
-                                    colorscale=[[0, "#3A1D00"], [0.5, ui.AMBER], [1, "#FFE3B0"]],
-                                    colorbar=dict(title="IV", tickformat=".0%",
-                                                  outlinewidth=0, tickfont=dict(color=ui.MUTED)),
-                                ))
-                                fig.update_layout(
-                                    height=470, margin=dict(l=0, r=0, t=10, b=0),
-                                    paper_bgcolor=ui.BG, plot_bgcolor=ui.BG,
-                                    font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
-                                    scene=dict(
-                                        xaxis=dict(title="strike / spot", backgroundcolor=ui.BG,
-                                                   gridcolor=ui.RULE, color=ui.MUTED),
-                                        yaxis=dict(title="days to expiry", backgroundcolor=ui.BG,
-                                                   gridcolor=ui.RULE, color=ui.MUTED),
-                                        zaxis=dict(title="implied vol", backgroundcolor=ui.BG,
-                                                   gridcolor=ui.RULE, color=ui.MUTED,
-                                                   tickformat=".0%"),
-                                        camera=dict(eye=dict(x=1.6, y=-1.5, z=0.8)),
-                                    ),
-                                )
-                                st.markdown("#### Volatility surface")
-                                st.plotly_chart(fig, width="stretch")
-                                st.caption(
-                                    "Drag to rotate. Left of 1.0 are puts, right are calls. "
-                                    "The lift towards the left edge is the equity smirk: "
-                                    "downside protection costs more volatility than upside "
-                                    "speculation, because crashes happen faster than rallies."
-                                )
-                        except Exception as exc:
-                            st.caption(f"Surface unavailable: {exc}")
-
-                        c1, c2 = st.columns(2, gap="medium")
-                        with c1:
-                            st.markdown("#### Smile")
-                            sk = op.skew(surf, expiry)
-                            if not sk.empty:
-                                st.scatter_chart(
-                                    sk.rename(columns={"iv": "implied vol"}),
-                                    x="moneyness", y="implied vol", color="kind", height=230,
-                                )
-                        with c2:
-                            st.markdown("#### Term structure")
-                            if len(ts) >= 2:
-                                st.line_chart(ts.set_index("days")[["atm_iv"]],
-                                              height=230, color=[ui.AMBER])
-                                st.caption(
-                                    "A near-dated spike usually means something specific "
-                                    "is coming — earnings, a ruling, a vote."
-                                )
-
-            # ---------------------------------------------------------------- exposure
-            with sections[5]:
-                sens = rs.commodity_sensitivity(src.con, ticker)
-                if sens.empty:
-                    st.info("Not enough overlapping price history to measure this.")
-                else:
-                    st.markdown(ui.grid(pd.DataFrame({
-                        "commodity": sens.commodity,
-                        "correlation": sens.correlation.map(lambda v: f"{v:+.2f}"),
-                        "beta": sens.beta.map(lambda v: f"{v:+.2f}"),
-                        "days": sens.days.astype(str),
-                    }), numeric={"days"}, signed={"correlation", "beta"},
-                        ticker_col="commodity"), unsafe_allow_html=True)
-                    top = sens.iloc[0]
-                    direction = "with" if top.correlation > 0 else "against"
-                    st.caption(
-                        f"Strongest link: {top.commodity}, moving {direction} the share "
-                        f"(beta {top.beta:+.2f} — about {abs(top.beta):.2f}% per 1% move). "
-                        "This is association, not cause. A miner and its metal move "
-                        "together because it is the product; an airline and oil move "
-                        "apart because it is a cost. The arithmetic cannot tell those "
-                        "apart, and a short window invents relationships that are not there."
-                    )
-
-            # ---------------------------------------------------------------- analysts
-            with sections[6]:
-                view = rs.analyst_view(ticker)
-                if not view:
-                    st.info("No analyst data available for this ticker.")
-                else:
-                    r = view.get("ratings")
-                    if r:
-                        st.markdown(ui.stats(
-                            [(k.upper(), str(v), "amber" if v else "") for k, v in r.items()]
-                        ), unsafe_allow_html=True)
-                        st.caption(
-                            f"Consensus as of {view.get('ratings_period', '—')}. These are "
-                            "Wall Street analysts' own ratings, reported as data — this "
-                            "app does not rate anything."
-                        )
-                    t_ = view.get("targets") or {}
-                    if t_.get("mean"):
-                        cells = [(k.upper(), ui.num(v), "")
-                                 for k, v in t_.items() if isinstance(v, (int, float))]
-                        st.markdown("#### Price targets")
-                        st.markdown(ui.stats(cells), unsafe_allow_html=True)
-                    ch = view.get("changes")
-                    if ch is not None and len(ch):
-                        st.markdown("#### Recent rating changes")
-                        dcol = ch.columns[0]
-                        st.markdown(ui.grid(pd.DataFrame({
-                            "date": pd.to_datetime(ch[dcol]).dt.date.astype(str),
-                            "firm": ch.get("Firm", pd.Series(dtype=object)).astype(str).str.slice(0, 22),
-                            "from": ch.get("FromGrade", pd.Series(dtype=object)).astype(str),
-                            "to": ch.get("ToGrade", pd.Series(dtype=object)).astype(str),
-                            "action": ch.get("Action", pd.Series(dtype=object)).astype(str),
-                        }), ticker_col="firm"), unsafe_allow_html=True)
-                    st.caption(
-                        "These are opinions, not measurements — the only section here "
-                        "that is not derived from a filing or a price.")
-
-            # --------------------------------------------------------------- ownership
-            with sections[7]:
-                st.markdown("#### Insider transactions (Form 4)")
-                if is_compustat(cik):
-                    st.info("A Compustat Global company files with its home regulator, "
-                            "not the SEC: there are no Form 4 filings to read.")
-                elif st.button("Load insider trades from the SEC", key=f"ins_{ticker}"):
-                    st.session_state[f"ins_loaded_{ticker}"] = True
-                if not is_compustat(cik) and st.session_state.get(f"ins_loaded_{ticker}"):
-                    with st.spinner("Reading the latest Form 4 filings…"):
-                        trades = _insider_trades(cik)
-                    if trades is None:
-                        st.warning("The SEC could not be reached.")
-                    elif trades.empty:
-                        st.info("No Form 4 filings with share transactions.")
-                    else:
-                        ins = insiders.summary(trades, asof)
-                        st.markdown(ui.stats([
-                            ("BOUGHT (12M)", f"{ins['bought_trades']} by "
-                             f"{ins['bought_insiders']}", "up" if ins["bought_trades"] else ""),
-                            ("BOUGHT VALUE", ui.money(ins["bought_value"]), ""),
-                            ("SOLD (12M)", f"{ins['sold_trades']} by "
-                             f"{ins['sold_insiders']}", "down" if ins["sold_trades"] else ""),
-                            ("SOLD VALUE", ui.money(ins["sold_value"]), ""),
-                        ]), unsafe_allow_html=True)
-                        st.markdown(ui.grid(pd.DataFrame({
-                            "date": trades["date"].astype(str),
-                            "insider": trades["insider"].astype(str).str.slice(0, 26),
-                            "role": trades["role"].astype(str).str.slice(0, 30),
-                            "what": trades["what"],
-                            "shares": trades["shares"].map(
-                                lambda v: f"{v:,.0f}" if pd.notna(v) else "—"),
-                            "price": trades["price"].map(ui.num),
-                            "value": trades["value"].map(ui.money),
-                        }).head(40), numeric={"shares", "price", "value"},
-                            ticker_col="date"), unsafe_allow_html=True)
-                        st.caption(
-                            "The counts above are open-market purchases and sales only — "
-                            "an insider spending their own money at the market price. "
-                            "Grants, option exercises, tax withholding and gifts are "
-                            "listed but not counted: they are pay, not decisions. From "
-                            "the last 30 Form 4 filings.")
-                st.markdown("#### Institutions")
-                hold = rs.holders(ticker)
-                if hold.empty:
-                    st.info("No institutional holdings reported for this ticker.")
-                else:
-                    st.markdown(ui.grid(pd.DataFrame({
-                        "holder": hold.get("Holder", pd.Series(dtype=object)).astype(str).str.slice(0, 30),
-                        "shares": hold.get("Shares", pd.Series(dtype=float)).map(ui.money),
-                        "% held": hold.get("pctHeld", pd.Series(dtype=float)).map(
-                            lambda v: "—" if pd.isna(v) else f"{v:.2%}"),
-                        "value": hold.get("Value", pd.Series(dtype=float)).map(ui.money),
-                        "as of": hold.get("Date Reported", pd.Series(dtype=object)).astype(str).str.slice(0, 10),
-                    }), numeric={"shares", "value", "% held"}, ticker_col="holder"),
-                        unsafe_allow_html=True)
-                    st.caption(
-                        "From quarterly 13F filings, so positions are as of the report "
-                        "date and up to a quarter stale by the time you read them.")
-
-                div = rs.dividend_history(ticker)
-                if not div.empty:
-                    st.markdown("#### Dividends")
-                    st.bar_chart(div.set_index("date")[["dividend"]], height=170,
-                                 color=[ui.AMBER])
-                    last12 = div[div.date >= pd.Timestamp.now() - pd.Timedelta(days=365)]
-                    if len(last12) and quote and quote.get("price"):
-                        y = last12.dividend.sum() / quote["price"]
-                        st.caption(
-                            f"Paid over the last year: {last12.dividend.sum():,.2f} — "
-                            f"{y:.2%} on the current price.")
-
-            # ------------------------------------------------------------------- news
-            with sections[8]:
-                items = rs.news(ticker)
-                if items.empty:
-                    st.info("No headlines returned for this ticker.")
-                else:
-                    for row in items.itertuples():
-                        st.markdown(
-                            f"**[{row.title}]({row.url})**  \n"
-                            f"<span style='color:{ui.MUTED};font-size:0.72rem'>"
-                            f"{row.when} · {row.source}</span>",
-                            unsafe_allow_html=True,
-                        )
-                        if row.summary:
-                            st.caption(row.summary)
-                    st.caption(
-                        "Headlines and links only. Follow the link for the article — "
-                        "the text belongs to its publisher.")
-
-            # ----------------------------------------------------------------- filings
-            with sections[9]:
-                fl = rs.filings(CACHE_DIR / "submissions.zip", cik, limit=300)
-                if fl.empty and is_compustat(cik):
-                    st.info("A Compustat Global company files with its home regulator, "
-                            "not the SEC.")
-                elif fl.empty:
-                    st.info("No filing history in the local SEC archive for this filer.")
-                else:
-                    kinds = ["everything", "reports", "insider trades", "ownership stakes"]
-                    pick = st.radio("Filter", kinds, horizontal=True,
-                                    label_visibility="collapsed", key="filing_filter")
-                    view = fl
-                    if pick == "reports":
-                        view = fl[fl.form.isin(["10-K", "10-Q", "8-K", "DEF 14A"])]
-                    elif pick == "insider trades":
-                        view = fl[fl.form.isin(["3", "4", "5"])]
-                    elif pick == "ownership stakes":
-                        view = fl[fl.form.str.startswith("SC 13")]
-                    view = view.head(20)
-                    if view.empty:
-                        st.info("Nothing of that kind in the recent filings.")
-                    else:
-                        st.markdown(ui.grid(pd.DataFrame({
-                            "filed": view.filed,
-                            "form": view.form,
-                            "what": view.what,
-                            "period": view.period,
-                        }), ticker_col="form"), unsafe_allow_html=True)
-                        st.caption("Open at the SEC: " + " · ".join(
-                            f"[{r.form} {r.filed}]({r.url})" for r in view.head(6).itertuples()))
-
-
-with tab_options:
-    st.markdown("#### Build an options position")
-    if not chosen:
-        st.info("Open or create a portfolio on the left — legs are saved against it.")
+def _sec_financials(c) -> None:
+    """FA and ERN: the history as first filed, quarters, surprises, restatements."""
+    ticker, cik = c.ticker, c.cik
+    upcoming = rs.next_report_estimate(cfg.CACHE_DIR / SUBMISSIONS, cik)
+    if upcoming:
+        st.markdown(ui.stats([
+            ("NEXT REPORT (EST.)", str(upcoming["date"]), "amber"),
+            ("IN DAYS", str(upcoming["days_away"]), ""),
+            ("LAST FILED", str(upcoming["last_filed"]), ""),
+        ]), unsafe_allow_html=True)
+        st.caption("Estimated from last year's filing for the same quarter, moved forward "
+                   "364 days; an announced date, where there is one, is in the calendar.")
+    annual = rs.annual_history(src.con, cik)
+    filed_in = rs.reporting_currency(src.con, cik)
+    if filed_in != "USD":
+        st.caption(
+            f"Figures below are in {filed_in}, as filed. The screen and the "
+            "valuation convert them to USD at the exchange rate of their date."
+        )
+    if annual.empty:
+        st.info("No annual XBRL figures for this filer.")
     else:
+        show = annual.sort_values("year", ascending=False).head(12)
+        st.markdown(ui.grid(pd.DataFrame({
+            "year": show.year.astype(int).astype(str),
+            "revenue": show.revenue.map(ui.money),
+            "net income": show.net_income.map(ui.money),
+            "op cash flow": show.operating_cash_flow.map(ui.money),
+            "capex": show.capex.map(ui.money),
+            "free cash flow": show.free_cash_flow.map(ui.money),
+            "equity": show.book_value.map(ui.money),
+            "assets": show.total_assets.map(ui.money),
+            "margin": show.net_margin.map(lambda v: ui.pct(v, 1)),
+            "roe": show.return_on_equity.map(lambda v: ui.pct(v, 1)),
+        }), numeric={"revenue", "net income", "op cash flow", "capex",
+                     "free cash flow", "equity", "assets"},
+            signed={"margin", "roe"}, ticker_col="year"),
+            unsafe_allow_html=True)
+        st.caption("As first reported. Later revisions appear below, not here.")
+
+    qt = rs.quarterly_trend(src.con, cik)
+    if not qt.empty and "revenue" in qt:
+        st.markdown("#### By quarter")
+        st.bar_chart(qt.set_index("period_end")[["revenue"]],
+                     height=180, color=[ui.AMBER])
+        st.caption(
+            "A company can grow every year while shrinking for three straight "
+            "quarters. Annual rows hide that.")
+
+    eh, eh_err = ac.attempt(ac.earnings_history, ticker)
+    if eh_err:
+        st.caption(f"Earnings against expectations: Yahoo unreachable ({eh_err}).")
+    elif not eh.empty:
+        st.markdown("#### Earnings against expectations")
+        dcol = eh.columns[0]
+        st.markdown(ui.grid(pd.DataFrame({
+            "date": eh[dcol].dt.date.astype(str),
+            "estimate": eh.get("EPS Estimate", pd.Series(dtype=float)).map(ui.num),
+            "reported": eh.get("Reported EPS", pd.Series(dtype=float)).map(ui.num),
+            "surprise": eh.get("Surprise(%)", pd.Series(dtype=float)).map(
+                lambda v: "—" if pd.isna(v) else f"{v:+.1f}%"),
+        }), numeric={"estimate", "reported"}, signed={"surprise"},
+            ticker_col="date"), unsafe_allow_html=True)
+        st.caption("Consensus estimates, so this section is opinion meeting fact.")
+
+    rest = rs.restatements(src.con, cik)
+    if not rest.empty:
+        st.markdown("#### Restated after the fact")
+        top = rest.head(10)
+        st.markdown(ui.grid(pd.DataFrame({
+            "metric": top.metric,
+            "period": top.period_end.astype(str),
+            "first said": top.first_reported.map(ui.money),
+            "later said": top.later_value.map(ui.money),
+            "change": top.change.map(lambda v: ui.pct(v, 1)),
+            "revised on": top.later_filed.astype(str),
+        }), numeric={"first said", "later said"}, signed={"change"},
+            ticker_col="metric"), unsafe_allow_html=True)
+        st.caption(
+            "Revisions are routine and usually small. A large one, or a "
+            "pattern of them, is something a screen cannot see.")
+
+
+def _sec_relationships(c) -> None:
+    """SPLC: counterparties named in the 10-K, each with a checked quote."""
+    ticker, cik, prof = c.ticker, c.cik, c.prof
+    st.write(
+        "Who this company says it depends on — read out of its own annual "
+        "report. Every line carries a passage copied from the filing, and "
+        "each passage is checked against the document in code before it is "
+        "shown. A relationship the filing does not state does not appear "
+        "here, however well known it is."
+    )
+    tenk = rs.filings(cfg.CACHE_DIR / SUBMISSIONS, cik, forms=["10-K"], limit=1)
+    if tenk.empty and is_compustat(cik):
+        st.info("A Compustat Global company has no SEC annual report to read.")
+    elif tenk.empty:
+        st.info(
+            "No 10-K in the local archive for this filer. Foreign issuers "
+            "file a 20-F instead, which this does not read yet."
+        )
+    elif not secret("ANTHROPIC_API_KEY"):
+        st.warning("Needs ANTHROPIC_API_KEY in .env.local.")
+    else:
+        row = tenk.iloc[0]
+        st.caption(f"From the 10-K filed {row.filed} for the period {row.period}.")
+        if st.button("Read the filing", key=f"read_10k_{ticker}", width="stretch"):
+            with st.spinner("Downloading and reading Item 1"):
+                try:
+                    text = bz.fetch_filing_text(row.url)
+                    found = bz.extract(text, prof["name"])
+                except Exception as exc:                            # noqa: BLE001
+                    found = None
+                    st.error(f"Could not read that filing: {ui.error_text(exc)}")
+            if found is not None:
+                st.session_state[f"rel_{ticker}"] = found
+
+        found = st.session_state.get(f"rel_{ticker}")
+        if found:
+            rel = found["relationships"]
+            st.markdown(ui.stats([
+                ("NAMED", str(len(rel)), "amber" if len(rel) else ""),
+                ("UNNAMED NOTES", str(len(found["notes"])), ""),
+                ("QUOTES REJECTED", str(found["rejected"]),
+                 "down" if found["rejected"] else "up"),
+            ]), unsafe_allow_html=True)
+            if found["rejected"]:
+                st.caption(
+                    f"{found['rejected']} claim(s) were dropped because the "
+                    "quote could not be found in the filing. That is the "
+                    "check working, not a failure."
+                )
+            if len(rel):
+                for r in rel.itertuples():
+                    st.markdown(
+                        f"**{r.counterparty}** — {r.relationship}",
+                    )
+                    # Escaped: the passage comes out of a filing via a model.
+                    st.markdown(
+                        f"<div style='border-left:2px solid {ui.AMBER_DIM};"
+                        f"padding-left:0.7rem;color:{ui.MUTED};"
+                        f"font-size:0.74rem;margin-bottom:0.5rem'>"
+                        f"“{html.escape(str(r.quote))}”</div>",
+                        unsafe_allow_html=True,
+                    )
+            else:
+                st.info(
+                    "The filing names no counterparty. That is common and "
+                    "informative: large companies often describe suppliers "
+                    "only in the abstract, so the household names you may "
+                    "expect are genuinely not in the document."
+                )
+            if found["notes"]:
+                st.markdown("#### Dependencies stated without a name")
+                for n in found["notes"]:
+                    st.markdown(
+                        f"<div style='border-left:2px solid {ui.RULE};"
+                        f"padding-left:0.7rem;color:{ui.DATA};"
+                        f"font-size:0.74rem;margin-bottom:0.4rem'>"
+                        f"“{html.escape(str(n))}”</div>",
+                        unsafe_allow_html=True,
+                    )
+            st.caption(f"[Open the filing at the SEC]({row.url})")
+
+
+def _sec_valuation(c) -> None:
+    """RV, COMP, WACC and DCF: own history, trading comps, cost of capital, DCF."""
+    ticker, cik, me, enriched = c.ticker, c.cik, c.me, c.enriched
+    sheet, implied_v, b, out_dcf, grid = {}, None, None, None, None
+    val = rs.valuation_history(src.con, ticker, cik)
+    if val.empty:
+        st.info("Not enough history to rebuild past multiples.")
+    else:
+        st.line_chart(val.set_index("year")[["price_to_earnings", "price_to_book"]],
+                      height=210, color=[ui.AMBER, ui.CYAN])
+        st.caption(
+            "Each year's multiple uses that year's price and the figures public "
+            "then. Today's price against old earnings would describe nothing "
+            "that ever happened.")
+        st.markdown(ui.grid(pd.DataFrame({
+            "year": val.year.astype(str),
+            "price": val.price.map(ui.num),
+            "mkt cap": val.market_cap.map(ui.money),
+            "p/e": val.price_to_earnings.map(ui.num),
+            "p/b": val.price_to_book.map(ui.num),
+            "p/s": val.price_to_sales.map(ui.num),
+        }), numeric={"price", "mkt cap", "p/e", "p/b", "p/s"},
+            ticker_col="year"), unsafe_allow_html=True)
+
+    # --------------------------------------------------- trading comps
+    st.markdown("#### Trading comps")
+    suggested = rs.peers(enriched, ticker).ticker.astype(str).tolist()[:8]
+    chosen_peers = st.multiselect(
+        "Peers", options=sorted(enriched.ticker.astype(str).unique()),
+        default=suggested, key=f"peers_{ticker}",
+        help="Suggested: same SEC industry, closest in size. Add or remove "
+             "names — a comps set is a judgement, not a formula.")
+    sheet = comps.sheet(enriched, ticker, chosen_peers) if chosen_peers else {}
+    if not sheet:
+        st.info("Pick at least one peer.")
+    else:
+        labels = {c: l for c, l, _ in comps.COLUMNS}
+        pct_cols = {"ebitda_margin", "return_on_invested_capital",
+                    "revenue_growth"}
+
+        def _fmt(col, v):
+            if v is None or pd.isna(v):
+                return "—"
+            return ui.pct(v, 1) if col in pct_cols else f"{v:,.1f}x"
+
+        def _vs(col, v):
+            if v is None or pd.isna(v):
+                return "—"
+            if col in pct_cols:
+                return f"{v * 100:+.1f} pp"
+            if col == "net_debt_to_ebitda":
+                return f"{v:+.1f}x"
+            return ui.pct(v, 0)
+
+        shown = [c for c, _, _ in comps.COLUMNS if c in sheet["rows"].columns]
+        body = pd.DataFrame({
+            "company": sheet["rows"].ticker.astype(str),
+            "mkt cap": sheet["rows"].market_cap.map(ui.money),
+            "EV": sheet["rows"].enterprise_value.map(ui.money),
+            **{labels[c]: [_fmt(c, v) for v in sheet["rows"][c]] for c in shown},
+        })
+        summary = pd.DataFrame({
+            "company": ["peer median", "peer mean", "peer high", "peer low",
+                        f"{ticker} vs median"],
+            "mkt cap": [""] * 5, "EV": [""] * 5,
+            **{labels[c]: [_fmt(c, sheet["stats"].at[k, c])
+                           for k in ("median", "mean", "high", "low")]
+               + [_vs(c, sheet["vs_median"].get(c))] for c in shown},
+        })
+        st.markdown(ui.grid(pd.concat([body, summary], ignore_index=True),
+                            numeric=set(labels.values()) | {"mkt cap", "EV"},
+                            ticker_col="company"), unsafe_allow_html=True)
+        st.caption(
+            f"First row is {ticker}; statistics are over the peers only. "
+            "Point-in-time figures in USD as of the screen date.")
+
+        implied_v = comps.implied(enriched, ticker, sheet["stats"])
+        if not implied_v.empty:
+            st.markdown("#### What the peer multiples imply")
+            st.markdown(ui.grid(pd.DataFrame({
+                "multiple": implied_v["multiple"],
+                "peer median": implied_v["peer median"].map(
+                    lambda v: f"{v:,.1f}x"),
+                "applied to": implied_v["applied to"].str.replace("_ttm", " TTM")
+                    .str.replace("_", " "),
+                "implied equity": implied_v["implied equity value"].map(ui.money),
+                "per share": implied_v["implied price"].map(ui.num),
+                "vs price": implied_v["vs price"],
+            }).assign(**{"vs price": lambda d: d["vs price"].map(
+                lambda v: ui.pct(v, 0))}),
+                numeric={"peer median", "implied equity", "per share"},
+                signed={"vs price"}, ticker_col="multiple"),
+                unsafe_allow_html=True)
+            st.caption(
+                "Median multiple × the company's own figure. EV multiples are "
+                "taken to equity by subtracting net debt; equity multiples are "
+                "not. A multiple is skipped where the company's figure is not "
+                "positive. The spread between rows is the honest answer: "
+                "comps give a range, not a price.")
+
+    if me is not None:
+        zs = comps.against_history(val, me)
+        if not zs.empty:
+            st.markdown("#### Against its own history")
+            st.markdown(ui.grid(pd.DataFrame({
+                "multiple": zs["multiple"],
+                "now": zs["now"].map(lambda v: f"{v:,.1f}x"),
+                "own average": zs["own average"].map(lambda v: f"{v:,.1f}x"),
+                "years": zs["years"].astype(str),
+                "z-score": zs["z-score"].map(lambda v: f"{v:+.1f}"),
+            }), numeric={"now", "own average", "years"}, signed={"z-score"},
+                ticker_col="multiple"), unsafe_allow_html=True)
+            st.caption("How many standard deviations today's multiple sits "
+                       "from the company's own yearly average. Past years "
+                       "use the price and figures of their own date.")
+
+    # ------------------------------------------ cost of capital and DCF
+    if me is not None:
+        st.markdown("#### Cost of capital and DCF")
+        rates = _risk_free_now(DATA_KEY)
+        beta_raw = (_price_stats(ticker, asof, DATA_KEY) or {}).get("beta")
+        w1, w2, w3, w4 = st.columns(4)
+        rf_in = w1.number_input(
+            "Risk-free %", 0.0, 15.0, round(rates["long"] * 100, 2), 0.05,
+            key=f"rf_{ticker}",
+            help=f"{rates['long_source']}: the long rate, because a company is valued "
+                 "over decades. Options use the 13-week bill instead.")
+        beta_in = w2.number_input(
+            "Beta (raw)", -1.0, 4.0, round(min(max(float(beta_raw or 1.0), -1.0), 4.0), 2), 0.05,
+            key=f"beta_{ticker}",
+            help="Daily returns against the S&P 500 total return over the "
+                 "stored history." if beta_raw else "No beta measured; 1.0.")
+        erp_in = w3.number_input("Equity risk premium %", 2.0, 9.0,
+                                 W.DEFAULT_ERP * 100, 0.25, key=f"erp_{ticker}")
+        blume = w4.toggle("Blume-adjusted beta", value=True, key=f"blume_{ticker}")
+        # Growth in the forecast years is the DCF's own (3 %, as before 02.10.2026),
+        # separate from the screen's earnings growth (0 %) on purpose: see
+        # _assumptions (review F13). Growth forever starts at the screen's; the
+        # discount rate differs by design: here the WACC, there the required return.
+        shared = _assumptions()
+        g1, g2, g3 = st.columns(3)
+        growth_in = g1.number_input("DCF: cash-flow growth in the forecast period, %/yr",
+                                    -10.0, 30.0, 3.0, 0.5, key=f"g_{ticker}")
+        years_in = g2.number_input("Years", 1, 15, 5, 1, key=f"yrs_{ticker}")
+        tg_in = g3.number_input("Growth forever %", -2.0, 5.0,
+                                float(shared.terminal_growth * 100), 0.25,
+                                key=f"tg_{ticker}")
+        st.caption("The DCF's cash-flow growth (3 % to start) and the screen's earnings "
+                   "growth for intrinsic value (SCREEN → filters, 0 % to start) are "
+                   "deliberately separate inputs: one grows free cash flow over the "
+                   "years above, the other values the screen on today's earnings. Growth "
+                   "forever starts at the screen's figure. The discount rate here is the "
+                   "WACC below, not the screen's required return.")
+        w_inputs = W.Inputs(risk_free=rf_in / 100, beta=beta_in,
+                            equity_risk_premium=erp_in / 100, adjust_beta=blume,
+                            growth=growth_in / 100, years=int(years_in),
+                            terminal_growth=tg_in / 100)
+        b = W.build(me, w_inputs)
+        st.markdown(ui.grid(pd.DataFrame({
+            "component": ["Cost of equity (CAPM)", "Cost of debt, pre-tax",
+                          "Tax rate", "Weight of equity", "Weight of debt",
+                          "WACC"],
+            "value": [f"{b['cost_of_equity']:.2%}",
+                      f"{b['cost_of_debt_pre_tax']:.2%}",
+                      f"{b['tax_rate']:.1%}", f"{b['weight_equity']:.1%}",
+                      f"{b['weight_debt']:.1%}", f"{b['wacc']:.2%}"],
+            "from": [f"{rf_in:.2f}% + {b['beta']:.2f} × {erp_in:.2f}%",
+                     b["cost_of_debt_source"], str(b["tax_rate_source"]),
+                     f"market cap {ui.money(b['equity_value'])}",
+                     f"book debt {ui.money(b['debt_value'])}", ""],
+        }), numeric={"value"}, ticker_col="component"),
+            unsafe_allow_html=True)
+        out_dcf = W.dcf(me, b["wacc"], w_inputs)
+        if "error" in out_dcf:
+            st.info(f"No DCF: {out_dcf['error']}.")
+        else:
+            tone = "up" if out_dcf["vs_price"] >= 0 else "down"
+            st.markdown(ui.stats([
+                ("FCFF TTM", ui.money(out_dcf["fcff"]), ""),
+                ("ENTERPRISE VALUE", ui.money(out_dcf["enterprise_value"]), ""),
+                ("EQUITY VALUE", ui.money(out_dcf["equity_value"]), ""),
+                ("PER SHARE", ui.num(out_dcf["per_share"]), tone),
+                ("VS PRICE", ui.pct(out_dcf["vs_price"], 0), tone),
+                ("TERMINAL SHARE", f"{out_dcf['terminal_share']:.0%}", ""),
+            ]), unsafe_allow_html=True)
+            grid = W.sensitivity(me, b["wacc"], w_inputs)
+            st.markdown("Per share — WACC down the side, growth forever across")
+            st.markdown(ui.grid(
+                grid.map(ui.num).reset_index().rename(columns={"index": "WACC"}),
+                numeric=set(grid.columns), ticker_col="WACC"),
+                unsafe_allow_html=True)
+            st.caption(
+                "FCFF = operating cash flow − capex + interest × (1 − tax), "
+                "grown for the stated years, then forever; discounted at the "
+                "WACC, less net debt, per listed share. Debt is weighted at "
+                "book value. When the terminal share is high, the answer is "
+                "mostly the growth-forever guess — which is what the grid shows.")
+
+    # Everything the workbook needs is read here, on the app's thread; the button only
+    # assembles it when clicked, on another thread that must not query the store.
+    annual, quarterly = rs.annual_history(src.con, cik), rs.quarterly_trend(src.con, cik)
+    stats_ = sheet.get("stats") if sheet else None
+    _workbook_button(
+        f"Export {ticker} to Excel",
+        lambda: {"Annual as filed": annual, "Quarterly": quarterly,
+                 "Valuation history": val,
+                 "Comps": sheet.get("rows", pd.DataFrame()) if sheet else pd.DataFrame(),
+                 "Comps stats": stats_.reset_index(names="statistic")
+                 if stats_ is not None else pd.DataFrame(),
+                 "Implied by peers": implied_v if implied_v is not None else pd.DataFrame(),
+                 "WACC": pd.DataFrame([b or {}]),
+                 "DCF": pd.DataFrame([dict(out_dcf or {})]),
+                 "DCF sensitivity": grid.reset_index(names="wacc")
+                 if isinstance(grid, pd.DataFrame) else pd.DataFrame()},
+        title=f"{ticker} — research",
+        source=f"SEC XBRL as first filed (history in "
+               f"{rs.reporting_currency(src.con, cik)}); screen figures in USD; daily "
+               "closes", stem=f"{ticker}_research", key=f"export_{ticker}")
+
+
+def _sec_options(c) -> None:
+    """OMON, OVDV and SKEW: what the option chain prices for this company."""
+    ticker, prof, quote = c.ticker, c.prof, c.quote
+    spot = (quote or {}).get("price") or prof.get("price")
+    if not spot:
+        st.info("No price available, so nothing can be backed out.")
+    else:
+        # The rate is not an opinion. It is quoted every day, it is already
+        # downloaded, and a slider on it is a knob for tuning a fair value
+        # until it says what you hoped.
+        rates = _risk_free_now(DATA_KEY)
+        rate, rate_src = rates["short"], rates["short_source"]
+        # Trailing dividend yield from the store: solved with none, a payer's
+        # puts look dearer than its calls for no other reason (options.py).
+        div_q = op.trailing_dividend_yield(src.con, ticker)
+        st.caption(f"Risk-free rate {rate:.2%} — {rate_src}. Dividend yield {div_q:.1%}, "
+                   "trailing, from the stored closes.")
+        with st.spinner("Reading the option chain"):
+            surf, surf_err = ac.attempt(ac.surface, ticker, spot, 10, rate, div_q)
+        if surf_err:
+            st.warning(f"The option chain could not be read: {surf_err}. Nothing is "
+                       "kept from a failed attempt, so the next visit asks again.")
+        elif surf.empty:
+            st.info(
+                "No usable option contracts. Either this company has no "
+                "listed options, or nothing in the chain carried a price "
+                "that a volatility could be solved from."
+            )
+        else:
+            st.caption(
+                f"{len(surf)} contracts kept · source: {surf.attrs.get('mode')} · "
+                "volatility is solved from the option price here, not taken "
+                "from the data provider's own field, which was measured empty."
+            )
+            ts = op.term_structure(surf)
+
+            pick_row = ts[ts.days.between(20, 120)]
+            default_expiry = (pick_row.iloc[0] if len(pick_row) else ts.iloc[-1]).expiry
+            expiry = st.selectbox(
+                "Expiry", options=ts.expiry.tolist(),
+                index=ts.expiry.tolist().index(default_expiry),
+                format_func=lambda e: f"{e}  ({int(ts.set_index('expiry').loc[e,'days'])}d)",
+                key=f"opt_expiry_{ticker}",
+            )
+            one = surf[surf["expiry"] == expiry]
+            atm = op.atm_volatility(one)
+            days = int(ts.set_index("expiry").loc[expiry, "days"])
+
+            if atm:
+                em = op.expected_move(spot, atm, max(days, 1))
+                st.markdown(ui.stats([
+                    ("SPOT", ui.num(spot), ""),
+                    ("ATM VOL", f"{atm:.1%}", "amber"),
+                    ("DAYS", str(days), ""),
+                    ("EXPECTED MOVE", f"±{em['pct']:.2%}", ""),
+                    ("1 SIGMA LOW", ui.num(em["low_1"]), "down"),
+                    ("1 SIGMA HIGH", ui.num(em["high_1"]), "up"),
+                ]), unsafe_allow_html=True)
+                st.caption(
+                    f"The market is pricing roughly a two-in-three chance of "
+                    f"{ticker} finishing between {em['low_1']:,.2f} and "
+                    f"{em['high_1']:,.2f} on {expiry}, and about 95% between "
+                    f"{em['low_2']:,.2f} and {em['high_2']:,.2f}. That rests on "
+                    "returns being normally distributed, which they are not — "
+                    "real markets produce big moves more often than the curve "
+                    "allows, so the outer band is the optimistic reading."
+                )
+                # --- the cone: the market's range for every day ---------
+                cone = op.expected_move_cone(spot, ts)
+                if not cone.empty:
+                    today = dt.date.today()
+                    x = [today + dt.timedelta(days=int(d)) for d in cone.day]
+                    fig_c = go.Figure()
+                    for lo_col, hi_col, shade, name in (
+                        ("low_2", "high_2", "rgba(255, 158, 27, 0.10)", "95%"),
+                        ("low_1", "high_1", "rgba(255, 158, 27, 0.22)", "68%"),
+                    ):
+                        fig_c.add_trace(go.Scatter(
+                            x=x, y=cone[hi_col], name=name, mode="lines",
+                            line=dict(color=ui.AMBER_DIM, width=0.5),
+                            hoverinfo="skip"))
+                        fig_c.add_trace(go.Scatter(
+                            x=x, y=cone[lo_col], name=name, mode="lines",
+                            line=dict(color=ui.AMBER_DIM, width=0.5),
+                            fill="tonexty", fillcolor=shade, hoverinfo="skip"))
+                    fig_c.add_trace(go.Scatter(
+                        x=x, y=cone["mid"], name="spot today", mode="lines",
+                        line=dict(color=ui.DATA, width=1, dash="dot")))
+                    # Where options actually exist. Between them the width is
+                    # interpolated, and saying so is the difference between a
+                    # measurement and a drawing.
+                    fig_c.add_trace(go.Scatter(
+                        x=[today + dt.timedelta(days=int(d)) for d in ts.days],
+                        y=[spot] * len(ts),
+                        mode="markers", name="expiries",
+                        marker=dict(color=ui.CYAN, size=6, symbol="line-ns-open"),
+                        hovertext=[f"{e} · ATM {v:.1%}"
+                                   for e, v in zip(ts.expiry, ts.atm_iv)],
+                        hoverinfo="text"))
+                    _layout(fig_c, showlegend=False, hovermode="x unified",
+                            xaxis=dict(gridcolor=ui.RULE, color=ui.MUTED),
+                            yaxis=dict(gridcolor=ui.RULE, color=ui.MUTED, side="right"))
+                    st.markdown("#### Where the market thinks the price will be")
+                    st.plotly_chart(fig_c, width="stretch",
+                                    key=f"cone_{ticker}")
+                    widest = cone.iloc[-1]
+                    st.caption(
+                        f"The band opens with the square root of time, because "
+                        f"uncertainty accumulates with time and not with its "
+                        f"square. By {x[-1]} the market is charging for a "
+                        f"two-in-three range of {widest.low_1:,.2f} to "
+                        f"{widest.high_1:,.2f}. Width comes from the at-the-money "
+                        "volatility of the nearest expiries on each side "
+                        "(marked), interpolated in between. It is what options "
+                        "cost, not a forecast — and the outer band is the "
+                        "optimistic reading, because real returns have fatter "
+                        "tails than the bell curve it assumes."
+                    )
+
+                stats_now = _price_stats(ticker, asof, DATA_KEY)
+                # the last 60 sessions: the horizon of the nearest expiries
+                cmp_ = op.implied_vs_realised(atm, stats_now.get("volatility_60d"))
+                if cmp_:
+                    tone = "up" if cmp_["premium"] > 0 else "down"
+                    st.markdown(ui.stats([
+                        ("IMPLIED", f"{cmp_['implied']:.1%}", "amber"),
+                        ("REALISED", f"{cmp_['realised']:.1%}", ""),
+                        ("PREMIUM", f"{cmp_['premium']:+.1%}", tone),
+                    ]), unsafe_allow_html=True)
+                    st.caption(
+                        "Realised is the last 60 sessions, annualised. "
+                        "Implied above realised is the normal state — option "
+                        "sellers want paying for the risk. A large gap either "
+                        "way is the interesting case, and neither direction is "
+                        "a recommendation."
+                    )
+
+            # --- the distribution the prices imply ----------------------
+            dist = op.implied_distribution(one, spot, max(days, 1), rate, div_q)
+            st.markdown(f"#### What the {expiry} prices imply")
+            if dist.get("usable"):
+                qd = dist["quantiles"]
+                st.markdown(ui.stats([
+                    ("MEDIAN", ui.num(qd[50]), "amber"),
+                    ("10% BELOW", ui.num(qd[10]), "down"),
+                    ("10% ABOVE", ui.num(qd[90]), "up"),
+                    ("P(< -10%)", f"{dist['p_down_10']:.0%}", "down"),
+                    ("P(> +10%)", f"{dist['p_up_10']:.0%}", "up"),
+                ]), unsafe_allow_html=True)
+                curve = dist["curve"]
+                curve = curve[curve.price.between(qd[5] * 0.85, qd[95] * 1.15)]
+                fig_d = go.Figure()
+                fig_d.add_trace(go.Scatter(
+                    x=curve.price, y=curve.bell_curve, name="bell curve (ATM vol)",
+                    mode="lines", line=dict(color=ui.MUTED, width=1, dash="dot")))
+                fig_d.add_trace(go.Scatter(
+                    x=curve.price, y=curve.density, name="from the chain",
+                    mode="lines", fill="tozeroy",
+                    fillcolor="rgba(255, 158, 27, 0.18)",
+                    line=dict(color=ui.AMBER, width=1.5)))
+                fig_d.add_vline(x=spot, line=dict(color=ui.DATA, width=1, dash="dot"))
+                _layout(fig_d, hovermode="x unified",
+                        legend=dict(orientation="h", y=1.08, x=0),
+                        xaxis=dict(gridcolor=ui.RULE, color=ui.MUTED),
+                        yaxis=dict(gridcolor=ui.RULE, color=ui.MUTED,
+                                   showticklabels=False))
+                st.plotly_chart(fig_d, width="stretch", key=f"dist_{ticker}")
+                st.caption(
+                    f"The probability of each price on {expiry}, read from "
+                    f"{dist['contracts']} strikes (Breeden-Litzenberger), against "
+                    "the bell curve the expected move assumes. The chain puts "
+                    f"{dist['p_down_10']:.0%} on a fall of more than 10 % where "
+                    f"the bell curve has {dist['ref_p_down_10']:.0%}. These are "
+                    "risk-neutral odds: they include what buyers pay for "
+                    "protection, so they lean further to the downside than the "
+                    "real-world odds. What the market charges for, not a "
+                    f"forecast. {dist['beyond_quotes']:.0%} of the probability "
+                    "lies beyond the last quoted strikes and comes from holding "
+                    f"the smile flat there. Prices: {surf.attrs.get('mode', 'n/a')}."
+                )
+            else:
+                st.caption(
+                    "Too few strikes on both sides of the price, or most of the "
+                    "probability would come from beyond the quoted strikes, so "
+                    "no distribution is drawn for this expiry."
+                )
+
+            # --- the put-call volatility spread (SmileSlope) ------------
+            st.markdown("#### Put-call volatility spread")
+            near_exp = sorted(
+                [(e, int(d)) for e, d in zip(ts.expiry, ts.days) if 7 <= d <= 75],
+                key=lambda x: abs(x[1] - op.SIGNAL_DAYS))[:2]
+            with st.spinner("Reading full chains near 30 days"):
+                full = [(d, ac.attempt(ac.chain, ticker, e, spot, rate, div_q)[0])
+                        for e, d in near_exp]
+            slope = op.smile_slope([(d, ch) for d, ch in full
+                                    if ch is not None and not ch.empty],
+                                   r=rate, q=div_q)
+            if slope.get("value") is not None:
+                snap = _option_snapshot(dt.date.today(),
+                                        op.snapshot_stamp(cfg.CACHE_DIR / "options"))
+                pct = (op.percentile(slope["value"], snap.smile_slope)
+                       if snap is not None else None)
+                st.markdown(ui.stats([
+                    ("PUT - CALL VOL", f"{slope['value'] * 100:+.1f} pts", "amber"),
+                    ("AT", f"{slope['days']}d", ""),
+                    ("PAIRS", str(slope["pairs"]), ""),
+                    ("RANK", "—" if pct is None else f"{pct:.0%}", ""),
+                ]), unsafe_allow_html=True)
+                rank_note = (
+                    f"RANK places it among {len(snap)} US shares recorded on "
+                    f"{snap.attrs['day']}: 100 % = dearest puts. "
+                    if pct is not None else
+                    "No recent cross-section is recorded yet, so it cannot be "
+                    "ranked (scripts/snapshot_options.py collects one daily). ")
+                st.caption(
+                    "Implied volatility of puts minus calls at the same strikes "
+                    f"near the money, {slope['method']}, dividend yield "
+                    f"{div_q:.1%} included. {rank_note}In published data "
+                    "(Yan 2011; Chen & Zimmermann's open replication, "
+                    "value-weighted tenths, measured 02.10.2026) shares with the "
+                    "dearest puts earned about 0.9 % a month less over the "
+                    "following month than those with the cheapest, 2015-2024 "
+                    "(t 2.8). It ranks shares against each other and says "
+                    "nothing certain about this one; it has not been tested on "
+                    "this app's own data, and the snapshots exist so that it can "
+                    "be."
+                )
+            else:
+                st.caption(slope.get("rejected") or
+                           "No expiry between 10 and 60 days with puts and calls "
+                           "at the same strikes near the money.")
+
+            # --- the surface, in three dimensions -----------------------
+            try:
+                grid_ = surf.pivot_table(
+                    index="days", columns="moneyness", values="iv", aggfunc="mean"
+                ).sort_index()
+                if grid_.shape[0] >= 2 and grid_.shape[1] >= 3:
+                    z = grid_.interpolate(axis=1, limit_direction="both").to_numpy()
+                    fig = go.Figure(go.Surface(
+                        x=grid_.columns.to_numpy(), y=grid_.index.to_numpy(), z=z,
+                        colorscale=[[0, "#3A1D00"], [0.5, ui.AMBER], [1, "#FFE3B0"]],
+                        colorbar=dict(title="IV", tickformat=".0%",
+                                      outlinewidth=0, tickfont=dict(color=ui.MUTED)),
+                    ))
+                    _layout(fig, 420,
+                        scene=dict(
+                            xaxis=dict(title="strike / spot", backgroundcolor=ui.BG,
+                                       gridcolor=ui.RULE, color=ui.MUTED),
+                            yaxis=dict(title="days to expiry", backgroundcolor=ui.BG,
+                                       gridcolor=ui.RULE, color=ui.MUTED),
+                            zaxis=dict(title="implied vol", backgroundcolor=ui.BG,
+                                       gridcolor=ui.RULE, color=ui.MUTED,
+                                       tickformat=".0%"),
+                            camera=dict(eye=dict(x=1.6, y=-1.5, z=0.8)),
+                        ),
+                    )
+                    st.markdown("#### Volatility surface")
+                    st.plotly_chart(fig, width="stretch", key=f"surface_{ticker}")
+                    st.caption(
+                        "Drag to rotate. Left of 1.0 are puts, right are calls. "
+                        "The lift towards the left edge is the equity smirk: "
+                        "downside protection costs more volatility than upside "
+                        "speculation, because crashes happen faster than rallies."
+                    )
+            except Exception as exc:
+                st.caption(f"Surface unavailable: {ui.error_text(exc)}")
+
+            c1, c2 = st.columns(2, gap="medium")
+            with c1:
+                st.markdown("#### Smile")
+                sk = op.skew(surf, expiry)
+                if not sk.empty:
+                    st.scatter_chart(
+                        sk.rename(columns={"iv": "implied vol"}),
+                        x="moneyness", y="implied vol", color="kind", height=230,
+                    )
+            with c2:
+                st.markdown("#### Term structure")
+                if len(ts) >= 2:
+                    st.line_chart(ts.set_index("days")[["atm_iv"]],
+                                  height=230, color=[ui.AMBER])
+                    st.caption(
+                        "A near-dated spike usually means something specific "
+                        "is coming — earnings, a ruling, a vote."
+                    )
+
+
+def _sec_exposure(c) -> None:
+    """HRA: what this share has moved with — commodities, rates, one event."""
+    ticker = c.ticker
+    st.markdown("#### Commodities")
+    links = _commodity_links(ticker, DATA_KEY)
+    if links.empty:
+        st.info("Not enough overlapping price history to measure this.")
+    else:
+        _links_table(links, first="commodity")
+        top = links.iloc[0]
+        direction = "with" if top.correlation > 0 else "against"
+        st.caption(
+            f"Strongest link: {top.commodity}, moving {direction} the share "
+            f"(beta {top.beta:+.2f} — about {abs(top.beta):.2f}% per 1% move). "
+            "This is association, not cause. A miner and its metal move "
+            "together because it is the product; an airline and oil move "
+            "apart because it is a cost. The arithmetic cannot tell those "
+            "apart, and a short window invents relationships that are not there."
+        )
+    _rate_exposure(ticker)
+
+
+def _sec_analysts(c) -> None:
+    """ANR: the sell side's ratings and targets, reported as data."""
+    ticker = c.ticker
+    view, err = ac.attempt(ac.analyst_view, ticker)
+    if err:
+        st.warning(f"Analyst data unreachable ({err}).")
+    elif not view:
+        st.info("No analyst data available for this ticker.")
+    else:
+        r = view.get("ratings")
+        if r:
+            st.markdown(ui.stats(
+                [(k.upper(), str(v), "amber" if v else "") for k, v in r.items()]
+            ), unsafe_allow_html=True)
+            st.caption(
+                f"Consensus as of {view.get('ratings_period', '—')}. These are "
+                "Wall Street analysts' own ratings, reported as data — this "
+                "app does not rate anything."
+            )
+        t_ = view.get("targets") or {}
+        if t_.get("mean"):
+            cells = [(k.upper(), ui.num(v), "")
+                     for k, v in t_.items() if isinstance(v, (int, float))]
+            st.markdown("#### Price targets")
+            st.markdown(ui.stats(cells), unsafe_allow_html=True)
+        ch = view.get("changes")
+        if ch is not None and len(ch):
+            st.markdown("#### Recent rating changes")
+            dcol = ch.columns[0]
+            st.markdown(ui.grid(pd.DataFrame({
+                "date": pd.to_datetime(ch[dcol]).dt.date.astype(str),
+                "firm": ch.get("Firm", pd.Series(dtype=object)).astype(str).str.slice(0, 22),
+                "from": ch.get("FromGrade", pd.Series(dtype=object)).astype(str),
+                "to": ch.get("ToGrade", pd.Series(dtype=object)).astype(str),
+                "action": ch.get("Action", pd.Series(dtype=object)).astype(str),
+            }), ticker_col="firm"), unsafe_allow_html=True)
+        st.caption(
+            "These are opinions, not measurements — the only section here "
+            "that is not derived from a filing or a price.")
+
+
+def _sec_ownership(c) -> None:
+    """INS and HDS: insiders and institutions."""
+    ticker, cik = c.ticker, c.cik
+    st.markdown("#### Insider transactions (Form 4)")
+    if is_compustat(cik):
+        st.info("A Compustat Global company files with its home regulator, "
+                "not the SEC: there are no Form 4 filings to read.")
+    elif st.button("Load insider trades from the SEC", key=f"ins_{ticker}"):
+        st.session_state[f"ins_loaded_{ticker}"] = True
+    if not is_compustat(cik) and st.session_state.get(f"ins_loaded_{ticker}"):
+        with st.spinner("Reading the latest Form 4 filings…"):
+            trades, ins_err = ac.attempt(ac.insider_trades, cik)
+        if ins_err:
+            st.warning(f"The SEC could not be reached ({ins_err}). A failed attempt is "
+                       "not kept; press the button again later.")
+        elif trades.empty:
+            st.info("No Form 4 filings with share transactions.")
+        else:
+            ins = insiders.summary(trades, asof)
+            st.markdown(ui.stats([
+                ("BOUGHT (12M)", f"{ins['bought_trades']} by "
+                 f"{ins['bought_insiders']}", "up" if ins["bought_trades"] else ""),
+                ("BOUGHT VALUE", ui.money(ins["bought_value"]), ""),
+                ("SOLD (12M)", f"{ins['sold_trades']} by "
+                 f"{ins['sold_insiders']}", "down" if ins["sold_trades"] else ""),
+                ("SOLD VALUE", ui.money(ins["sold_value"]), ""),
+            ]), unsafe_allow_html=True)
+            st.markdown(ui.grid(pd.DataFrame({
+                "date": trades["date"].astype(str),
+                "insider": trades["insider"].astype(str).str.slice(0, 26),
+                "role": trades["role"].astype(str).str.slice(0, 30),
+                "what": trades["what"],
+                "shares": trades["shares"].map(
+                    lambda v: f"{v:,.0f}" if pd.notna(v) else "—"),
+                "price": trades["price"].map(ui.num),
+                "value": trades["value"].map(ui.money),
+            }).head(40), numeric={"shares", "price", "value"},
+                ticker_col="date"), unsafe_allow_html=True)
+            st.caption(
+                "The counts above are open-market purchases and sales only — "
+                "an insider spending their own money at the market price. "
+                "Grants, option exercises, tax withholding and gifts are "
+                "listed but not counted: they are pay, not decisions. From "
+                "the last 30 Form 4 filings.")
+    st.markdown("#### Institutions")
+    hold, hold_err = ac.attempt(ac.holders, ticker)
+    if hold_err:
+        st.caption(f"Institutional holdings unreachable ({hold_err}).")
+    elif hold.empty:
+        st.info("No institutional holdings reported for this ticker.")
+    else:
+        st.markdown(ui.grid(pd.DataFrame({
+            "holder": hold.get("Holder", pd.Series(dtype=object)).astype(str).str.slice(0, 30),
+            "shares": hold.get("Shares", pd.Series(dtype=float)).map(ui.money),
+            "% held": hold.get("pctHeld", pd.Series(dtype=float)).map(
+                lambda v: "—" if pd.isna(v) else f"{v:.2%}"),
+            "value": hold.get("Value", pd.Series(dtype=float)).map(ui.money),
+            "as of": hold.get("Date Reported", pd.Series(dtype=object)).astype(str).str.slice(0, 10),
+        }), numeric={"shares", "value", "% held"}, ticker_col="holder"),
+            unsafe_allow_html=True)
+        st.caption(
+            "From quarterly 13F filings, so positions are as of the report "
+            "date and up to a quarter stale by the time you read them.")
+
+
+def _sec_dividends(c) -> None:
+    """DVD: what the company paid, from Yahoo."""
+    ticker, quote = c.ticker, c.quote
+    div, div_err = ac.attempt(ac.dividend_history, ticker)
+    if div_err:
+        # Not "pays none": Yahoo did not answer (F6). Nothing is cached.
+        st.caption(f"Dividend history could not be reached ({div_err}).")
+    elif div is not None and not div.empty:
+        st.markdown("#### Dividends")
+        st.bar_chart(div.set_index("date")[["dividend"]], height=170,
+                     color=[ui.AMBER])
+        last12 = div[div.date >= pd.Timestamp.now() - pd.Timedelta(days=365)]
+        if len(last12) and quote and quote.get("price"):
+            y = last12.dividend.sum() / quote["price"]
+            st.caption(
+                f"Paid over the last year: {last12.dividend.sum():,.2f} — "
+                f"{y:.2%} on the current price.")
+
+
+def _sec_news(c) -> None:
+    """CN: headlines for this company."""
+    items, err = ac.attempt(ac.news, c.ticker)
+    if err:
+        st.warning(f"Headlines unreachable ({err}).")
+    elif items.empty:
+        st.info("No headlines returned for this ticker.")
+    else:
+        for row in items.itertuples():
+            st.markdown(
+                f"{ui.headline(row.title, row.url)}  \n"
+                f"<span style='color:{ui.MUTED};font-size:0.72rem'>"
+                f"{html.escape(str(row.when))} · {html.escape(str(row.source))}</span>",
+                unsafe_allow_html=True,
+            )
+            if row.summary:
+                st.caption(row.summary)
+        st.caption(
+            "Headlines and links only. Follow the link for the article — "
+            "the text belongs to its publisher.")
+
+
+def _sec_filings(c) -> None:
+    """CF: the filing list from the local SEC archive."""
+    cik = c.cik
+    fl = rs.filings(cfg.CACHE_DIR / SUBMISSIONS, cik, limit=300)
+    if fl.empty and is_compustat(cik):
+        st.info("A Compustat Global company files with its home regulator, "
+                "not the SEC.")
+    elif fl.empty:
+        st.info("No filing history in the local SEC archive for this filer.")
+    else:
+        kinds = ["everything", "reports", "insider trades", "ownership stakes"]
+        pick = st.radio("Filter", kinds, horizontal=True,
+                        label_visibility="collapsed", key=f"filing_filter_{cik}")
+        view = fl
+        if pick == "reports":
+            view = fl[fl.form.isin(["10-K", "10-Q", "8-K", "DEF 14A"])]
+        elif pick == "insider trades":
+            view = fl[fl.form.isin(["3", "4", "5"])]
+        elif pick == "ownership stakes":
+            view = fl[fl.form.str.startswith("SC 13")]
+        view = view.head(20)
+        if view.empty:
+            st.info("Nothing of that kind in the recent filings.")
+        else:
+            st.markdown(ui.grid(pd.DataFrame({
+                "filed": view.filed,
+                "form": view.form,
+                "what": view.what,
+                "period": view.period,
+            }), ticker_col="form"), unsafe_allow_html=True)
+            st.caption("Open at the SEC: " + " · ".join(
+                f"[{r.form} {r.filed}]({r.url})" for r in view.head(6).itertuples()))
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _enriched(asof: dt.date, key: str, disc: float, grow: float, term: float) -> pd.DataFrame:
+    """The screening frame with every derived metric and the intrinsic value, once per
+    build and assumption set (it was rebuilt on every rerun of a company page)."""
+    return add_valuation(derive_metrics(_frame(asof, key)),
+                         Assumptions(discount_rate=disc, growth_rate=grow,
+                                     terminal_growth=term))
+
+
+def _enriched_now() -> pd.DataFrame:
+    a = _assumptions()
+    return _enriched(asof, DATA_KEY, a.discount_rate, a.growth_rate, a.terminal_growth)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _price_only(key: str) -> pd.DataFrame:
+    del key
+    return rs.price_only_symbols(_market_source().con)
+
+
+def _price_only_page(sym) -> None:
+    """Crypto, a commodity or an index: price history and nothing behind it."""
+    st.markdown(ui.kv([
+        (sym["name"], "", False),
+        ("Symbol", sym.symbol, False),
+        ("Kind", sym["kind"], False),
+        ("History", f"{sym['from']} to {sym['to']} ({sym.bars:,} bars)", False),
+    ]), unsafe_allow_html=True)
+    st.caption(
+        f"{sym['name']} has no financial statements — not missing: there is no issuer "
+        "filing accounts, so book value, earnings and every ratio built on them do not "
+        "exist for it. The chart, the risk figures and what moves with it work, and "
+        "SCREEN & BACKTEST → SAVINGS PLAN tests regular or dip buying on its history."
+    )
+    ph = src.con.execute(
+        "SELECT date, close_adj FROM prices WHERE ticker = ? ORDER BY date",
+        [sym.symbol],
+    ).fetch_df()
+    if len(ph) > 10:
+        ph["date"] = pd.to_datetime(ph["date"])
+        st.line_chart(ph.set_index("date")[["close_adj"]].rename(
+            columns={"close_adj": sym.symbol}), height=CHART_HEIGHT, color=[ui.AMBER])
+    stats_np = _price_stats(sym.symbol, asof, DATA_KEY)
+    if stats_np:
+        st.markdown(ui.stats(_risk_cells(stats_np)), unsafe_allow_html=True)
+        st.caption(f"Max drawdown over the {stats_np['days']:,} stored days; "
+                   "volatility over the last year.")
+    links = _commodity_links(sym.symbol, DATA_KEY)
+    if not links.empty:
+        st.markdown("#### Moves with")
+        _links_table(links, limit=6)
+
+
+def _yahoo_page(ysym: str, ybars: pd.DataFrame) -> None:
+    """Any Yahoo ticker outside the store: BHP.AX, SAP.DE, 7203.T. Price and volume
+    only — there are no SEC filings behind it (world.py, stage 2)."""
+    yquote, quote_err = ac.attempt(ac.live_quote, ysym)
+    yquote = yquote or {}
+    ycur = yquote.get("currency") or "the listing's currency"
+    st.markdown(ui.kv([
+        ("Symbol", ysym, False),
+        ("Currency", ycur, False),
+        ("History", f"{ybars.date.iloc[0]} to {ybars.date.iloc[-1]} "
+                    f"({len(ybars):,} days, from Yahoo)", False),
+    ]), unsafe_allow_html=True)
+    if yquote.get("price"):
+        tone = "up" if (yquote.get("change") or 0) >= 0 else "down"
+        cells = [("LAST", ui.num(yquote["price"]), tone)]
+        if yquote.get("change") is not None:
+            cells.append(("CHANGE", ui.pct(yquote["change"]), tone))
+        st.markdown(ui.stats(cells), unsafe_allow_html=True)
+    elif quote_err:
+        st.caption(f"Live quote unreachable ({quote_err}).")
+    st.caption(
+        f"{ysym} is outside the stored universe, so there are no filings behind it: no "
+        f"fundamentals, no screen, no point-in-time backtest. The chart and risk figures "
+        f"below are in {ycur}; SCREEN & BACKTEST → RULE tests a buy/sell rule on it."
+    )
+    c1, c2 = st.columns([1, 3])
+    yspan = c1.segmented_control("Range", ["6M", "1Y", "5Y"], default="1Y",
+                                 label_visibility="collapsed", key="yspan")
+    yview = ybars.join(rs.bollinger(ybars)).tail(
+        {"6M": 126, "1Y": 252, "5Y": 1260}[yspan or "1Y"])
+    ybands = c2.toggle("Bollinger 20d", value=False, key="ybands")
+    st.plotly_chart(charts.price_figure(yview, ysym, bands=ybands),
+                    width="stretch", key=f"ychart_{ysym}")
+    st.markdown(ui.stats(_risk_cells(world.stats(ybars), "MAX DD 1Y")),
+                unsafe_allow_html=True)
+
+
+def _security_page(symbol: str) -> None:
+    """Everything about one security. `symbol` is a store ticker, a price-only series
+    (index, commodity, crypto) or any Yahoo symbol."""
+    if rs.profile(src.con, symbol):
+        _equity_page(symbol)
+        return
+    non_equity = _price_only(DATA_KEY)
+    hit = non_equity[non_equity.symbol.str.upper() == symbol.upper()]
+    if len(hit):
+        _price_only_page(hit.iloc[0])
+        return
+    ybars, err = ac.attempt(ac.yahoo_bars, symbol.upper())
+    if ybars is not None and not ybars.empty:
+        _yahoo_page(symbol.upper(), ybars)
+    elif err:
+        st.warning(f"'{symbol}' is not in the store, and Yahoo could not be reached to "
+                   f"look it up ({err}). Try again in a moment.")
+    else:
+        st.warning(
+            f"Nothing matches '{symbol}'. It is not a listing in this store, and Yahoo "
+            "has no prices under that symbol. Other exchanges need Yahoo's suffix, e.g. "
+            "BHP.AX (ASX), SAP.DE (Xetra), 7203.T (Tokyo)."
+        )
+        if not non_equity.empty:
+            st.caption("Price-only symbols available: "
+                       + ", ".join(non_equity.symbol.tolist()))
+
+
+def _equity_page(ticker: str) -> None:
+    prof = rs.profile(src.con, ticker)
+    ticker = prof["ticker"]
+    cik = int(prof["cik"])
+    quote, quote_err = ac.attempt(ac.live_quote, ticker)
+    enriched = _enriched_now()
+    me = enriched[enriched.ticker.astype(str).str.upper() == ticker.upper()]
+    me = me.iloc[0] if len(me) else None
+
+    # Quote strip — always on top, whichever section is open.
+    if quote:
+        tone = "up" if (quote.get("change") or 0) >= 0 else "down"
+        cells = [("LAST", ui.num(quote["price"]), tone)]
+        if quote.get("change") is not None:
+            cells.append(("CHANGE", ui.pct(quote["change"]), tone))
+        for label, key in (("OPEN", "open"), ("HIGH", "day_high"),
+                           ("LOW", "day_low"), ("52W HIGH", "year_high"),
+                           ("52W LOW", "year_low")):
+            if quote.get(key):
+                cells.append((label, ui.num(quote[key]), ""))
+        st.markdown(ui.stats(cells), unsafe_allow_html=True)
+        st.caption(
+            "Live quote for this company only. The screener stays on one common "
+            f"date ({asof}); mixing a live price into a ranking would favour it."
+        )
+    elif quote_err:
+        st.caption(f"Live quote unreachable ({quote_err}); figures below use the stored "
+                   f"closes to {asof}.")
+    else:
+        st.caption(f"No live quote for {ticker}; figures below use the stored closes.")
+
+    # ------------------------------------------------------------ AI summary
+    have = ai_summary.stored(store.con, ticker, data_fp)
+    with st.expander("AI summary", expanded=bool(have)):
+        a1, a2 = st.columns([3, 1])
+        label = "Write again" if have else "Write AI summary"
+        if a2.button(label, key=f"ai_sum_{ticker}", width="stretch"):
+            if not secret("ANTHROPIC_API_KEY"):
+                st.error("ANTHROPIC_API_KEY missing from .env.local.")
+            else:
+                with st.spinner("Reading the filings and prices…"):
+                    try:
+                        sheet = ai_summary.data_sheet(
+                            src.con, ticker, cik, me, asof, frame=enriched)
+                        result = ai_summary.summarize(sheet)
+                    except Exception as exc:                 # noqa: BLE001
+                        result = {"text": None, "error": ui.error_text(exc)}
+                if result.get("text"):
+                    ai_summary.save(store.con, ticker, data_fp, result)
+                    have = ai_summary.stored(store.con, ticker, data_fp)
+                else:
+                    st.error(result.get("error") or "No summary came back.")
+        shown = have or ai_summary.latest(store.con, ticker)
+        if shown:
+            a1.markdown(shown["text"])
+            stamp = pd.Timestamp(shown["created_at"]).strftime("%Y-%m-%d %H:%M")
+            st.caption(
+                f"Written {stamp} by {shown['model']} from this app's own figures "
+                "only — no outside news, no recommendation."
+                + ("" if have else " Written on an older data build; the numbers "
+                   "may have moved since. Press the button for a fresh one.")
+            )
+        else:
+            a1.caption(
+                "A short write-up from the figures on this page — valuation, the "
+                "history as first filed, restatements, price behaviour and peers. "
+                "The model may only argue from those numbers and does not "
+                "recommend buying or selling. Uses your Anthropic API key."
+            )
+
+    def _open_research_book(name, amount):
+        last = src.con.execute(
+            "SELECT COALESCE(close_raw, close) FROM prices WHERE ticker = ? "
+            "AND date <= ? ORDER BY date DESC LIMIT 1", [ticker, asof],
+        ).fetchone()
+        if not last or not last[0]:
+            raise ValueError(f"No stored price for {ticker}.")
+        cap = float(me["market_cap"]) if me is not None and "market_cap" in me \
+            and not pd.isna(me["market_cap"]) else 0.0
+        return paper.open_hold(
+            store.con, name, "RESEARCH",
+            pd.DataFrame({"ticker": [ticker], "weight": [1.0],
+                          "price": [float(last[0])],
+                          "cost": [settings.cost.round_trip_cost(cap)]}),
+            asof, amount)
+
+    _paper_section(
+        "RESEARCH", f"research_{ticker}", _open_research_book,
+        f"{ticker} {asof}",
+        f"Buy {ticker} at the {asof} close and hold it. Every paper book lands "
+        "next to the others in PORTFOLIOS → BOOKS.")
+
+    c = SimpleNamespace(ticker=ticker, cik=cik, prof=prof, quote=quote, me=me,
+                        enriched=enriched)
+
+    def _valuation(c) -> None:
+        _sec_valuation(c)
+        # MA: precedent transactions (the old DEALS tab), applied to this company.
+        with st.expander("Precedent transactions (MA)",
+                         expanded=st.session_state.get("cmd_focus") == "MA"):
+            _view_deals(c.ticker)
+
+    def _options(c) -> None:
+        _sec_options(c)
+        # The position builder (the old OPTIONS tab), on the same underlying.
+        with st.expander("Build an options position",
+                         expanded=st.session_state.get("cmd_focus") == "OMON"):
+            _view_options_builder(c.ticker)
+
+    def _financials(c) -> None:
+        _sec_financials(c)
+        _sec_dividends(c)
+
+    def _exposure(c) -> None:
+        _sec_exposure(c)
+        # SPLC: who the company says it depends on, read out of its own 10-K.
+        with st.expander("Suppliers and customers named in the 10-K",
+                         expanded=st.session_state.get("cmd_focus") == "SPLC"):
+            _sec_relationships(c)
+
+    def _overview(c) -> None:
+        _sec_overview(c)
+        with st.expander("Price table (HP)",
+                         expanded=st.session_state.get("cmd_focus") == "HP"):
+            _sec_prices(c)
+
+    def _news_and_filings(c) -> None:
+        _sec_news(c)
+        st.markdown("#### Filings")
+        _sec_filings(c)
+
+
+    # Lazy and isolated: only the open section runs, and one that fails (a chain that
+    # does not parse, a filing that cannot be read) leaves the others standing.
+    _sections(command.SECURITY, {
+        "OVERVIEW": _overview, "FINANCIALS": _financials,
+        "VALUATION": _valuation, "OPTIONS": _options, "EXPOSURE": _exposure,
+        "ANALYSTS": _sec_analysts, "OWNERSHIP": _sec_ownership,
+        "NEWS & FILINGS": _news_and_filings,
+    }, c)
+
+
+def _view_options_builder(default_under: str = "") -> None:
+    """The position builder. Legs are saved against the open portfolio; the underlying
+    starts at the security in the command line (no hard-coded AAPL any more)."""
+    st.markdown("#### Build an options position")
+    if _need_portfolio("legs are saved against it."):
         u1, u2 = st.columns([2, 1])
-        under = u1.text_input("Underlying", value="AAPL", key="opt_under").strip().upper()
-        rate_b, rate_b_src = mx.current_risk_free(src.con, settings.risk_free_fallback)
+        under = u1.text_input("Underlying", value=default_under,
+                              key=f"opt_under_{default_under}",
+                              placeholder="a ticker, e.g. the one in the command line"
+                              ).strip().upper()
+        rates = _risk_free_now(DATA_KEY)
+        rate_b, rate_b_src = rates["short"], rates["short_source"]
         u2.markdown(ui.stats([("RISK-FREE", f"{rate_b:.2%}", "")]), unsafe_allow_html=True)
         u2.caption(rate_b_src)
 
-        spot_q = rs.live_quote(under) if under else None
-        spot_b = (spot_q or {}).get("price")
-        if not spot_b:
-            row_px = src.con.execute(
-                "SELECT close FROM prices WHERE upper(ticker) = upper(?) "
-                "ORDER BY date DESC LIMIT 1", [under]).fetchone()
-            spot_b = float(row_px[0]) if row_px else None
+        spot_b, _ = _spot(under) if under else (None, "")
+        # The same trailing yield the analysis uses (it was left out here until
+        # 02.10.2026, so the builder and OPTIONS solved the same chain differently).
+        div_b = op.trailing_dividend_yield(src.con, under) if under else 0.0
 
-        if not spot_b:
+        if not under:
+            st.caption("Type an underlying, or set one in the command line.")
+        elif not spot_b:
             st.warning(f"No price for {under}.")
         else:
-            exps = op.expiries(under)
-            if not exps:
+            exps, exp_err = ac.attempt(ac.expiries, under)
+            if exp_err:
+                st.warning(f"The option chain could not be reached ({exp_err}).")
+            elif not exps:
                 st.warning(f"{under} has no listed options.")
             else:
                 st.markdown(ui.stats([
@@ -2455,18 +2822,18 @@ with tab_options:
 
                 b1, b2, b3, b4 = st.columns(4)
                 exp_b = b1.selectbox("Expiry", exps, index=min(6, len(exps) - 1),
-                                     key="opt_b_exp")
+                                     key=f"opt_b_exp_{under}")
                 kind_b = b2.selectbox("Type", ["call", "put", "share"], key="opt_b_kind")
                 side_b = b3.selectbox("Side", ["buy", "sell"], key="opt_b_side")
                 qty_b = b4.number_input("Contracts", 1, 100, 1, key="opt_b_qty")
 
-                days_b = max((pd.Timestamp(exp_b) - pd.Timestamp(dt.date.today())).days, 1)
 
                 if kind_b == "share":
                     strike_b, price_b, iv_b = 0.0, spot_b, 0.0
                     st.caption(f"{qty_b * 100:g} shares at {spot_b:,.2f}.")
                 else:
-                    ch = op.chain(under, exp_b, spot_b, risk_free=rate_b)
+                    ch, _ = ac.attempt(ac.chain, under, exp_b, spot_b, rate_b, div_b)
+                    ch = ch if ch is not None else pd.DataFrame()
                     side_ch = ch[ch.kind == kind_b] if not ch.empty else ch
                     if side_ch.empty:
                         st.warning("No usable contracts at that expiry.")
@@ -2484,13 +2851,24 @@ with tab_options:
                         strike_b = st.selectbox(
                             "Strike", options=list(labels),
                             index=list(labels).index(nearest),
-                            format_func=lambda k: labels[k], key="opt_b_strike",
+                            format_func=lambda k: labels[k], key=f"opt_b_strike_{under}_{exp_b}_{kind_b}",
                         )
                         picked = side_ch[side_ch.strike == strike_b].iloc[0]
                         price_b, iv_b = float(picked.mid), float(picked.iv)
 
+                # One position, one underlying: its payoff is drawn against one price.
+                # Until 03.10.2026 a leg on a second share was added without a word and
+                # valued at the first one's price (review F1).
+                held = sorted(set(store.legs(chosen).underlying) - {under})
+                if held:
+                    st.caption(
+                        f"The saved position is on {', '.join(held)}. A leg on {under} "
+                        "cannot share its payoff chart, which is drawn against one "
+                        "price: clear the position first, or build this one in another "
+                        "portfolio.")
                 if strike_b is not None and st.button(
-                    "Add leg", type="primary", width="stretch", key="opt_b_add"
+                    "Add leg", type="primary", width="stretch", key="opt_b_add",
+                    disabled=bool(held),
                 ):
                     store.add_leg(
                         chosen, under, kind_b, strike_b, exp_b,
@@ -2500,7 +2878,13 @@ with tab_options:
                     st.rerun()
 
                 st.markdown("#### Presets")
-                pc = st.columns(3)
+                # A preset deletes the saved legs first; with legs saved it asks, like
+                # every other delete (F12d).
+                n_saved = len(store.legs(chosen))
+                holder = (st.popover(f"Presets — replace the {n_saved} saved legs",
+                                     width="stretch") if n_saved else st.container())
+                with holder:
+                    pc = st.columns(3)
                 for i, (name, spec_legs) in enumerate(op.PRESETS.items()):
                     if pc[i % 3].button(name, key=f"preset_{i}", width="stretch"):
                         store.clear_legs(chosen)
@@ -2510,7 +2894,9 @@ with tab_options:
                                               qty / 100, spot_b, 0.0, contract_size=100)
                                 continue
                             target = spot_b * ratio
-                            ch2 = op.chain(under, exp_b, spot_b, risk_free=rate_b)
+                            ch2, _ = ac.attempt(ac.chain, under, exp_b, spot_b, rate_b,
+                                                div_b)
+                            ch2 = ch2 if ch2 is not None else pd.DataFrame()
                             side2 = ch2[ch2.kind == lk] if not ch2.empty else ch2
                             if side2.empty:
                                 continue
@@ -2529,7 +2915,7 @@ with tab_options:
             st.info("No legs yet. Add one above, or start from a preset.")
         else:
             st.markdown("#### Position")
-            legs_obj = [
+            every_leg = [
                 op.Leg(kind=r.kind, strike=float(r.strike), expiry=r.expiry,
                        quantity=float(r.quantity), entry_price=float(r.entry_price),
                        iv=float(r.iv) if pd.notna(r.iv) else 0.25,
@@ -2537,19 +2923,41 @@ with tab_options:
                 for r in saved.itertuples()
             ]
             st.markdown(ui.grid(pd.DataFrame({
-                "leg": [l.describe() for l in legs_obj],
-                "iv": [f"{l.iv:.0%}" if l.kind != "share" else "—" for l in legs_obj],
-                "cost": [ui.money(l.entry_price * l.multiplier) for l in legs_obj],
-            }), numeric={"iv", "cost"}, ticker_col="leg"), unsafe_allow_html=True)
+                "underlying": saved.underlying.astype(str).tolist(),
+                "leg": [l.describe() for l in every_leg],
+                "iv": [f"{l.iv:.0%}" if l.kind != "share" else "—" for l in every_leg],
+                "cost": [ui.money(l.entry_price * l.multiplier) for l in every_leg],
+            }), numeric={"iv", "cost"}, ticker_col="underlying"), unsafe_allow_html=True)
 
-            if st.button("Clear position", key="opt_b_clear", width="stretch"):
-                store.clear_legs(chosen)
-                st.rerun()
+            with st.popover("Clear position", width="stretch"):
+                st.caption(f"Deletes the {len(saved)} saved legs of this portfolio.")
+                if st.button("Delete the legs", type="primary", key="opt_b_clear"):
+                    store.clear_legs(chosen)
+                    st.rerun()
 
-            under_b = saved.underlying.iloc[0]
-            spot_use = spot_b or float(src.con.execute(
-                "SELECT close FROM prices WHERE upper(ticker) = upper(?) "
-                "ORDER BY date DESC LIMIT 1", [under_b]).fetchone()[0])
+            # The SAVED legs' underlying, not whatever is typed above: until 02.10.2026
+            # a position in one share was valued at the price of the next one typed in,
+            # and an underlying without a stored close raised a TypeError. A position
+            # saved before 03.10.2026 can hold legs on several underlyings: each set is
+            # valued at its own price, one at a time (F1).
+            unders = sorted(saved.underlying.astype(str).unique())
+            under_b = unders[0]
+            if len(unders) > 1:
+                under_b = st.segmented_control(
+                    "Value the legs on", unders, default=unders[0],
+                    key="opt_b_value_on") or unders[0]
+                st.warning(
+                    f"These legs are on {len(unders)} underlyings. A payoff is drawn "
+                    "against one price, so the figures below are for the legs on "
+                    f"{under_b} only, at {under_b}'s own price.")
+            mine = (saved.underlying.astype(str) == under_b).tolist()
+            legs_obj = [leg for leg, keep in zip(every_leg, mine) if keep]
+            saved = saved[mine]
+            spot_use, spot_src = _spot(under_b)
+            if not spot_use:
+                st.warning(f"No price for {under_b}, so the position cannot be valued.")
+                return
+            st.caption(f"{under_b} at {spot_use:,.2f} ({spot_src}).")
             soonest = min(saved.expiry)
             days_left = max((pd.Timestamp(soonest) - pd.Timestamp(dt.date.today())).days, 1)
             m = op.position_metrics(legs_obj, spot_use, days_left, r=rate_b)
@@ -2617,7 +3025,7 @@ with tab_options:
                     )
 
 
-with tab_strategy:
+def _view_strategy(default: str = "") -> None:
     st.markdown("#### When to invest")
     st.write(
         "Not which company — when. Money arrives on a schedule; a rule decides when it "
@@ -2628,24 +3036,32 @@ with tab_strategy:
     )
 
     what = st.text_input(
-        "What to buy", value="^SP500TR",
+        "What to buy", value=default or "^SP500TR",
         help="A ticker in the local store. ^SP500TR is the S&P 500 including dividends.",
-        key="stg_symbol",
+        key=f"stg_symbol_{default}",
     )
     c1, c2, c3 = st.columns(3)
-    amount = c1.number_input("Amount each time", 50.0, 100000.0, 500.0, 50.0)
+    # Stable keys: without them every one of these reset whenever a label changed.
+    amount = c1.number_input("Amount each time", 50.0, 100000.0, 500.0, 50.0,
+                             key="stg_amount")
     freq = c2.selectbox("How often", ["weekly", "fortnightly", "monthly", "quarterly"],
-                        index=2)
-    cash_rate = c3.slider("Idle cash earns % a year", 0.0, 6.0, 2.0, 0.25) / 100
+                        index=2, key="stg_freq")
+    cash_rate = c3.slider("Idle cash earns % a year", 0.0, 6.0, 2.0, 0.25,
+                          key="stg_cash") / 100
 
     c4, c5 = st.columns(2)
-    trigger = c4.slider("Dip trigger: % below the running high", 1.0, 30.0, 2.0, 0.5) / 100
-    ma_days = c5.slider("Moving average, days", 20, 300, 200, 10)
+    trigger = c4.slider("Dip trigger: % below the running high", 1.0, 30.0, 2.0, 0.5,
+                        key="stg_trigger") / 100
+    ma_days = c5.slider("Moving average, days", 20, 300, 200, 10, key="stg_ma")
 
     series = src.con.execute(
-        "SELECT date, close_adj FROM prices WHERE upper(ticker) = upper(?) ORDER BY date",
+        "SELECT date, close_adj FROM prices WHERE ticker = ? ORDER BY date",
         [what.strip()],
     ).fetch_df()
+    if series.empty:
+        series = src.con.execute(
+            "SELECT date, close_adj FROM prices WHERE upper(ticker) = upper(?) "
+            "ORDER BY date", [what.strip()]).fetch_df()
 
     if len(series) < 60:
         st.warning(
@@ -2767,32 +3183,19 @@ with tab_strategy:
 
 # ---------------------------------------------------------------------- watchlist
 def _watched() -> list[str]:
-    """Every company you have a stake in across the app: tracked holdings first, then
-    hand-picked names, then whatever the open portfolio's screen currently returns."""
-    seen: list[str] = []
-    for row in store.list_portfolios().itertuples():
-        for t in store.holdings(row.id).ticker.tolist():
-            if t not in seen:
-                seen.append(t)
-        sp = store.get_spec(row.id)
-        for t in sp.tickers:
-            if t not in seen:
-                seen.append(t)
-    return seen
+    """Every company followed anywhere in the app: the watchlist, tracked holdings and
+    hand-picked names (store.everything_followed). The calendar and the commodity links
+    used their own copy of this list, which left the watchlist out (audit 02.10.2026)."""
+    return store.everything_followed()
 
 
-with tab_monitor:
-    mon_unit = st.radio(
-        "Priced in", ["US dollars", "Gold"], horizontal=True, key="monitor_unit",
-        # Starts on whatever the sidebar's unit says; switched here, it changes the
-        # monitor only.
-        index=1 if unit == nm.GOLD else 0,
-        help="Gold: every price divided by the gold price of the same day (GC=F). "
-             "Foreign indices go to dollars first at that day's rate. Yields and cross "
-             "rates have no currency and stay as they are.")
-    in_gold = mon_unit == "Gold"
+def _view_monitor() -> None:
+    """WEI and GLCO: indices, currencies, rates, commodities, crypto. Priced in the ONE
+    unit switch in the sidebar (the board had a second switch of its own until
+    02.10.2026, which could disagree with the first)."""
+    in_gold = unit == nm.GOLD
     unit_key = "gold" if in_gold else "USD"
-    boards = world.monitor(src.con, unit=unit_key)
+    boards = _monitor(unit_key, DATA_KEY)
     stored = sum(int(t["last"].notna().sum()) for t in boards.values() if "last" in t)
     if not stored:
         st.info(
@@ -2882,24 +3285,7 @@ with tab_monitor:
             if curves.empty:
                 st.info("No stored history for these yet.")
             else:
-                import plotly.graph_objects as go
-
-                cmp_fig = go.Figure()
-                palette = [ui.AMBER, ui.CYAN, ui.UP, "#C792EA", "#F78C6C", "#FFCB6B",
-                           "#89DDFF", ui.DOWN]
-                for i, sym in enumerate(curves.columns):
-                    cmp_fig.add_trace(go.Scatter(
-                        x=curves.index, y=curves[sym], name=labels.get(sym, sym),
-                        line=dict(color=palette[i % len(palette)], width=1.5)))
-                cmp_fig.add_hline(y=100, line=dict(color=ui.MUTED, width=1, dash="dot"))
-                cmp_fig.update_layout(
-                    height=340, margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor=ui.BG,
-                    plot_bgcolor=ui.BG, hovermode="x unified",
-                    font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
-                    legend=dict(orientation="h", y=-0.15),
-                    xaxis=dict(gridcolor=ui.RULE),
-                    yaxis=dict(gridcolor=ui.RULE, side="right"))
-                st.plotly_chart(cmp_fig, width="stretch", key="monitor_cmp")
+                _rebased_chart(curves, labels, "monitor_cmp")
                 st.caption("Each line starts at 100 on its first close in the window, so "
                            "an index, a currency and gold can share one scale. Price "
                            "only, " + ("measured in gold (gold itself is the unit and "
@@ -2907,11 +3293,30 @@ with tab_monitor:
                                        else "in each market's own currency."))
 
 
+
+
+def _rebased_chart(curves: pd.DataFrame, labels: dict, key: str) -> None:
+    """Lines rebased to 100, one colour each, a dotted line at the start value."""
+    fig = go.Figure()
+    for i, sym in enumerate(curves.columns):
+        fig.add_trace(go.Scatter(x=curves.index, y=curves[sym], name=labels.get(sym, sym),
+                                 line=dict(color=PALETTE[i % len(PALETTE)], width=1.5)))
+    fig.add_hline(y=100, line=dict(color=ui.MUTED, width=1, dash="dot"))
+    _layout(fig, 300, hovermode="x unified", legend=dict(orientation="h", y=-0.15),
+            xaxis=dict(gridcolor=ui.RULE), yaxis=dict(gridcolor=ui.RULE, side="right"))
+    st.plotly_chart(fig, width="stretch", key=key)
+
+
+def _view_compare(default: str = "") -> None:
+    """CORR: any stored series side by side, with their correlation."""
+    in_gold = unit == nm.GOLD
+    unit_key = "gold" if in_gold else "USD"
     st.markdown("#### Compare anything")
     k1, k2 = st.columns([3, 1])
+    start = ", ".join(s for s in (default, "^GSPC", "GC=F") if s)
     cmp_syms = k1.text_input(
-        "Symbols", value="AAPL, MSFT, ^GSPC, GC=F", key="cmp_syms",
-        help="Any stored series: US shares, the monitor's indices, currencies, "
+        "Symbols", value=start, key=f"cmp_syms_{default}",
+        help="Any stored series: shares, the monitor's indices, currencies, "
              "commodities, crypto. Comma-separated.")
     cmp_span = k2.selectbox("Since", ["1Y", "3Y", "5Y", "10Y"], index=1, key="cmp_span",
                             label_visibility="visible")
@@ -2921,27 +3326,11 @@ with tab_monitor:
     if not cmp:
         st.info("None of these has stored prices in that window.")
     else:
-        import plotly.graph_objects as go
-
         if cmp["missing"]:
             st.caption(("Not shown (no stored prices, no exchange rate, or gold itself "
                         "in the gold view): " if in_gold else "No stored prices for: ")
                        + ", ".join(cmp["missing"]))
-        cfig = go.Figure()
-        cpal = [ui.AMBER, ui.CYAN, ui.UP, "#C792EA", "#F78C6C", "#FFCB6B", "#89DDFF",
-                ui.DOWN]
-        for i_c, sym in enumerate(cmp["curves"].columns):
-            cfig.add_trace(go.Scatter(x=cmp["curves"].index, y=cmp["curves"][sym],
-                                      name=sym, line=dict(color=cpal[i_c % len(cpal)],
-                                                          width=1.5)))
-        cfig.add_hline(y=100, line=dict(color=ui.MUTED, width=1, dash="dot"))
-        cfig.update_layout(height=320, margin=dict(l=0, r=0, t=6, b=0),
-                           paper_bgcolor=ui.BG, plot_bgcolor=ui.BG, hovermode="x unified",
-                           font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
-                           legend=dict(orientation="h", y=-0.15),
-                           xaxis=dict(gridcolor=ui.RULE),
-                           yaxis=dict(gridcolor=ui.RULE, side="right"))
-        st.plotly_chart(cfig, width="stretch", key="cmp_chart")
+        _rebased_chart(cmp["curves"], {}, "cmp_chart")
         cs = cmp["stats"]
         st.markdown(ui.grid(pd.DataFrame({
             "symbol": cs["symbol"],
@@ -2949,21 +3338,11 @@ with tab_monitor:
             "p.a.": cs["annualised"].map(lambda v: ui.pct(v, 1)),
             "volatility": cs["volatility"].map(
                 lambda v: f"{v:.1%}" if v is not None and pd.notna(v) else "—"),
-            "max drawdown": cs["max_drawdown"].map(lambda v: ui.pct(v, 1)),
+            "max dd": cs["max_drawdown"].map(lambda v: ui.pct(v, 1)),
             "beta": cs.get("beta", pd.Series([None] * len(cs))).map(ui.num),
-        }), numeric={"volatility", "beta"}, signed={"return", "p.a.", "max drawdown"},
+        }), numeric={"volatility", "beta"}, signed={"return", "p.a.", "max dd"},
             ticker_col="symbol"), unsafe_allow_html=True)
-        corr_c = cmp["correlation"]
-        if not corr_c.empty and corr_c.shape[0] > 1:
-            hm = go.Figure(go.Heatmap(
-                z=corr_c.values, x=list(corr_c.columns), y=list(corr_c.index),
-                zmin=-1, zmax=1, text=corr_c.round(2).values, texttemplate="%{text}",
-                colorscale=[[0, ui.CYAN], [0.5, ui.BG], [1, ui.AMBER]]))
-            hm.update_layout(height=min(140 + 34 * len(corr_c), 520),
-                             margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor=ui.BG,
-                             plot_bgcolor=ui.BG,
-                             font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10))
-            st.plotly_chart(hm, width="stretch", key="cmp_corr")
+        _corr_heatmap(cmp["correlation"], "cmp", annotate=True)
         st.caption(
             f"Correlation of daily returns over the {cmp['shared_days']} days all of them "
             "traded. Beta against the S&P 500 total return. "
@@ -2972,12 +3351,13 @@ with tab_monitor:
             + "Indices and commodities without dividends.")
 
 
-with tab_books:
+def _view_books() -> None:
     st.markdown("#### Paper books — every simulated purchase, side by side")
     st.caption(
         "Each book was frozen when it was opened: the positions, the rule or the savings "
         "plan cannot change afterwards, so nothing here is fitted to the outcome. Open "
-        "new ones in the Paper money box of SCREEN, RESEARCH, STRATEGY or LAB."
+        "new ones from the Paper money box of a screen, a security, a rule or a savings "
+        "plan."
     )
     all_books = paper.books(store.con)
     valued = _paper_rows(all_books) if not all_books.empty else []
@@ -3012,25 +3392,16 @@ with tab_books:
         ]), unsafe_allow_html=True)
 
         if live:
-            import plotly.graph_objects as go
-
             fig = go.Figure()
-            palette = [ui.AMBER, ui.CYAN, ui.UP, "#C792EA", "#F78C6C", "#FFCB6B",
-                       "#89DDFF", ui.DOWN]
             for i, v in enumerate(live):
                 ret = 100.0 * (v["value"] / v["invested"] - 1.0)
                 fig.add_trace(go.Scatter(
                     x=ret.index, y=ret, name=v["book"]["name"],
-                    line=dict(color=palette[i % len(palette)], width=1.6)))
+                    line=dict(color=PALETTE[i % len(PALETTE)], width=1.6)))
             fig.add_hline(y=0, line=dict(color=ui.MUTED, width=1, dash="dot"))
-            fig.update_layout(
-                height=360, margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor=ui.BG,
-                plot_bgcolor=ui.BG, hovermode="x unified",
-                font=dict(family="IBM Plex Mono", color=ui.MUTED, size=10),
-                legend=dict(orientation="h", y=-0.15),
-                yaxis=dict(title="% on money in", gridcolor=ui.RULE, side="right"),
-                xaxis=dict(gridcolor=ui.RULE),
-            )
+            _layout(fig, 300, hovermode="x unified", legend=dict(orientation="h", y=-0.15),
+                    yaxis=dict(title="% on money in", gridcolor=ui.RULE, side="right"),
+                    xaxis=dict(gridcolor=ui.RULE))
             st.plotly_chart(fig, width="stretch", key="books_compare")
             st.caption(
                 "Each line is the gain on the money that book has put in so far. Books "
@@ -3043,22 +3414,18 @@ with tab_books:
         daily = pd.DataFrame({
             f"{v['book']['name']} ({v['book']['origin']})": v["value"]
             for v in valued if not v.get("empty")})
-        st.download_button(
+        _workbook_button(
             "Export books to Excel",
-            data=export.workbook(
-                {"Books": pd.DataFrame([{
-                    "book": v["book"]["name"], "from": v["book"]["origin"],
-                    "kind": v["book"]["kind"], "since": str(v["book"]["started_on"]),
-                    "money_in": v.get("invested_now"), "value": v.get("value_now"),
-                    "gain": v.get("gain"), "return": v.get("return"),
-                    "sp500tr_return": v.get("benchmark_return")} for v in valued]),
-                 "Daily value": daily.reset_index(names="date") if not daily.empty
-                 else pd.DataFrame()},
-                title="Paper books", source="Stored daily closes; values in USD",
-                as_of=asof),
-            file_name=export.filename("paper_books", asof),
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="export_books")
+            lambda: {"Books": pd.DataFrame([{
+                "book": v["book"]["name"], "from": v["book"]["origin"],
+                "kind": v["book"]["kind"], "since": str(v["book"]["started_on"]),
+                "money_in": v.get("invested_now"), "value": v.get("value_now"),
+                "gain": v.get("gain"), "return": v.get("return"),
+                "sp500tr_return": v.get("benchmark_return")} for v in valued]),
+                "Daily value": daily.reset_index(names="date") if not daily.empty
+                else pd.DataFrame()},
+            title="Paper books", source="Stored daily closes; values in USD",
+            stem="paper_books", key="export_books")
 
         for v in valued:
             b = v["book"]
@@ -3069,8 +3436,6 @@ with tab_books:
                 if v.get("empty"):
                     st.info(v.get("error") or "No prices since this book was opened yet.")
                 else:
-                    import plotly.graph_objects as go
-
                     detail = go.Figure()
                     detail.add_trace(go.Scatter(x=v["value"].index, y=v["value"],
                                                 name="value",
@@ -3110,7 +3475,8 @@ with tab_books:
                     st.rerun()
 
 
-with tab_deals:
+def _view_deals(default_subject: str = "") -> None:
+    """MA: precedent transactions entered by hand, valued point in time."""
     st.markdown("#### Precedent transactions — what acquirers paid")
     st.caption(
         "Enter the deal terms from the press release; every multiple is computed from "
@@ -3197,11 +3563,14 @@ with tab_deals:
             "of it."
         )
 
-        subj_opts = sorted(_frame(asof).ticker.astype(str).unique()) if asof else []
-        subject = st.selectbox("Apply the precedent medians to", [""] + subj_opts,
-                               key="deal_subject")
+        subj_opts = [""] + (sorted(_frame(asof, DATA_KEY).ticker.astype(str).unique())
+                            if asof else [])
+        subject = st.selectbox("Apply the precedent medians to", subj_opts,
+                               index=subj_opts.index(default_subject)
+                               if default_subject in subj_opts else 0,
+                               key=f"deal_subject_{default_subject}")
         if subject:
-            enriched_d = derive_metrics(_frame(asof))
+            enriched_d = _enriched_now()
             srow = enriched_d[enriched_d.ticker.astype(str) == subject]
             implied_d = (deals.apply_to(deal_stats, srow.iloc[0]) if len(srow)
                          else pd.DataFrame())
@@ -3221,19 +3590,14 @@ with tab_deals:
                     "A takeover value: it includes the control premium buyers paid, so "
                     "it sits above what the trading comps imply for the same company.")
 
-        st.download_button(
+        _workbook_button(
             "Export deals to Excel",
-            data=export.workbook(
-                {"Deals": deal_rows.drop(columns=["id"], errors="ignore"),
-                 "Statistics": deal_stats.reset_index(names="statistic")
-                 if not deal_stats.empty else pd.DataFrame()},
-                title="Precedent transactions",
-                source="Deal terms entered by hand; target figures from SEC filings "
-                       "as of each announcement",
-                as_of=asof),
-            file_name=export.filename("precedent_deals", asof),
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="export_deals")
+            lambda: {"Deals": deal_rows.drop(columns=["id"], errors="ignore"),
+                     "Statistics": deal_stats.reset_index(names="statistic")
+                     if not deal_stats.empty else pd.DataFrame()},
+            title="Precedent transactions",
+            source="Deal terms entered by hand; target figures from SEC filings as of "
+                   "each announcement", stem="precedent_deals", key="export_deals")
 
         with st.expander("Remove a deal"):
             gone = st.selectbox(
@@ -3247,9 +3611,10 @@ with tab_deals:
                 st.rerun()
 
 
-with tab_macro:
+def _view_economy() -> None:
+    """ECST: the US economy from FRED."""
     st.markdown("#### The economy")
-    board = fred.dashboard(src.con)
+    board = _fred_board(DATA_KEY)
     if board["latest"].notna().sum() == 0:
         st.info("No macro series stored yet. Run once: `uv run python scripts/build_fred.py` "
                 "— FRED needs no key, and build_prices.py keeps the series current.")
@@ -3297,13 +3662,15 @@ with tab_macro:
             if not lines.empty:
                 st.line_chart(lines, height=300)
 
+
+def _view_rates() -> None:
+    """GC and WIRP: the Treasury curve and what the front fed funds contract prices."""
     st.markdown("#### The curve, and what it prices")
-    snap = mc.rate_snapshot(src.con)
+    snap, ff = _rates(DATA_KEY)
     if snap.empty:
         st.info("No rate history stored. Run scripts/build_macro.py.")
     else:
         shape = mc.curve_shape(snap)
-        ff = mc.fed_funds_expectation(src.con)
         cells = [(r.tenor.upper(), f"{r.rate:.2f}%", "") for r in snap.itertuples()]
         if shape:
             cells.append(("10Y - 3M", f"{shape['slope_bp']:+.0f}bp",
@@ -3354,175 +3721,136 @@ with tab_macro:
             st.line_chart(wide, height=250,
                           color=[ui.AMBER, ui.CYAN, ui.UP, ui.MUTED][:len(wide.columns)])
 
-        st.markdown("#### What a company does when rates move")
-        rate_tk = st.text_input("Ticker", value="AAPL", key="macro_ticker")
-        if rate_tk.strip():
-            sens = mc.rate_sensitivity(src.con, rate_tk.strip())
-            if sens.empty:
-                st.info("Not enough overlapping history for that ticker.")
-            else:
-                st.markdown(ui.grid(pd.DataFrame({
-                    "tenor": sens.tenor,
-                    "correlation": sens.correlation.map(lambda v: f"{v:+.2f}"),
-                    "move per 1pp": sens.beta_per_1pp.map(lambda v: f"{v:+.1%}"),
-                    "days": sens.days.astype(str),
-                }), numeric={"days"}, signed={"correlation", "move per 1pp"},
-                    ticker_col="tenor"), unsafe_allow_html=True)
-                st.caption(
-                    "Regressed on the CHANGE in each yield, not its level. A share does "
-                    "not care that the ten-year sits at 5%, it cares that it moved from "
-                    "4.9 to 5.0 today — using levels would find a relationship between "
-                    "any two series that happen to trend together."
-                )
 
-        st.markdown("#### Event study")
-        st.write(
-            "What a share did around one date, with the market's own move on that day "
-            "stripped out. The leftover is what is attributable to the event."
-        )
-        e1, e2, e3 = st.columns(3)
-        ev_tk = e1.text_input("Company", value=rate_tk or "AAPL", key="ev_ticker")
-        ev_date = e2.date_input("Event date", value=dt.date.today() - dt.timedelta(days=60),
-                                key="ev_date")
-        ev_win = e3.slider("Window, days either side", 1, 20, 5, key="ev_window")
-        if st.button("Measure", key="ev_run", width="stretch"):
-            res_ev = mc.event_study(src.con, ev_tk.strip(), ev_date,
-                                    window=(-ev_win, ev_win))
-            if not res_ev:
-                st.warning("No price history for that company.")
-            elif "error" in res_ev:
-                st.warning(res_ev["error"])
-            else:
-                st.markdown(ui.stats([
-                    ("EVENT", str(res_ev["event_date"]), ""),
-                    ("BETA", ui.num(res_ev["beta"]), ""),
-                    (f"CAR({-ev_win},{ev_win})", ui.pct(res_ev["car"]),
-                     "up" if res_ev["car"] >= 0 else "down"),
-                    ("t", f"{res_ev['t_stat']:+.2f}",
-                     "amber" if res_ev["significant"] else ""),
-                ]), unsafe_allow_html=True)
-                d_ = res_ev["daily"]
-                st.bar_chart(d_.set_index("offset")[["abnormal"]], height=200,
-                             color=[ui.AMBER])
-                st.caption(
-                    f"Market model fitted on {res_ev['estimation_days']} trading days "
-                    "ending ten days before the event, so anticipation does not "
-                    "contaminate the yardstick. A |t| above 1.96 is the conventional "
-                    "threshold — note that a one-day reaction spread over a wide window "
-                    "gets diluted by the quiet days around it, so widening the window "
-                    "until the number looks good measures your search, not the event."
-                )
-
-
-with tab_commodities:
-    st.markdown("#### Commodities and macro series")
-    rows = []
-    for symbol, label in rs.COMMODITIES.items():
-        h = src.con.execute(
-            "SELECT date, close_adj FROM prices WHERE ticker = ? ORDER BY date", [symbol]
-        ).fetch_df()
-        if len(h) < 30:
-            continue
-        h["date"] = pd.to_datetime(h["date"])
-        ser = h.set_index("date")["close_adj"].astype(float)
-        row = {"series": label, "symbol": symbol, "last": float(ser.iloc[-1]),
-               "as_of": ser.index[-1].date()}
-        for lab, d in (("1m", 21), ("3m", 63), ("6m", 126), ("1y", 252)):
-            row[lab] = (ser.iloc[-1] / ser.iloc[-d] - 1.0) if len(ser) > d else np.nan
-        rets = ser.pct_change().dropna()
-        row["volatility"] = rets.std() * np.sqrt(252) if len(rets) > 20 else np.nan
-        rows.append(row)
-
-    if not rows:
-        st.info("No commodity history stored. Run scripts/build_commodities.py.")
+def _rate_exposure(ticker: str, bars: pd.DataFrame | None = None) -> None:
+    """Rate sensitivity and an event study for one security — in MACRO until 02.10.2026,
+    with its own ticker box (default AAPL); now part of the security's EXPOSURE, and of
+    the page of an index, a commodity or a Yahoo-only symbol (review 03.10.2026, F5).
+    `bars` are fetched bars for a symbol the store does not hold."""
+    st.markdown("#### What it does when rates move")
+    rate_links = mc.rate_sensitivity(src.con, ticker, prices=bars)
+    if rate_links.empty:
+        st.info("Not enough overlapping history with the Treasury yields.")
     else:
-        table = pd.DataFrame(rows)
         st.markdown(ui.grid(pd.DataFrame({
-            "series": table.series,
-            "last": table.last.map(ui.num),
-            "1m": table["1m"].map(lambda v: ui.pct(v, 1)),
-            "3m": table["3m"].map(lambda v: ui.pct(v, 1)),
-            "6m": table["6m"].map(lambda v: ui.pct(v, 1)),
-            "1y": table["1y"].map(lambda v: ui.pct(v, 1)),
-            "vol": table.volatility.map(lambda v: "—" if pd.isna(v) else f"{v:.0%}"),
-        }), numeric={"last", "vol"}, signed={"1m", "3m", "6m", "1y"},
-            ticker_col="series"), unsafe_allow_html=True)
-
-        chosen_c = st.multiselect(
-            "Chart", options=table.series.tolist(),
-            default=table.series.tolist()[:3], key="cmd_pick",
+            "tenor": rate_links.tenor,
+            "correlation": rate_links.correlation.map(lambda v: f"{v:+.2f}"),
+            "move per 1pp": rate_links.beta_per_1pp.map(lambda v: f"{v:+.1%}"),
+            "days": rate_links.days.astype(str),
+        }), numeric={"days"}, signed={"correlation", "move per 1pp"},
+            ticker_col="tenor"), unsafe_allow_html=True)
+        st.caption(
+            "Regressed on the CHANGE in each yield, not its level. A share does "
+            "not care that the ten-year sits at 5%, it cares that it moved from "
+            "4.9 to 5.0 today — using levels would find a relationship between "
+            "any two series that happen to trend together."
         )
-        if chosen_c:
-            syms = table.set_index("series").loc[chosen_c, "symbol"].tolist()
-            hist_c = src.con.execute(
-                "SELECT date, ticker, COALESCE(close_adj, close) AS close_adj FROM prices "
-                "WHERE ticker IN (SELECT UNNEST(?)) ORDER BY date", [syms]
-            ).fetch_df()
-            hist_c["date"] = pd.to_datetime(hist_c["date"])
-            wide_c = hist_c.pivot_table(index="date", columns="ticker", values="close_adj")
-        if chosen_c and wide_c.empty:
-            st.info("No stored history for these series.")
-        elif chosen_c:
-            # Rebased, because a chart of oil in dollars next to copper in cents compares
-            # nothing. Index both to 100 and the comparison is about movement.
-            wide_c = 100 * wide_c / wide_c.bfill().iloc[0]
-            wide_c = wide_c.rename(columns=dict(zip(syms, chosen_c)))
-            st.line_chart(wide_c, height=280,
-                          color=[ui.AMBER, ui.CYAN, ui.UP, ui.DOWN, ui.MUTED][:len(chosen_c)])
-            st.caption("All rebased to 100 at the start, so the lines compare movement.")
 
-    if rows:
-        st.markdown("#### Which of your holdings move with them")
-        watch_c = _watched()
-        pick_c = st.text_input(
-            "Companies", value=", ".join(watch_c[:10]) if watch_c else "DEC, NEM, AAL",
-            key="cmd_tickers",
+    st.markdown("#### Event study")
+    st.write(
+        "What a share did around one date, with the market's own move on that day "
+        "stripped out. The leftover is what is attributable to the event."
+    )
+    e1, e2, e3 = st.columns(3)
+    e1.markdown(f"**{ticker}**")
+    ev_date = e2.date_input("Event date", value=dt.date.today() - dt.timedelta(days=60),
+                            key="ev_date", format="YYYY-MM-DD")
+    ev_win = e3.slider("Window, days either side", 1, 20, 5, key="ev_window")
+    if st.button("Measure", key=f"ev_run_{ticker}", width="stretch"):
+        res_ev = mc.event_study(src.con, ticker, ev_date,
+                                window=(-ev_win, ev_win), prices=bars)
+        if not res_ev:
+            st.warning(f"No price history for {ticker}.")
+        elif "error" in res_ev:
+            st.warning(res_ev["error"])
+        else:
+            st.markdown(ui.stats([
+                ("EVENT", str(res_ev["event_date"]), ""),
+                ("BETA", ui.num(res_ev["beta"]), ""),
+                (f"CAR({-ev_win},{ev_win})", ui.pct(res_ev["car"]),
+                 "up" if res_ev["car"] >= 0 else "down"),
+                ("t", f"{res_ev['t_stat']:+.2f}",
+                 "amber" if res_ev["significant"] else ""),
+            ]), unsafe_allow_html=True)
+            d_ = res_ev["daily"]
+            st.bar_chart(d_.set_index("offset")[["abnormal"]], height=200,
+                         color=[ui.AMBER])
+            st.caption(
+                f"Market model fitted on {res_ev['estimation_days']} trading days "
+                "ending ten days before the event, so anticipation does not "
+                "contaminate the yardstick. A |t| above 1.96 is the conventional "
+                "threshold — note that a one-day reaction spread over a wide window "
+                "gets diluted by the quiet days around it, so widening the window "
+                "until the number looks good measures your search, not the event."
+            )
+
+
+def _view_commodity_links() -> None:
+    """Which followed companies move with which commodity. The rest of the old
+    COMMODITIES tab (a board and a rebased chart of the same series) duplicated the
+    commodity board and the side-by-side chart of MARKETS & MACRO; wheat and corn
+    joined that board on 02.10.2026."""
+    st.markdown("#### Which of your holdings move with commodities")
+    watch_c = _watched()
+    pick_c = st.text_input(
+        "Companies", value=", ".join(watch_c[:10]),
+        placeholder="tickers, comma-separated — defaults to everything you follow",
+        key=f"links_tickers_{len(watch_c)}",
+    )
+    tickers_c = [t.strip().upper() for t in pick_c.replace("\n", ",").split(",")
+                 if t.strip()][:12]
+    if not tickers_c:
+        st.caption("Follow names (watchlist, tracking, hand-picked) or type some.")
+        return
+    found_rows = []
+    for t in tickers_c:
+        links = _commodity_links(t, DATA_KEY)
+        if links.empty:
+            continue
+        top = links.iloc[0]
+        found_rows.append({
+            "ticker": t, "strongest link": top.commodity,
+            "correlation": f"{top.correlation:+.2f}",
+            "beta": f"{top.beta:+.2f}",
+            "days": str(int(top.days)),
+        })
+    if found_rows:
+        st.markdown(ui.grid(pd.DataFrame(found_rows),
+                            numeric={"days"}, signed={"correlation", "beta"}),
+                    unsafe_allow_html=True)
+        st.caption(
+            "The sign says which side of the trade the company is on. A "
+            "producer moves with its commodity because it is the product; a "
+            "consumer moves against it because it is a cost. The arithmetic "
+            "cannot tell those apart — you can."
         )
-        tickers_c = [t.strip().upper() for t in pick_c.replace("\n", ",").split(",") if t.strip()][:12]
-        if tickers_c:
-            found_rows = []
-            for t in tickers_c:
-                sens_c = rs.commodity_sensitivity(src.con, t)
-                if sens_c.empty:
-                    continue
-                top = sens_c.iloc[0]
-                found_rows.append({
-                    "ticker": t, "strongest link": top.commodity,
-                    "correlation": f"{top.correlation:+.2f}",
-                    "beta": f"{top.beta:+.2f}",
-                    "days": str(int(top.days)),
-                })
-            if found_rows:
-                st.markdown(ui.grid(pd.DataFrame(found_rows),
-                                    numeric={"days"}, signed={"correlation", "beta"}),
-                            unsafe_allow_html=True)
-                st.caption(
-                    "The sign tells you which side of the trade the company is on. A "
-                    "producer moves with its commodity because it is the product; a "
-                    "consumer moves against it because it is a cost. The arithmetic "
-                    "cannot tell those apart — you can."
-                )
-            else:
-                st.info("Not enough overlapping history for those companies.")
+    else:
+        st.info("Not enough overlapping history for those companies.")
 
 
-with tab_map:
+def _air(fetch: bool):
+    """(time, aircraft) from OpenSky, or the last answer of this session when `fetch` is
+    False. A failed call is not cached (appcache) and keeps the previous answer."""
+    if fetch:
+        got, _ = ac.attempt(ac.aircraft_now)
+        if got is not None:
+            st.session_state["air_last"] = got
+    return st.session_state.get("air_last")
+
+
+def _view_map() -> None:
     # Laid out like a terminal map function: a strip of the numbers that moved, the map
     # with its layers, the movers beside it, and the detail underneath.
 
-    # Anonymous OpenSky allows ~100 worldwide calls a day; holding each for 15 minutes
-    # keeps a long session well inside that.
-    @st.cache_data(ttl=900, show_spinner=False)
-    def _aircraft_now():
-        try:
-            return aviation.fetch()
-        except Exception:                                            # noqa: BLE001
-            return None
-
-    ship_board = shipping.dashboard(src.con)
-    port_now = shipping.port_board(src.con)
-    live_air = _aircraft_now()
-    ais_static_path = CACHE_DIR / "ais_static.json"
+    ship_board, port_now = _ship_boards(DATA_KEY)
+    # Anonymous OpenSky allows ~100 worldwide calls a day. Until 02.10.2026 every visit
+    # to this tab asked, whichever layer was on; now only the AIR and FREIGHTERS layers
+    # and the AIR table do, and the strip shows the last answer of this session.
+    # The layer survives a visit to another tab (_kept): a lazy tab is not drawn, and
+    # Streamlit forgets the state of a widget that is not drawn (review 03.10.2026, F12e).
+    layer_now = _keep("map_layer", "SHIPS")
+    live_air = _air(layer_now in ("AIR", "FREIGHTERS"))
+    ais_static_path = cfg.CACHE_DIR / "ais_static.json"
 
     def _tone(v):
         return "" if v is None or pd.isna(v) else ("up" if v > 0 else "down")
@@ -3544,6 +3872,7 @@ with tab_map:
         chg = known.total_t.sum() / then - 1 if then else None
         strip.append(("PORTS KT/D", (f"{port_now.total_t.sum() / 1e3:,.0f} "
                                      f"{ui.pct(chg, 0)}"), _tone(chg)))
+    air_at, air, freighters = None, pd.DataFrame(), pd.DataFrame()
     if live_air is not None:
         air_at, air = live_air
         freighters = aviation.cargo_flights(air)
@@ -3553,9 +3882,9 @@ with tab_map:
     if strip:
         st.markdown(ui.stats(strip), unsafe_allow_html=True)
 
-    layer = st.radio("Layer", ["SHIPS", "TANKERS", "PORT CARGO", "LIVE AIS", "AIR",
-                               "FREIGHTERS"],
-                     horizontal=True, key="map_layer", label_visibility="collapsed")
+    layers = ["SHIPS", "TANKERS", "PORT CARGO", "LIVE AIS", "AIR", "FREIGHTERS"]
+    layer = st.radio("Layer", layers, horizontal=True, label_visibility="collapsed",
+                     **_kept_choice("map_layer", layers, "SHIPS"))
     c_map, c_side = st.columns([3, 1])
 
     with c_map:
@@ -3603,8 +3932,9 @@ with tab_map:
                         try:
                             heard = ais.listen(ais_key, ais_region, ais_seconds)
                         except ais.ListenFailed as exc:
-                            st.warning(f"AISStream: {exc}. Check the key in .env.local, "
-                                       "or wait a minute (3 connections at most).")
+                            st.warning(f"AISStream: {ui.error_text(exc)}. Check the key "
+                                       "in .env.local, or wait a minute (3 connections "
+                                       "at most).")
                             heard = None
                     if heard is not None:
                         prior = st.session_state.get("ais_static")
@@ -3663,7 +3993,13 @@ with tab_map:
             st.caption("Nothing stored yet.")
 
     d_straits, d_ports, d_air, d_ais = st.tabs(
-        ["CHOKEPOINTS", "PORT CARGO", "AIR", "LIVE AIS"])
+        ["CHOKEPOINTS", "PORT CARGO", "AIR", "LIVE AIS"], key="map_detail",
+        on_change="rerun")
+    if d_air.open and live_air is None:
+        live_air = _air(True)
+        if live_air is not None:
+            air_at, air = live_air
+            freighters = aviation.cargo_flights(air)
 
     with d_straits:
         if ship_board.empty:
@@ -3704,7 +4040,7 @@ with tab_map:
                                          ui.MUTED][:len(ship_lines.columns)])
             st.caption(
                 f"IMF PortWatch, ships passing each day as a seven-day average, as of "
-                f"{ship_board.as_of.max():%d.%m.%Y} (about five days behind). On the map "
+                f"{ship_board.as_of.max():%Y-%m-%d} (about five days behind). On the map "
                 "the circle's area is the count and its colour the change; hover for the "
                 "numbers. Compared with the same week a year earlier, so seasons cancel "
                 "out. Ships that switch off their transponder are not counted — tankers "
@@ -3771,7 +4107,7 @@ with tab_map:
                                       "airborne now": regions_now.map("{:,}".format)})
             if not air_hist.empty:
                 last_stored = air_hist.iloc[-1]
-                table_air[f"stored {last_stored.name:%d.%m. %H:%M}"] = [
+                table_air[f"stored {last_stored.name:%Y-%m-%d %H:%M}"] = [
                     f"{int(last_stored[r]):,}" if r in last_stored else "—"
                     for r in regions_now.index]
             a1.markdown(ui.grid(table_air, numeric=set(table_air.columns) - {"region"},
@@ -3791,7 +4127,7 @@ with tab_map:
                 st.caption("Freighters as % of all aircraft in the air, per stored "
                            "snapshot.")
             st.caption(
-                f"{len(air):,} aircraft airborne at {air_at:%d.%m.%Y %H:%M} UTC, each "
+                f"{len(air):,} aircraft airborne at {air_at:%Y-%m-%d %H:%M} UTC, each "
                 "circle the count in a 3° cell. Data: "
                 f"{aviation.ATTRIBUTION}. Coverage follows volunteer receivers: dense "
                 "over Europe and North America, thin over oceans, Africa, Russia and "
@@ -3829,7 +4165,7 @@ with tab_map:
             with_type = (ships_l["type"] != "unknown").sum()
             st.caption(
                 f"{len(ships_l)} ships heard in {region_l} during {secs_l} s at "
-                f"{at_l:%d.%m.%Y %H:%M} UTC ({n_msgs:,} messages), via AISStream "
+                f"{at_l:%Y-%m-%d %H:%M} UTC ({n_msgs:,} messages), via AISStream "
                 f"(coastal receivers). {with_type} of them with type, destination and "
                 "draught known — ships send those only every six minutes; what was "
                 "heard is kept on this Mac, so every listen fills more gaps. Destination "
@@ -3839,7 +4175,7 @@ with tab_map:
                 "Owners are not shown; the IMO number identifies the ship.")
 
 
-with tab_calendar:
+def _view_calendar() -> None:
     st.markdown("#### Who reports next")
     st.write(
         "Estimated locally from each company's own filing rhythm, then confirmed against "
@@ -3849,16 +4185,24 @@ with tab_calendar:
     weeks = st.slider("Weeks ahead", 1, 12, 6, key="cal_weeks")
     watch = _watched()
     extra = st.text_input(
-        "Companies to include", value=", ".join(watch) if watch else "AAPL, MSFT, NVDA",
-        help="Defaults to everything you track or hand-picked.", key="cal_tickers",
+        "Companies to include", value=", ".join(watch),
+        placeholder="tickers, comma-separated",
+        help="Defaults to everything you follow: watchlist, tracking, hand-picked.",
+        key=f"cal_tickers_{len(watch)}",
     )
     wanted = [t.strip().upper() for t in extra.replace("\n", ",").split(",") if t.strip()]
     if not wanted:
-        st.info("Add some tickers, or track a portfolio on the SCREEN tab.")
+        st.info("Add some tickers, put names on the watchlist, or track a portfolio.")
     else:
         with st.spinner("Reading filing rhythms"):
-            cal = rs.earnings_calendar(src.con, CACHE_DIR / "submissions.zip",
-                                       wanted, weeks=weeks)
+            cal, cal_err = ac.attempt(ac.earnings_calendar, src.con,
+                                      str(cfg.CACHE_DIR / SUBMISSIONS),
+                                      tuple(wanted), weeks, asof)
+            if cal_err:
+                # Estimates are local; only the announced dates need the network.
+                st.caption(f"Announced dates unreachable ({cal_err}); estimates only.")
+                cal = rs.earnings_calendar(src.con, cfg.CACHE_DIR / SUBMISSIONS,
+                                           wanted, weeks=weeks, confirm=False)
         if cal.empty:
             st.info(
                 f"Nothing due in the next {weeks} weeks for those companies — or their "
@@ -3890,19 +4234,20 @@ with tab_calendar:
             )
 
 
-with tab_lab:
-    st.markdown('<div class="tl-cmd"><span class="p">&gt;</span></div>',
-                unsafe_allow_html=True)
-    lab_mode = st.radio(
-        "Test the rule on", ["Basket you hold", "Single stock"], horizontal=True,
-        key=f"lab_mode_{chosen}",
-    )
+def _view_lab(default_ticker: str = "") -> None:
+    """A buy/sell rule on the held basket or one stock (the old LAB)."""
+    if not _need_portfolio("a rule is saved with its portfolio."):
+        return
+    # Every input here survives a switch to another section or tab (_kept, F12e).
+    modes = ["Basket you hold", "Single stock"]
+    lab_mode = st.radio("Test the rule on", modes, horizontal=True,
+                        **_kept_choice(f"lab_mode_{chosen}", modes, modes[0]))
     lab_single = lab_mode == "Single stock"
     if lab_single:
-        held_default = (store.get_spec(chosen).selected or [""])[0]
+        held_default = default_ticker or (store.get_spec(chosen).selected or [""])[0]
         lab_ticker = st.text_input(
-            "Ticker", value=held_default, key=f"lab_ticker_{chosen}",
-            placeholder="e.g. AAPL",
+            "Ticker", placeholder="e.g. AAPL",
+            **_kept(f"lab_ticker_{chosen}_{held_default}", held_default),
         ).strip().upper()
         held_now = [lab_ticker] if lab_ticker else []
     else:
@@ -3953,7 +4298,8 @@ with tab_lab:
                         "\n".join(f"- {c}" for c in out.changed) or "- no change",
                         kind="lab")
                 except Exception as exc:                      # noqa: BLE001
-                    store.add_message(chosen, "assistant", f"could not translate: {exc}",
+                    store.add_message(chosen, "assistant",
+                                      f"could not translate: {ui.error_text(exc)}",
                                       kind="lab")
                 st.rerun()
 
@@ -3965,10 +4311,12 @@ with tab_lab:
 
         c1, c2 = st.columns([1, 1])
         lab_start = c1.date_input(
-            "From", value=max(dt.date(2011, 1, 3), asof - dt.timedelta(days=365 * 10)),
-            min_value=dt.date(2010, 1, 4), max_value=asof, key=f"lab_start_{chosen}")
+            "From", min_value=dt.date(2010, 1, 4), max_value=asof,
+            **_kept(f"lab_start_{chosen}",
+                    max(dt.date(2011, 1, 3), asof - dt.timedelta(days=365 * 10))))
         go_lab = c2.button("Run rule", width="stretch", key=f"lab_go_{chosen}")
 
+        y_err = None
         if go_lab:
             bars = src.con.execute(
                 """
@@ -3983,7 +4331,7 @@ with tab_lab:
             ).fetch_df()
             if bars.empty and lab_single:
                 # Not in the store: any Yahoo ticker (BHP.AX, SAP.DE), fetched on demand.
-                yb = _yahoo_bars(lab_ticker)
+                yb, y_err = _yahoo_bars(lab_ticker)
                 if not yb.empty:
                     yb = yb[pd.to_datetime(yb.date) >= pd.Timestamp(lab_start)]
                     bars = yb[["ticker", "date", "open_adj", "close_adj"]].dropna()
@@ -3994,7 +4342,7 @@ with tab_lab:
             ).fetch_df()
             rate_l, rate_l_src = mx.risk_free_rate(src.con, lab_start, asof,
                                                    settings.risk_free_fallback)
-            caps = _frame(asof).set_index("ticker").reindex(list(held_now))
+            caps = _frame(asof, DATA_KEY).set_index("ticker").reindex(list(held_now))
             median_cap = float(pd.to_numeric(
                 caps.get("shares_outstanding", pd.Series(dtype=float)), errors="coerce"
             ).mul(pd.to_numeric(caps.get("price", pd.Series(dtype=float)),
@@ -4014,40 +4362,28 @@ with tab_lab:
             st.session_state[lab_key + "_base"] = base
             if out is not None:
                 store.record_run(
-                    chosen, "lab", lab_spec.fingerprint(), src.snapshot().fingerprint(),
+                    chosen, "lab", lab_spec.fingerprint(), data_fp,
                     out.dates[0], out.dates[-1],
                     {"signal": lab_spec.signal, "names": len(held_now),
                      "ticker": lab_ticker or None}, out.metrics)
 
         out = st.session_state.get(lab_key)
         base = st.session_state.get(lab_key + "_base")
-        if out is None and go_lab:
+        if out is None and go_lab and y_err:
+            st.warning(f"{lab_ticker} is not stored, and Yahoo could not be reached for "
+                       f"its prices ({y_err}). Nothing was kept; run it again later.")
+        elif out is None and go_lab:
             st.info("No overlapping price history for these names in that window.")
         elif out is not None:
             m = out.metrics
-            st.markdown(ui.stats([
-                ("FROM", str(pd.Timestamp(out.dates[0]).date()), ""),
-                ("YEARS", f"{out.years:.1f}", ""),
-                ("RULE P.A.", ui.pct(m["annual_return"]),
-                 "up" if m["annual_return"] >= 0 else "down"),
-                ("S&P 500 TR P.A.", ui.pct(m.get("benchmark_annual_return")), ""),
-                ("EXCESS P.A.", ui.pct(m.get("excess_annual")),
-                 "up" if (m.get("excess_annual") or 0) >= 0 else "down"),
-                ("IN THE MARKET", ui.pct(m.get("average_exposure")), ""),
-                ("TRADES", f"{out.trades:,}", ""),
-            ]), unsafe_allow_html=True)
-
+            _result_block(
+                out, name="Rule", turnover=out.turnover, height=300,
+                lines=({f"Buy & hold {lab_ticker}": (base.portfolio, ui.MUTED)}
+                       if base is not None else None),
+                cells=[("IN THE MARKET", ui.pct(m.get("average_exposure")), ""),
+                       ("TRADES", f"{out.trades:,}", "")])
             if lab_single:
                 _lab_price_chart(src.con, lab_ticker, out, lab_spec)
-            curve = pd.DataFrame({"Rule": out.portfolio}, index=out.dates)
-            colors = [ui.AMBER]
-            if base is not None:
-                curve[f"Buy & hold {lab_ticker}"] = base.portfolio
-                colors.append(ui.MUTED)
-            if out.benchmark:
-                curve[out.benchmark_symbol] = out.benchmark
-                colors.append(ui.CYAN)
-            st.line_chart(curve, height=300, color=colors)
             if base is not None:
                 bm = base.metrics
                 st.caption(
@@ -4057,21 +4393,6 @@ with tab_lab:
                     "smaller drawdown."
                 )
 
-            rows = [
-                ("Return p.a.", m["annual_return"], m.get("benchmark_annual_return")),
-                ("Volatility p.a.", m["volatility"], m.get("benchmark_volatility")),
-                ("Max drawdown", m["max_drawdown"], m.get("benchmark_max_drawdown")),
-                ("Deviation from index", m.get("tracking_error"), None),
-            ]
-            st.markdown(ui.grid(pd.DataFrame({
-                "metric": [r[0] for r in rows] + ["Sharpe", "Turnover p.a."],
-                "rule": [ui.pct(r[1]) for r in rows]
-                        + [ui.num(m["sharpe"]), ui.pct(out.turnover)],
-                out.benchmark_symbol or "index":
-                    [ui.pct(r[2]) if r[2] is not None else "—" for r in rows]
-                    + [ui.num(m.get("benchmark_sharpe")), "—"],
-            }), numeric=set(), ticker_col="metric"), unsafe_allow_html=True)
-
             st.caption(
                 f"Sharpe uses a risk-free rate of {rate_l:.2%} ({rate_l_src}). Turnover "
                 "is one-way and annualised: 200% means the whole basket changed hands "
@@ -4080,8 +4401,7 @@ with tab_lab:
             for note in out.notes:
                 st.warning(note)
             st.warning(out.label)
-            tried = store.backtest_count(lab_spec.fingerprint(),
-                                         src.snapshot().fingerprint())
+            tried = store.backtest_count(lab_spec.fingerprint(), data_fp)
             st.caption(
                 f"This exact rule has been tried {tried}× against this data build. A lab "
                 "has more knobs than a screen, so the count matters more here: turn "
@@ -4097,7 +4417,7 @@ with tab_lab:
                     "A paper book is valued from the stored prices, and this ticker is "
                     "not in the store (it came from Yahoo on demand). Only US-listed "
                     "names can be followed as paper books for now.")
-            caps_now = _frame(asof).set_index("ticker").reindex(list(held_now))
+            caps_now = _frame(asof, DATA_KEY).set_index("ticker").reindex(list(held_now))
             cap_now = float(pd.to_numeric(
                 caps_now.get("shares_outstanding", pd.Series(dtype=float)),
                 errors="coerce").mul(pd.to_numeric(
@@ -4114,97 +4434,106 @@ with tab_lab:
             "rule is frozen as it stands now.")
 
 
-with tab_news:
-    with st.expander("Alerts", expanded=False):
-        rules_now = alerts.rules(store.con)
-        with st.form("alert_form", clear_on_submit=True):
-            a1, a2, a3, a4 = st.columns([1, 2, 1, 1])
-            a_ticker = a1.text_input("Ticker", placeholder="AAPL")
-            a_kind = a2.selectbox("When", list(alerts.KINDS),
-                                  format_func=lambda k: alerts.KINDS[k])
-            a_x = a3.number_input("Level / %", min_value=0.0, value=0.0, step=1.0)
-            a4.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
-            if a4.form_submit_button("Add", width="stretch") and a_ticker.strip():
-                try:
-                    alerts.add(store.con, a_ticker, a_kind,
-                               None if a_kind == "new_filing" else a_x)
-                    st.rerun()
-                except ValueError as exc:
-                    st.error(str(exc))
-        if rules_now.empty:
-            st.caption("No alerts yet.")
-        else:
-            for rule in rules_now.itertuples():
-                r1, r2 = st.columns([5, 1])
-                level = "" if rule.kind == "new_filing" else f" {rule.threshold:g}"
-                r1.markdown(f"`{rule.ticker}` — {alerts.KINDS[rule.kind]}{level}")
-                if r2.button("×", key=f"rm_alert_{rule.id}"):
-                    alerts.remove(store.con, rule.id)
-                    st.rerun()
-            if st.button("Check now against the stored closes", key="alerts_now"):
-                fired, state_now = alerts.run(store.con, src.con,
-                                              alerts.load_state(ALERTS_STATE))
-                alerts.save_state(ALERTS_STATE, state_now)
-                st.success("; ".join(e["message"] for e in fired) if fired
-                           else "Nothing new fired.")
-        history_log = alerts.load_state(ALERTS_STATE).get("log", [])[-10:][::-1]
-        if history_log:
-            st.markdown(ui.grid(pd.DataFrame({
-                "bar": [e["on"] for e in history_log],
-                "alert": [e["message"] for e in history_log]}),
-                ticker_col="bar"), unsafe_allow_html=True)
-        st.caption(
-            "Checked on end-of-day closes: every morning run (after the price refresh, "
-            "with a Mac notification) and with the button above. A level alert fires "
-            "when the close crosses the level, once. New-filing alerts need the morning "
-            "run or scripts/check_alerts.py, which ask EDGAR.")
-
-    with st.expander("Search every SEC filing (full text, 2001 onwards)", expanded=False):
-        with st.form("fts_form"):
-            f1, f2 = st.columns([3, 1])
-            fts_q = f1.text_input("Words", placeholder='"pricing pressure" tariff',
-                                  help='Phrases in double quotes. Every word must appear.')
-            fts_ticker = f2.text_input("Only this ticker", placeholder="optional")
-            f3, f4, f5 = st.columns([2, 1, 1])
-            fts_forms = f3.multiselect(
-                "Forms", ["10-K", "10-Q", "8-K", "20-F", "6-K", "S-1", "DEF 14A", "SC 13D"],
-                default=["10-K", "10-Q", "8-K"])
-            fts_from = f4.date_input("From", value=dt.date.today() - dt.timedelta(days=730))
-            fts_to = f5.date_input("To", value=dt.date.today())
-            go_fts = st.form_submit_button("Search", width="stretch")
-        if go_fts and fts_q.strip():
-            fts_cik = None
-            if fts_ticker.strip():
-                hit_cik = src.con.execute(
-                    "SELECT cik FROM securities WHERE upper(ticker) = upper(?) LIMIT 1",
-                    [fts_ticker.strip()]).fetchone()
-                fts_cik = hit_cik[0] if hit_cik else None
-                if fts_cik is None:
-                    st.warning(f"{fts_ticker} is not a US listing in the store; "
-                               "searching all companies.")
-            fts_failed = False
+def _view_alerts() -> None:
+    """ALRT: level, move and new-filing alerts on end-of-day closes."""
+    st.markdown("#### Alerts")
+    rules_now = alerts.rules(store.con)
+    with st.form("alert_form", clear_on_submit=True):
+        a1, a2, a3, a4 = st.columns([1, 2, 1, 1])
+        a_ticker = a1.text_input("Ticker", placeholder="AAPL")
+        a_kind = a2.selectbox("When", list(alerts.KINDS),
+                              format_func=lambda k: alerts.KINDS[k])
+        a_x = a3.number_input("Level / %", min_value=0.0, value=0.0, step=1.0)
+        a4.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
+        if a4.form_submit_button("Add", width="stretch") and a_ticker.strip():
             try:
-                found, total = fts.search(fts_q, fts_forms, fts_from, fts_to, fts_cik,
-                                          pages=2)
-            except Exception as exc:                                  # noqa: BLE001
-                found, total, fts_failed = pd.DataFrame(), 0, True
-                st.error(f"The SEC search could not be reached ({type(exc).__name__}).")
-            if not found.empty:
-                st.caption(f"{total:,} filings contain it; the latest {len(found)} shown. "
-                           "A hit means the words appear, not that they matter — "
-                           "risk-factor boilerplate matches too.")
-                st.dataframe(found, hide_index=True, width="stretch",
-                             column_config={"url": st.column_config.LinkColumn(
-                                 "filing", display_text="open")})
-            elif not fts_failed:
-                st.info("No filing contains that.")
+                alerts.add(store.con, a_ticker, a_kind,
+                           None if a_kind == "new_filing" else a_x)
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+    if rules_now.empty:
+        st.caption("No alerts yet.")
+    else:
+        for rule in rules_now.itertuples():
+            r1, r2 = st.columns([5, 1])
+            level = "" if rule.kind == "new_filing" else f" {rule.threshold:g}"
+            r1.markdown(f"`{rule.ticker}` — {alerts.KINDS[rule.kind]}{level}")
+            if r2.button("×", key=f"rm_alert_{rule.id}"):
+                alerts.remove(store.con, rule.id)
+                st.rerun()
+        if st.button("Check now against the stored closes", key="alerts_now"):
+            fired, state_now = alerts.run(store.con, src.con,
+                                          alerts.load_state(cfg.ALERTS_STATE))
+            alerts.save_state(cfg.ALERTS_STATE, state_now)
+            st.success("; ".join(e["message"] for e in fired) if fired
+                       else "Nothing new fired.")
+    history_log = alerts.load_state(cfg.ALERTS_STATE).get("log", [])[-10:][::-1]
+    if history_log:
+        st.markdown(ui.grid(pd.DataFrame({
+            "bar": [e["on"] for e in history_log],
+            "alert": [e["message"] for e in history_log]}),
+            ticker_col="bar"), unsafe_allow_html=True)
+    st.caption(
+        "Checked on end-of-day closes: every morning run (after the price refresh, "
+        "with a Mac notification) and with the button above. A level alert fires "
+        "when the close crosses the level, once. New-filing alerts need the morning "
+        "run or scripts/check_alerts.py, which ask EDGAR.")
 
+
+def _view_filing_search(default_ticker: str = "") -> None:
+    """FTS: every SEC filing since 2001, full text."""
+    st.markdown("#### Search every SEC filing (full text, 2001 onwards)")
+    with st.form("fts_form"):
+        f1, f2 = st.columns([3, 1])
+        fts_q = f1.text_input("Words", placeholder='"pricing pressure" tariff',
+                              help='Phrases in double quotes. Every word must appear.')
+        fts_ticker = f2.text_input("Only this ticker", value=default_ticker,
+                               placeholder="optional")
+        f3, f4, f5 = st.columns([2, 1, 1])
+        fts_forms = f3.multiselect(
+            "Forms", ["10-K", "10-Q", "8-K", "20-F", "6-K", "S-1", "DEF 14A", "SC 13D"],
+            default=["10-K", "10-Q", "8-K"])
+        fts_from = f4.date_input("From", value=dt.date.today() - dt.timedelta(days=730),
+                             format="YYYY-MM-DD")
+        fts_to = f5.date_input("To", value=dt.date.today(), format="YYYY-MM-DD")
+        go_fts = st.form_submit_button("Search", width="stretch")
+    if go_fts and fts_q.strip():
+        fts_cik = None
+        if fts_ticker.strip():
+            hit_cik = src.con.execute(
+                "SELECT cik FROM securities WHERE ticker = upper(?) LIMIT 1",
+                [fts_ticker.strip()]).fetchone()
+            fts_cik = hit_cik[0] if hit_cik else None
+            if fts_cik is None:
+                st.warning(f"{fts_ticker} is not a listing in the store; "
+                           "searching all companies.")
+        fts_failed = False
+        try:
+            found, total = fts.search(fts_q, fts_forms, fts_from, fts_to, fts_cik,
+                                      pages=2)
+        except Exception as exc:                                  # noqa: BLE001
+            found, total, fts_failed = pd.DataFrame(), 0, True
+            st.error(f"The SEC search could not be reached ({type(exc).__name__}).")
+        if not found.empty:
+            st.caption(f"{total:,} filings contain it; the latest {len(found)} shown. "
+                       "A hit means the words appear, not that they matter — "
+                       "risk-factor boilerplate matches too.")
+            st.dataframe(found, hide_index=True, width="stretch",
+                         column_config={"url": st.column_config.LinkColumn(
+                             "filing", display_text="open")})
+        elif not fts_failed:
+            st.info("No filing contains that.")
+
+
+def _view_briefing() -> None:
+    """TOP: the daily briefing on what you follow."""
     st.markdown("#### Daily briefing")
     followed = store.everything_followed()
     if not followed:
         st.info(
-            "Nothing followed yet. Add names to the watchlist on the left, or track a "
-            "portfolio on the SCREEN tab — the briefing is written about what you hold "
+            "Nothing followed yet. Add names to the watchlist in the sidebar, or track a "
+            "portfolio in PORTFOLIOS → TRACKING — the briefing is written about what you hold "
             "and watch, not about the market in general."
         )
     else:
@@ -4222,14 +4551,16 @@ with tab_news:
                     st.session_state["briefing"] = bfg.write(bundle)
                     st.session_state["bundle"] = bundle
                 except Exception as exc:
-                    st.error(f"Could not write the briefing: {exc}")
+                    st.error(f"Could not write the briefing: {ui.error_text(exc)}")
 
         brief = st.session_state.get("briefing")
         bundle = st.session_state.get("bundle")
         if brief:
-            st.markdown(
-                f"<div style='border-left:2px solid {ui.AMBER};padding-left:0.9rem'>"
-                f"{brief['text']}</div>", unsafe_allow_html=True)
+            # The model's text is rendered as Markdown, never as raw HTML: it is built
+            # from fetched headlines, and a headline is text someone else wrote. Until
+            # 02.10.2026 it went straight into unsafe_allow_html.
+            with st.container(border=True):
+                st.markdown(ui.markdown_text(brief["text"]))
             st.caption(
                 "Written only from the evidence below — the headlines that were actually "
                 "fetched and the moves that were actually measured. Nothing was recalled "
@@ -4264,13 +4595,312 @@ with tab_news:
                 st.markdown("#### Headlines")
                 for row in feed.head(25).itertuples():
                     st.markdown(
-                        f"<span style='color:{ui.AMBER};font-weight:600'>{row.tickers}</span>  "
-                        f"<span style='color:{ui.MUTED};font-size:0.70rem'>{row.when} · "
-                        f"{row.source}</span>", unsafe_allow_html=True)
-                    st.markdown(f"**[{row.title}]({row.url})**")
+                        f"<span style='color:{ui.AMBER};font-weight:600'>{html.escape(str(row.tickers))}</span>  "
+                        f"<span style='color:{ui.MUTED};font-size:0.70rem'>{html.escape(str(row.when))} · "
+                        f"{html.escape(str(row.source))}</span>", unsafe_allow_html=True)
+                    st.markdown(ui.headline(row.title, row.url))
                     if row.summary:
                         st.caption(row.summary)
 
+
+# ------------------------------------------------------------------ the command line
+# One security is "loaded" at a time, as on a terminal: every single-ticker field (the
+# security tab, the option builder, a rule, a savings plan, compare, precedent deals,
+# the filing search) starts at it. Typed into the line at the top: `AAPL US FA`.
+# Parsing, resolution and routing are command.py (pure, tested); this is the wiring.
+def _ctx() -> str | None:
+    """The loaded security's symbol, or None."""
+    return command.current(st.session_state)
+
+
+def _in_store(ticker: str) -> bool:
+    return bool(_market_source().con.execute(
+        "SELECT 1 FROM securities WHERE ticker = ? LIMIT 1", [ticker]).fetchone())
+
+
+def _ctx_symbol() -> str:
+    return _ctx() or ""
+
+
+def _open(tab: str, section: str | None) -> None:
+    """Select a tab (and its section) before the tabs are drawn on this run."""
+    st.session_state[layout.MAIN_KEY] = tab
+    if section:
+        st.session_state[layout.section_key(tab)] = section
+
+
+def _apply(parsed, found, action, con) -> None:
+    """Carry out a dispatched command: load its security, open its tab and section."""
+    code = parsed.function or "DES"
+    if action.tab is None:
+        st.session_state["cmd_msg"] = action.message
+        if found.choices:
+            st.session_state["cmd_choices"] = (list(found.choices), parsed.function)
+        return
+    equity = bool(action.symbol and rs.profile(con, action.symbol))
+    st.session_state["cmd_msg"] = layout.status_line(
+        action.message, code, command.FUNCTIONS[code].label, action.symbol, equity,
+        action.tab)
+    command.push(st.session_state, action.symbol)
+    st.session_state["cmd_focus"] = code
+    _open(action.tab, action.section or layout.SUB_SECTION.get(code))
+
+
+def _execute(text: str) -> None:
+    """Run one command: load the security it names, open the tab its function lives in.
+
+    Called from widget callbacks, which run before the page is drawn: the store is
+    reopened there without a rerun if a build replaced it (F10, _market_source)."""
+    st.session_state.pop("cmd_choices", None)
+    con = _market_source(rerun=False).con
+    parsed, found, action = command.run(con, text, _ctx())
+    _apply(parsed, found, action, con)
+
+
+def _on_command() -> None:
+    """Enter in the line, or GO. Both fire when GO is clicked straight after typing:
+    the first runs the text and empties the line, and the second found it empty and
+    replaced the answer with "Type a symbol…" (review 03.10.2026, F9). An empty line
+    does nothing."""
+    text = st.session_state.get("cmd_input", "")
+    st.session_state["cmd_input"] = ""
+    if text.strip():
+        _execute(text)
+
+
+def _pick_choice(ticker: str, function: str | None) -> None:
+    """A button under 'Several matches'. The ticker is a store line already, so it is
+    loaded as it is and not parsed again: a share whose ticker is a function code (MA,
+    HP, GP, TOP …) opened that function instead of the company (F11)."""
+    st.session_state.pop("cmd_choices", None)
+    con = _market_source(rerun=False).con
+    parsed = command.Parsed(symbol=ticker, function=function)
+    found = command.Resolution(ticker, source="store")
+    _apply(parsed, found, command.dispatch(parsed, found, _ctx()), con)
+
+
+def _go_back() -> None:
+    previous = command.back(st.session_state)
+    # The match buttons belong to the command that produced them, not to the
+    # security one goes back to (F12c).
+    st.session_state.pop("cmd_choices", None)
+    if previous is not None:
+        st.session_state["cmd_msg"] = f"Back to {previous}."
+        _open(layout.SECURITY, None)
+
+
+def _command_bar() -> None:
+    # A link like http://localhost:8501/?cmd=AAPL%20FA runs once when opened.
+    linked = st.query_params.get("cmd")
+    if linked and st.session_state.get("cmd_linked") != linked:
+        st.session_state["cmd_linked"] = linked
+        _execute(linked)
+    c1, c2, c3, c4 = st.columns([6, 0.8, 0.9, 2.6], vertical_alignment="center")
+    c1.text_input(
+        "Command", key="cmd_input", on_change=_on_command, label_visibility="collapsed",
+        placeholder="AAPL US FA <GO>  ·  SAP GR DES  ·  SPX INDEX GP  ·  EQS  ·  MA  ·  "
+                    "WEI — Enter runs it")
+    c2.button("GO", key="cmd_go", on_click=_on_command, width="stretch")
+    history = st.session_state.get(command.HISTORY_KEY) or []
+    c3.button("◀ BACK", key="cmd_back", on_click=_go_back, width="stretch",
+              disabled=len(history) < 2,
+              help="The security before this one (the last ten are kept).")
+    sec = _ctx()
+    c4.markdown(
+        f"<span style='color:{ui.MUTED};font-size:0.7rem'>LOADED</span> "
+        f"<span style='color:{ui.AMBER};font-weight:600'>"
+        f"{html.escape(sec) if sec else '—'}</span>", unsafe_allow_html=True)
+    msg = st.session_state.get("cmd_msg")
+    if msg:
+        st.caption(msg)
+    picks = st.session_state.get("cmd_choices")
+    if picks:
+        options, function = picks
+        cols = st.columns(min(len(options), 5))
+        for i, ticker in enumerate(options):
+            cols[i % len(cols)].button(ticker, key=f"cand_{ticker}", width="stretch",
+                                       on_click=_pick_choice, args=(ticker, function))
+    with st.expander("Functions"):
+        st.markdown(ui.grid(pd.DataFrame(
+            [(code, t.tab + (f" → {t.section or layout.SUB_SECTION.get(code, '')}"
+                             if (t.section or code in layout.SUB_SECTION) else ""),
+              layout.LABELS.get(code, t.label))
+             for code, t in command.FUNCTIONS.items()],
+            columns=["code", "opens", "what"]), ticker_col="code"),
+            unsafe_allow_html=True)
+        st.caption("A security alone opens its description. A market after the ticker "
+                   "picks the line: SAP GR = Xetra, 7203 JT = Tokyo; Canada is typed "
+                   "RY CAN, because CN is the news function. A yellow key is optional "
+                   "(SPX INDEX = the S&P 500, not a share called SPX). A company name "
+                   "works too (newmont). Links: ?cmd=AAPL%20FA.")
+
+
+# ---------------------------------------------------------------- HP: the price table
+def _sec_prices(c) -> None:
+    """HP: the stored bars as a table — daily, weekly or monthly — with the change, on
+    one basis (research.price_table; review 03.10.2026, F7)."""
+    symbol = c.ticker
+    bars = src.con.execute(
+        "SELECT date, open, high, low, close, close_raw, close_adj, volume FROM prices "
+        "WHERE ticker = ? ORDER BY date", [symbol]).fetch_df()
+    source = "stored prices"
+    if bars.empty:
+        bars, err = ac.attempt(ac.yahoo_bars, symbol)
+        if err:
+            st.warning(f"{symbol} is not stored, and Yahoo could not be reached for its "
+                       f"prices ({err}). Try again in a moment.")
+            return
+        bars = bars if bars is not None else pd.DataFrame()
+        source = "Yahoo, not stored"
+    if bars.empty:
+        st.info(f"No price history for {symbol}.")
+        return
+    p1, p2 = st.columns([1, 1])
+    every = p1.segmented_control("Every", ["day", "week", "month"], default="day",
+                                 key="hp_every") or "day"
+    span = p2.segmented_control("Last", list(rs.PRICE_TABLE_SPANS), default="3M",
+                                key="hp_span") or "3M"
+    view = rs.price_table(bars, every, span)
+    table = {
+        "date": view.index.strftime("%Y-%m-%d"),
+        "open": view["open"].map(ui.num), "high": view["high"].map(ui.num),
+        "low": view["low"].map(ui.num), "close": view["close"].map(ui.num),
+    }
+    if "traded" in view:
+        table["close as traded"] = view["traded"].map(ui.num)
+    table["change"] = view["change"].map(lambda v: ui.pct(v, 2))
+    table["volume"] = view["volume"].map(lambda v: "—" if pd.isna(v) else f"{v:,.0f}")
+    st.markdown(ui.grid(pd.DataFrame(table),
+                        numeric={"open", "high", "low", "close", "close as traded",
+                                 "volume"}, signed={"change"}, ticker_col="date"),
+                unsafe_allow_html=True)
+    traded = ("'close as traded' is the price as it printed that day, before any later "
+              "split. " if "traded" in view else
+              "Yahoo's bars carry no close as traded, so none is shown. ")
+    st.caption(f"{len(view)} rows from the {source}, newest first. Open, high, low and "
+               "close are adjusted for splits and dividends, so the rows compare with "
+               f"each other and the change does not show an ex-dividend day as a fall. "
+               + traded)
+
+
+# ---------------------------------------------------------------------- the six tabs
+def _sections(tab: str, views: dict, *args) -> None:
+    """A tab's own row of sections: lazy, each guarded, selectable by the command."""
+    labels = layout.SECTIONS[tab]
+    for label, part in zip(labels, st.tabs(labels, key=layout.section_key(tab),
+                                            on_change="rerun")):
+        with part:
+            if part.open:
+                _guarded(label, views[label], *args)
+
+
+def _lazy_box(label: str, code: str, view, *args) -> None:
+    """An expander whose view runs only while it is open, opened by its function code.
+
+    The key carries whether the command line asked for it, so `AAPL OMON` opens it even
+    after it was closed by hand."""
+    focus = st.session_state.get("cmd_focus") == code
+    box = st.expander(label, expanded=focus, key=f"box_{code}_{int(focus)}",
+                      on_change="rerun")
+    with box:
+        if box.open:
+            _guarded(label, view, *args)
+
+
+def _exposure_any(symbol: str) -> None:
+    """HRA for a security without filings: the stored series, else Yahoo's bars."""
+    stored = src.con.execute(
+        "SELECT 1 FROM prices WHERE upper(ticker) = upper(?) LIMIT 1", [symbol]).fetchone()
+    bars = None
+    if not stored:
+        bars, err = ac.attempt(ac.yahoo_bars, symbol.upper())
+        if err:
+            st.warning(f"Yahoo could not be reached for {symbol}'s prices ({err}). "
+                       "Try again in a moment.")
+            return
+        if bars is None or bars.empty:
+            st.info(f"No price history for {symbol}.")
+            return
+    _rate_exposure(symbol, bars)
+
+
+def _tab_security() -> None:
+    """DES … CF on the loaded security.
+
+    The option position builder (OMON), precedent deals (MA) and what a security moved
+    with (HRA) were reachable only from a company in the store until the review of
+    03.10.2026 (F2, F4, F5): with nothing loaded, or SPY, an index or gold loaded, the
+    command opened a page without them, and saved legs were nowhere to be seen."""
+    sec = _ctx()
+    if not sec:
+        st.markdown("#### No security loaded")
+        st.caption("Type a ticker or a name in the command line above — AAPL, SAP GR, "
+                   "newmont, SPX, GC=F — and Enter. Add a function to jump straight to "
+                   "it: AAPL FA, AAPL OMON, AAPL DCF.")
+        with st.expander("Precedent transactions (MA)",
+                         expanded=st.session_state.get("cmd_focus") == "MA"):
+            _view_deals()
+        _lazy_box("Build an options position (OMON)", "OMON", _view_options_builder)
+        return
+    if rs.profile(src.con, sec):
+        _equity_page(sec)
+        return
+    # A price-only series (index, commodity, crypto) or a Yahoo symbol.
+    _security_page(sec)
+    with st.expander("Price table (HP)",
+                     expanded=st.session_state.get("cmd_focus") == "HP"):
+        _sec_prices(SimpleNamespace(ticker=sec))
+    _lazy_box("What it moved with: rates and one event (HRA)", "HRA", _exposure_any, sec)
+    _lazy_box("Build an options position (OMON)", "OMON", _view_options_builder, sec)
+    with st.expander("Precedent transactions (MA)",
+                     expanded=st.session_state.get("cmd_focus") == "MA"):
+        _view_deals()
+
+
+def _tab_screen() -> None:
+    _sections(command.SCREEN, {
+        "SCREEN": _view_screen, "BACKTEST": _view_backtest,
+        "RULE": lambda: _view_lab(_ctx_symbol()),
+        "SAVINGS PLAN": lambda: _view_strategy(_ctx_symbol()),
+    })
+
+
+def _tab_portfolios() -> None:
+    _sections(command.PORTFOLIOS, {
+        "BOOKS": _view_books, "TRACKING": _view_tracking,
+        "WATCHLIST & ALERTS": _view_alerts, "COMMODITY LINKS": _view_commodity_links,
+    })
+
+
+def _tab_markets() -> None:
+    _sections(command.MARKETS, {
+        "BOARDS": _view_monitor, "COMPARE": lambda: _view_compare(_ctx_symbol()),
+        "ECONOMY": _view_economy, "RATES": _view_rates,
+    })
+
+
+def _tab_events() -> None:
+    _sections(command.EVENTS, {
+        "BRIEFING": _view_briefing, "CALENDAR": _view_calendar,
+        "FILING SEARCH": lambda: _view_filing_search(
+            _ctx_symbol() if _ctx() and _in_store(_ctx()) else ""),
+    })
+
+
+TABS = {command.SECURITY: _tab_security, command.SCREEN: _tab_screen,
+        command.PORTFOLIOS: _tab_portfolios, command.MARKETS: _tab_markets,
+        command.WORLD: _view_map, command.EVENTS: _tab_events}
+assert tuple(TABS) == layout.TAB_LABELS
+
+_command_bar()
+# Lazy: only the open tab runs. Before 02.10.2026 every rerun drew all thirteen tabs,
+# with their network calls, whichever one was on screen.
+for (label, view), tab in zip(TABS.items(), st.tabs(layout.TAB_LABELS,
+                                                       key=layout.MAIN_KEY,
+                                                       on_change="rerun")):
+    with tab:
+        if tab.open:
+            _guarded(label, view)
 
 st.caption(
     "Applies your criteria to public filings and market data. Places no orders, "

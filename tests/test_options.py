@@ -393,3 +393,26 @@ def test_trailing_dividend_yield_from_the_adjusted_close():
 def test_percentile_needs_a_cross_section():
     assert op.percentile(0.02, pd.Series([0.01] * 10)) is None
     assert op.percentile(0.02, pd.Series(np.linspace(0, 0.04, 41))) == pytest.approx(21 / 41)
+
+
+def test_a_new_snapshot_changes_the_cache_key(tmp_path):
+    """F12g: the app cached the snapshot by day for an hour, so a file written by the
+    snapshot script after the first look that day stayed unseen."""
+    import os
+    from pathlib import Path
+
+    folder = tmp_path / "options"
+    assert op.snapshot_stamp(folder) is None
+    folder.mkdir()
+    first = folder / "2026-10-02.parquet"
+    first.write_bytes(b"x")
+    before = op.snapshot_stamp(folder)
+    assert before[0] == "2026-10-02.parquet"
+    os.utime(first, ns=(first.stat().st_atime_ns, first.stat().st_mtime_ns + 10**9))
+    rewritten = op.snapshot_stamp(folder)
+    assert rewritten != before                         # the same day written again
+    (folder / "2026-10-03.parquet").write_bytes(b"y")
+    assert op.snapshot_stamp(folder)[0] == "2026-10-03.parquet"
+    source = (Path(__file__).resolve().parents[1] / "app.py").read_text()
+    assert "_option_snapshot(dt.date.today(),\n" in source
+    assert "op.snapshot_stamp(cfg.CACHE_DIR" in source

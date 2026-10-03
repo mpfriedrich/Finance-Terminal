@@ -51,6 +51,7 @@ MONITOR: dict[str, list[tuple[str, str]]] = {
     "Commodities": [
         ("GC=F", "Gold"), ("SI=F", "Silver"), ("CL=F", "Crude oil WTI"),
         ("BZ=F", "Crude oil Brent"), ("NG=F", "Natural gas"), ("HG=F", "Copper"),
+        ("ZW=F", "Wheat"), ("ZC=F", "Corn"),
     ],
     "Crypto": [("BTC-USD", "Bitcoin"), ("ETH-USD", "Ether")],
 }
@@ -266,17 +267,24 @@ def rebased(con: duckdb.DuckDBPyConnection, symbols: list[str],
     return 100.0 * wide / wide.bfill().iloc[0]
 
 
-def fetch_history(symbol: str, years: int = 5, downloader=None) -> pd.DataFrame:
+def fetch_history(symbol: str, years: int = 5, downloader=None,
+                  probe=None) -> pd.DataFrame:
     """Daily bars for any Yahoo symbol, on demand, not stored.
 
     Same columns as the price store plus `open_adj`, so the chart and the lab can use it
-    unchanged. Empty when Yahoo has nothing under that symbol.
+    unchanged. Empty when Yahoo answered and has nothing under that symbol; raises
+    `prices.YahooUnreachable` when it did not answer. yf.download returns an empty
+    frame in both cases, so an empty download is followed by `probe` (default
+    `prices.yahoo_answers`), which raises when Yahoo is not reached (review F6).
     """
+    from .data import prices
+
     if downloader is None:
-        from .data.prices import _download as downloader
+        downloader = prices._download
     end = dt.date.today()
     bars = downloader([symbol], end - dt.timedelta(days=int(years * 365.25)), end)
     if bars is None or bars.empty:
+        (probe or prices.yahoo_answers)(symbol)
         return pd.DataFrame()
     bars = bars.dropna(subset=["close"]).copy()
     if "close_adj" not in bars or bars["close_adj"].isna().all():

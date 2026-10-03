@@ -1,10 +1,19 @@
 [theme]
+# The terminal look (audit 02.10.2026): black, amber first, square corners, one
+# monospace family. Only [theme] changed then; [server] below is untouched.
 base = "dark"
 primaryColor = "#FF9E1B"
 backgroundColor = "#000000"
-secondaryBackgroundColor = "#080808"
+secondaryBackgroundColor = "#0B0B0B"
 textColor = "#E8E8E8"
 font = "monospace"
+baseRadius = "none"
+borderColor = "#242424"
+greenColor = "#26D07C"
+redColor = "#FF4B4B"
+linkColor = "#FF9E1B"
+showSidebarBorder = true
+chartCategoricalColors = ["#FF9E1B", "#4DB8FF", "#26D07C", "#C792EA", "#F78C6C", "#FFCB6B", "#89DDFF", "#FF4B4B"]
 
 [server]
 headless = true
