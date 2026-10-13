@@ -1408,10 +1408,34 @@ Sitzung, Absprache: `_clean()` gehört ihr, meine Funktionen stehen am Dateiende
 
 **Nicht getestet:** das Signal auf eigenen Daten (dafür die Schnappschüsse; frühestens
 nach einigen Monaten sinnvoll), amerikanische Ausübung (Black-Scholes unterstellt
-europäisch; am Geld bei 30 Tagen klein), die Verteilung bei illiquiden Ketten. Auf `main`
-ohne den `_clean()`-Fix der Schiffs-Sitzung sind Ketten vor der US-Eröffnung oft leer;
-geprüft wurde die Anzeige mit diesem Fix vorübergehend eingespielt (AAPL: 27 Strikes,
-Spread zwischen 28 und 35 Tagen interpoliert), danach wieder entfernt.
+europäisch; am Geld bei 30 Tagen klein), die Verteilung bei illiquiden Ketten. Geprüft mit dem
+`_clean()`-Fix der Schiffs-Sitzung (AAPL: 27 Strikes, Spread zwischen 28 und 35 Tagen
+interpoliert); beides ist seit PR #9 und #10 auf `main`.
+
+## Vorgemerkt: nächste Schritte (02.10.2026, nicht begonnen — Nutzer entscheidet)
+
+Gesammelt am Ende des 02.10.2026, nur notiert. Dazu gehören die 10 Ideen für MAP
+(oben unter „Schiffe, Züge, Flugzeuge“ → „Ideen für MAP“).
+
+1. **Fama-French-Faktoren** (Kenneth French Data Library, täglich, kostenlos, ohne
+   Schlüssel): für jede Strategie und jedes Papierdepot die Rendite zerlegen in Markt,
+   Value, Size, Momentum und das, was übrig bleibt (Alpha). Erklärt im Nachhinein,
+   sagt nichts vorher; passt zu R12 (ehrlich sagen, woher eine Rendite kam). Klein.
+2. **Rest des Audits:** `pit.py`, `sec.py`, `wrds.py`, `crsp.py` Zeile für Zeile. Gut
+   getestet, aber ein Fehler in der Point-in-Time-Logik (R13) würde jeden Backtest
+   verfälschen. Vorher prüfen, ob andere Sitzungen arbeiten.
+3. **Hebel und Derivate:** die Spezifikation im nächsten Abschnitt (Margin Calls,
+   Leerverkäufe im LAB, Options-Strategien, Futures).
+4. **CRSP über den USYD-Zugang:** sobald CRSP auf der WRDS-Seite blau ist,
+   `build_wrds.py --countries=none`; damit kommen die toten US-Firmen und der
+   Survivorship-Bias der US-Backtests fällt weg. Vorher klären, ob die USYD-Bedingungen
+   (kein Inhalt an generative KI) CRSP-Daten in `summary.py`/`briefing.py` verbieten.
+5. **Handy-Zugriff über Tailscale:** die App hat keinen Login und darf nie offen ins
+   Internet; Tailscale wäre der private Weg. Noch nicht entschieden.
+
+Außerdem vorgemerkt: das Put-Call-Signal nach einigen Monaten eigener Schnappschüsse
+(`data/cache/options/`, seit 02.10.2026 Di–Sa 05:00 installiert) gegen die Renditen des
+Folgemonats prüfen.
 
 ## Audit Bloomberg-Annäherung 02.10.2026 (lokale Sitzung, Branch `claude/bloomberg-ux`)
 
