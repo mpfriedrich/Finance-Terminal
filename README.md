@@ -234,6 +234,27 @@ It runs Tuesday to Saturday at 05:00 Sydney time, which is inside the US trading
 session (the spread needs live quotes) and records ~200 liquid US shares to
 `data/cache/options/`. Remove it with `./scripts/install_options_snapshot.sh --remove`.
 
+## SEC Filing Butterfly paper books (optional)
+
+Two prospective options paper books in PORTFOLIOS → BOOKS (command `PORT`): long call
+butterflies after regular 10-K/10-Q filings, one book with 1,000 EUR and one with
+100,000 USD, the same signals and separate money. Paper only — no order is ever sent.
+Start or update them in the terminal:
+
+```bash
+uv run python scripts/butterfly_tracker.py
+```
+
+Decisions need live quotes, so the tracker only decides during the US session. To run
+it automatically three times a night (Tuesday to Saturday, Sydney time):
+
+```bash
+./scripts/install_butterfly_tracker.sh
+```
+
+The bookings are in `data/paper_options.duckdb`; the log in `data/cache/butterfly.log`.
+Remove the schedule with `./scripts/install_butterfly_tracker.sh --remove`.
+
 ## Tests
 
 ```bash

@@ -75,6 +75,7 @@ from portfolio_lab.lab import signals as lab_signals
 from portfolio_lab.lab import translate as LT
 from portfolio_lab.lab.spec import StrategySpec
 from portfolio_lab import options as op
+from portfolio_lab import filing_butterfly as fbt
 from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
 from portfolio_lab.store import Store
@@ -3473,6 +3474,231 @@ def _view_books() -> None:
                         "Close this book", key=f"close_{b['id']}"):
                     paper.close_book(store.con, b["id"])
                     st.rerun()
+    _view_option_books()
+
+
+def _fb_money(value, currency: str) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{value:,.2f} {'€' if currency == 'EUR' else '$'}"
+
+
+def _fb_read() -> dict | None:
+    """Everything the view shows, read in one short read-only visit: the tracker may need
+    to write the same file a moment later."""
+    if not cfg.PAPER_OPTIONS_DB.exists():
+        return None
+    con = fbt.connect(cfg.PAPER_OPTIONS_DB, read_only=True)
+    try:
+        if not con.execute("SELECT COUNT(*) FROM fb_books").fetchone()[0]:
+            return None
+        at, last = fbt.last_run(con)
+        fx = last.get("fx")
+        out = {"at": at, "last": last, "fx": fx, "books": []}
+        for b in fbt.BOOKS:
+            st_ = fbt.state(con, b["id"], fx)
+            led = con.execute("SELECT * FROM fb_ledger WHERE book_id = ? ORDER BY booked_at",
+                              [b["id"]]).fetch_df()
+            pos = con.execute("SELECT * FROM fb_positions WHERE book_id = ? "
+                              "ORDER BY opened_at", [b["id"]]).fetch_df()
+            legs = con.execute("SELECT l.* FROM fb_legs l JOIN fb_positions p ON "
+                               "p.id = l.position_id WHERE p.book_id = ? ORDER BY "
+                               "l.position_id, l.leg", [b["id"]]).fetch_df()
+            out["books"].append({"meta": b, "state": st_, "ledger": led, "positions": pos,
+                                 "legs": legs, "perf": fbt.performance(con, b["id"])})
+        out["events"] = con.execute(
+            "SELECT e.*, d1.opened AS opened_eur, d1.reason AS reason_eur, "
+            "d2.opened AS opened_usd, d2.reason AS reason_usd, d2.units AS units_usd "
+            "FROM fb_events e LEFT JOIN fb_decisions d1 ON d1.accession = e.accession "
+            "AND d1.book_id = 'fb-eur-1000' LEFT JOIN fb_decisions d2 ON "
+            "d2.accession = e.accession AND d2.book_id = 'fb-usd-100000' "
+            "ORDER BY e.filed DESC, e.accession DESC LIMIT 300").fetch_df()
+        out["monthly"], out["reasons"] = fbt.monthly(con)
+        return out
+    finally:
+        con.close()
+
+
+def _view_option_books() -> None:
+    """SEC Filing Butterfly: two prospective options paper books (filing_butterfly.py)."""
+    st.markdown("#### SEC Filing Butterfly — prospective options paper books")
+    st.caption(
+        "Paper only: no order is ever sent. Long call butterflies (+1 / −2 / +1 calls, "
+        "100 shares each) after regular 10-K and 10-Q filings, decided from the first US "
+        "session after the filing date — a filing date, not an earnings date. Fills at "
+        "the observed ask (bought legs) and bid (sold legs). Both books start empty on "
+        "the day the tracker first ran; the simulated results of the historical model "
+        "study (results/filing_options) are not part of these books.")
+    try:
+        data = _fb_read()
+    except Exception as exc:                                       # noqa: BLE001
+        st.info(f"The tracker store is busy or unreadable right now ({ui.error_text(exc)}). "
+                "Reload in a moment.")
+        return
+    if data is None:
+        st.info("Not started yet. Run `uv run python scripts/butterfly_tracker.py` once in "
+                "the terminal; `./scripts/install_butterfly_tracker.sh` repeats it during "
+                "US hours.")
+        return
+    at = data["at"]
+    when = (pd.Timestamp(at).tz_localize("UTC").tz_convert(dt.datetime.now().astimezone()
+                                                            .tzinfo).strftime("%d.%m.%Y %H:%M")
+            if at is not None else "—")
+    last = data["last"]
+    st.caption(f"Last update {when} (local time) · US session at that moment: "
+               f"{'yes' if last.get('session_open') else 'no — nothing decided'} · "
+               f"EUR/USD {data['fx'] or '—'}"
+               + "".join(f" · {n}" for n in last.get("notes", [])))
+
+    # comparison, rebased to 100 (different money, different currencies)
+    fig = go.Figure()
+    for i, bk in enumerate(data["books"]):
+        perf = bk["perf"]
+        if "equity" not in perf:
+            continue
+        eq = perf["equity"]
+        fig.add_trace(go.Scatter(x=list(eq.index), y=100 * eq / eq.iloc[0],
+                                 name=bk["meta"]["name"],
+                                 line=dict(color=PALETTE[i % len(PALETTE)], width=1.6)))
+        if "benchmark" in perf:
+            bv = perf["benchmark"]
+            fig.add_trace(go.Scatter(
+                x=list(bv.index), y=100 * bv / bv.iloc[0],
+                name=f"SPY incl. dividends ({bk['meta']['currency']})",
+                line=dict(color=PALETTE[i % len(PALETTE)], width=1, dash="dot")))
+    if fig.data:
+        _layout(fig, 260, hovermode="x unified", legend=dict(orientation="h", y=-0.2),
+                yaxis=dict(title="start = 100", gridcolor=ui.RULE, side="right"),
+                xaxis=dict(gridcolor=ui.RULE))
+        st.plotly_chart(fig, width="stretch", key="fb_compare")
+
+    rows = []
+    for bk in data["books"]:
+        perf, ccy = bk["perf"], bk["meta"]["currency"]
+        m, bm = perf.get("metrics", {}), perf.get("benchmark_metrics", {})
+        rows.append({"book": bk["meta"]["name"], "since": str(perf.get("start", "")),
+                     "total": ui.pct(m.get("total"), 2), "p.a.": ui.pct(m.get("annual"), 1),
+                     "max dd": ui.pct(m.get("max_dd"), 1),
+                     "SPY total": ui.pct(bm.get("total"), 2),
+                     "SPY p.a.": ui.pct(bm.get("annual"), 1),
+                     "SPY max dd": ui.pct(bm.get("max_dd"), 1), "currency": ccy})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+    for bk in data["books"]:
+        meta, st_, led = bk["meta"], bk["state"], bk["ledger"]
+        ccy = meta["currency"]
+        pos = bk["positions"]
+        closed = pos[pos["status"] == "closed"] if len(pos) else pos
+        by_pos = led.groupby("position_id")["amount"].sum() if len(led) else pd.Series()
+        realised = float(by_pos.reindex(closed["id"]).sum()) if len(closed) else 0.0
+        unrealised = 0.0
+        if len(st_["open"]):
+            unrealised = st_["open_value"] + float(by_pos.reindex(st_["open"]["id"]).sum())
+        fees = -float(led.loc[led["kind"] == "fee", "amount"].sum()) if len(led) else 0.0
+        with st.expander(f"{meta['name']} · value {_fb_money(st_['equity'], ccy)}",
+                         expanded=True):
+            st.markdown(ui.stats([
+                ("VALUE", _fb_money(st_["equity"], ccy), ""),
+                ("CASH", _fb_money(st_["cash"], ccy), ""),
+                ("RESERVED", _fb_money(st_["reserved"], ccy), ""),
+                ("AVAILABLE", _fb_money(st_["available"], ccy), ""),
+                ("OPEN", f"{len(st_['open'])}", ""),
+                ("FEES", _fb_money(fees, ccy), ""),
+                ("REALISED", _fb_money(realised, ccy), "up" if realised >= 0 else "down"),
+                ("UNREALISED", _fb_money(unrealised, ccy),
+                 "up" if unrealised >= 0 else "down"),
+            ]), unsafe_allow_html=True)
+            if st_["uncertain"]:
+                st.caption(f"{st_['uncertain']} open position(s) valued on an older quote: "
+                           "the value is uncertain until the next mark in US hours.")
+            st.caption("Open positions are valued at what closing would bring now (bought "
+                       "legs at the bid, sold legs at the ask, closing fees off). Reserved "
+                       "money covers closing fees and the observed bid/ask spread.")
+            if len(st_["open"]):
+                st.markdown("**Open positions**")
+                op_ = st_["open"]
+                st.dataframe(pd.DataFrame({
+                    "ticker": op_["ticker"], "units": op_["units"],
+                    "expiry": op_["expiry"].astype(str), "close planned": op_["close_on"]
+                    .astype(str), "opened": op_["opened_at"].astype(str),
+                    "debit $": op_["debit_usd"], "fees $": op_["fees_usd"],
+                    "max loss": op_["max_loss"], "mark $": op_["mark_value"],
+                    "marked": op_["mark_at"].astype(str), "note": op_["mark_note"]}),
+                    hide_index=True, width="stretch")
+            if len(bk["legs"]):
+                st.markdown("**Legs (each contract)**")
+                lg = bk["legs"]
+                st.dataframe(pd.DataFrame({
+                    "position": lg["position_id"], "leg": lg["leg"], "contract": lg["contract"],
+                    "strike": lg["strike"], "qty": lg["qty"], "fill": lg["open_price"],
+                    "bid": lg["bid"], "ask": lg["ask"], "volume": lg["volume"],
+                    "open interest": lg["open_interest"], "last trade": lg["last_trade"],
+                    "close": lg["close_price"]}), hide_index=True, width="stretch")
+            if len(closed):
+                st.markdown("**Closed trades**")
+                st.dataframe(pd.DataFrame({
+                    "ticker": closed["ticker"], "units": closed["units"],
+                    "opened": closed["opened_at"].astype(str),
+                    "closed": closed["closed_at"].astype(str),
+                    "debit $": closed["debit_usd"], "close $": closed["close_usd"],
+                    "fees $": closed["fees_usd"] + closed["close_fees_usd"],
+                    f"result {ccy}": by_pos.reindex(closed["id"]).to_numpy(),
+                    "how": closed["close_reason"]}), hide_index=True, width="stretch")
+            yrs = bk["perf"].get("years")
+            if yrs is not None and len(yrs):
+                st.markdown("**Calendar years against SPY incl. dividends**")
+                st.dataframe(pd.DataFrame({
+                    "year": yrs["year"], "book": yrs["strategy"].map(lambda v: ui.pct(v, 2)),
+                    "SPY": yrs["benchmark"].map(lambda v: ui.pct(v, 2)),
+                    "gap (pp)": yrs["gap_pp"].map(lambda v: "—" if pd.isna(v)
+                                                  else f"{v:+.2f}"),
+                    "partial year": yrs["partial"]}), hide_index=True, width="stretch")
+                ahead = yrs[yrs["gap_pp"] > 0]
+                st.caption("Years ahead of SPY: " + (", ".join(
+                    f"{int(r.year)} (+{r.gap_pp:.2f} pp)" for r in ahead.itertuples())
+                    or "none so far") + ".")
+            for note in bk["perf"].get("notes", []):
+                st.caption(note)
+
+    st.markdown("**Candidates and each book's decision**")
+    ev = data["events"]
+    if ev.empty:
+        st.caption("No 10-K or 10-Q filings recorded since the books were opened.")
+    else:
+        st.dataframe(pd.DataFrame({
+            "company": ev["company"], "form": ev["form"], "filed (not earnings)":
+            ev["filed"].astype(str), "first entry session": ev["first_session"].astype(str),
+            "status": ev["status"], "line": ev["ticker"], "quotes ok": ev["quotes_ok"],
+            "reason (shared)": ev["reason"], "1,000 EUR": ev["opened_eur"].map(
+                {True: "opened", False: "no"}), "1,000 EUR reason": ev["reason_eur"],
+            "100,000 USD": ev["opened_usd"].map({True: "opened", False: "no"}),
+            "100,000 USD reason": ev["reason_usd"], "units": ev["units_usd"]}),
+            hide_index=True, width="stretch", height=320)
+    if len(data["monthly"]):
+        st.markdown("**Per month**")
+        st.dataframe(data["monthly"], hide_index=True, width="stretch")
+    if len(data["reasons"]):
+        st.markdown("**Refusals by reason**")
+        st.dataframe(data["reasons"], hide_index=True, width="stretch")
+    st.markdown("**Assumptions**")
+    st.dataframe(pd.DataFrame([
+        ("Fee", (f"{fbt.FEE_PER_CONTRACT} USD per contract and leg, on opening, closing, "
+                "exercise and assignment (4 contracts per butterfly)")),
+        ("FX", (f"{fbt.FX_COST:.2%} per EUR/USD conversion, at the rate of that moment")),
+        ("Physical delivery", (f"{fbt.STOCK_SPREAD:.2%} stock spread on delivered shares")),
+        ("Risk", (f"max loss ≤ {fbt.RISK_FRACTION:.0%} of the book's value per position; "
+                 f"≤ {fbt.MAX_UNITS} butterflies; ≤ {fbt.MAX_OI_SHARE:.0%} of any leg's "
+                 f"open interest; {fbt.RESERVE_FRACTION:.0%} of free money held back")),
+        ("Quotes", (f"Yahoo, delayed ~15 min, no quote timestamp of its own; per leg "
+                   f"bid and ask > 0, spread ≤ {fbt.MAX_SPREAD:.0%}, open interest ≥ "
+                   f"{fbt.MIN_OPEN_INTEREST}, volume ≥ {fbt.MIN_VOLUME}, last trade ≤ "
+                   f"{fbt.MAX_LAST_TRADE_AGE_DAYS} days")),
+        ("Expiry", (f"listed, {fbt.DTE_RANGE[0]}–{fbt.DTE_RANGE[1]} days, closest to "
+                   f"{fbt.DTE_TARGET} (the model study held 30 calendar days); closed on "
+                   "the last session before expiry")),
+        ("Model prices", ("the provider's implied volatility is kept per leg for analysis "
+                         "only; it is never a fill price")),
+    ], columns=["", "assumed"]), hide_index=True, width="stretch")
 
 
 def _view_deals(default_subject: str = "") -> None:

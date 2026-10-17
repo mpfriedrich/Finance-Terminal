@@ -20,6 +20,10 @@ PAID_DB = DATA_DIR / "paid.duckdb"
 # scripts/build_wrds.py. Its own file for the same reason.
 WORLD_DB = DATA_DIR / "world.duckdb"
 USER_DB = DATA_DIR / "user.duckdb"
+# Options paper books (filing_butterfly.py). Their own file, not user.duckdb: the app
+# holds the user store open read-write the whole time, and the tracker has to book trades
+# from a scheduled job while it is open. Both sides open this file only briefly.
+PAPER_OPTIONS_DB = DATA_DIR / "paper_options.duckdb"
 CACHE_DIR = DATA_DIR / "cache"
 # What alerts have fired, kept by the checker (alerts.py) outside the portfolio store.
 ALERTS_STATE = DATA_DIR / "alerts_state.json"

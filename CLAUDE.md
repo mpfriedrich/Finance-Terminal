@@ -96,6 +96,11 @@ src/portfolio_lab/
   paper.py                  paper books (simulated portfolios) per tab
   comps.py wacc.py deals.py research.py   valuation tools
   world.py numeraire.py     market monitor, USD/gold unit
+  filing_butterfly.py       SEC Filing Butterfly: two prospective options paper books
+                            (1,000 EUR / 100,000 USD) in data/paper_options.duckdb, own
+                            file because the app locks user.duckdb; ledger = one balance;
+                            scripts/butterfly_tracker.py (+ install_butterfly_tracker.sh);
+                            decides only in US hours on live Yahoo quotes (PLAN.md)
   risk.py alerts.py insiders.py fts.py fred.py export.py summary.py macro.py options.py
   options.py (end of file)  implied_distribution (Breeden-Litzenberger), smile_slope
                             (put-call IV spread, live quotes only, parity-checked),

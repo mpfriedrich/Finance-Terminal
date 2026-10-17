@@ -1561,6 +1561,72 @@ korrigiert werden (jetzt in `layout.LABELS` überschrieben). Nichts davon gegen 
 Daten geprüft; Ketten von SPY und Indizes über den Baukasten nur mit gefälschter Kette
 im Test.
 
+## SEC Filing Butterfly: prospektive Papierdepots (18.10.2026, lokale Sitzung)
+
+**Auftrag des Nutzers:** die Strategie der Modellstudie (Forschungskopie,
+`results/filing_options/REPORT.md`: Long Call Butterfly ±10 % nach 10-K/10-Q, im Modell
++46,8 % p. a., aber mit Black-Scholes statt echter Quotes und bei 5 % Kosten −19,6 %)
+ab jetzt mit echten Quotes auf Papier mitlaufen lassen, zwei getrennte Konten.
+
+**Gebaut:** `filing_butterfly.py`, `scripts/butterfly_tracker.py`,
+`scripts/install_butterfly_tracker.sh` (launchd Di–Sa 01:30/03:00/04:30 Sydney = US-Sitzung),
+Ansicht in PORTFOLIOS → BOOKS unter den bestehenden Papierdepots (die bleiben unverändert).
+Eigene Datei `data/paper_options.duckdb`, weil die App `user.duckdb` exklusiv offen hält;
+App und Tracker öffnen sie nur kurz (Lock wird abgewartet). Jeder Geldbetrag ist eine
+Zeile in `fb_ledger`, Cash = Summe; Tracker und App lesen dieselben Buchungen.
+
+**Regeln (vorab festgelegt, in `fb_books.rules_json` mitgespeichert):**
+* Ereignis = Accession-Nummer eines regulären 10-K/10-Q aus dem EDGAR-Tagesindex
+  (`form.YYYYMMDD.idx`); /A und NT ausgeschlossen; gleiches Formular derselben CIK binnen
+  20 Tagen = Duplikat. Gescannt wird erst ab dem Eröffnungstag der Bücher. Einreichungstag
+  ≠ Earnings-Termin (wird so angezeigt, Earnings-Termine werden nicht verwendet).
+* Kandidat ab der ersten US-Sitzung NACH dem Einreichungstag, Fenster 3 Sitzungen;
+  entschieden wird einmal, nur 9:45–15:45 New York. Läuft der Tracker im Fenster nie in
+  der Handelszeit: „Einstiegsfenster verpasst“, kein späterer Fill.
+* Universum: ≥ 252 Tageskurse, Kurs ≥ 5 $, Ø 20-Tage-Umsatz vor dem Entscheidungstag
+  ≥ 10 Mio. $; bei mehreren Aktienklassen die vorher liquideste.
+* Dividendenzahler: bekannter Ex-Tag (oder letzter Ex-Tag + 80 Tage) bis Verfall →
+  abgelehnt (vorzeitige Zuteilung der Short-Calls); Ex-Tag unbekannt → abgelehnt.
+* Verfall gelistet, 25–40 Tage, nächst 30 (Modell: 30 Kalendertage); Mitte = gelisteter
+  Strike am Kurs, Flügel symmetrisch gelistet, Breite nächst 10 % (7–13 %).
+* Je Leg: Standardkontrakt (OCC-Wurzel = Ticker, REGULAR → Multiplikator 100), Bid und
+  Ask > 0, Spanne ≤ 35 %, OI ≥ 100, Volumen ≥ 1, letzter Handel ≤ 3 Tage. Kauf zum Ask,
+  Verkauf zum Bid. Quotes, Gründe, Zeitpunkt werden einmal gespeichert.
+* Je Buch: Maximalverlust (Debit + Gebühren auf und zu + beobachtete Spanne als
+  Schließungsreserve, beim EUR-Buch inkl. 0,25 % FX je Umtausch) ≤ 1 % des Kontowerts;
+  ganze Einheiten (+1/−2/+1 = 4 Kontrakte), ≤ 10, ≤ 5 % des OI je Leg, 10 % des freien
+  Geldes bleibt Reserve, eine offene Position je Unternehmen. Reihenfolge bei mehreren
+  Kandidaten: Einreichungstag, dann höherer Vorab-Umsatz, dann Ticker.
+* Bewertung: Schließungserlös (Longs zum Bid, Shorts zum Ask, Gebühren ab); ohne
+  aktuelle Quote gilt die letzte, als „unsicher“ markiert. Schließung am letzten
+  Handelstag vor Verfall; sonst Andienung wie bei amerikanischen Calls (Gebühr je
+  ausgeübtem Kontrakt, 0,05 % Aktienspanne), kein kostenloser Barausgleich.
+* Kosten (Annahmen): 0,65 USD je Kontrakt und Leg, 0,25 % FX, 0,05 % Aktienspanne.
+* Benchmark: SPY mit Dividenden (Yahoo, adjustiert) ab dem Eröffnungstag, beim EUR-Buch
+  in Euro umgerechnet; nur bis zum letzten Bewertungstag.
+
+**Gemessen/geprüft:** 29 Tests (`test_filing_butterfly*.py`): Kalender 2026, Index-Parser,
+Verfall/Strikes, vier Kontrakte, Ask/Bid-Fills, fehlende/schlechte Quotes je Grund,
+Einreichungstag ohne Entscheidung, gleicher Kandidat im 100.000-$-Buch eröffnet und im
+1.000-€-Buch „Budget reicht nicht“ (Maximalverlust 505,20 $ = 460,42 € > 10 €), getrennte
+Kassen, Wiederholung ohne Doppelbuchung, Neustart, Duplikate, Aktienklassen, verpasstes
+Fenster, Markt zu, Ex-Dividende, kein EUR-Kurs, eine Position je Unternehmen, planmäßige
+Schließung, Andienung, Monatszählung, Benchmark in Euro. Volle Suite 882 bestanden.
+Zwei Fehler beim Bau gefunden und mit Test abgesichert: der Benchmark las SPY-Kurse nach
+dem letzten Bewertungstag; yfinance 1.7 liefert `fast_info.get("last_price")` = None
+(nur `fast_info["lastPrice"]` geht) — jeder Kandidat wäre mangels Kurs abgelehnt worden.
+Live geprüft (Sonntag, Quotes vom Freitag): AAPL 310/345/380 zum 20.11., BRK-B als
+Standardkontrakt erkannt. **Erster echter Lauf 17.10.2026 21:34 UTC:** beide Bücher eröffnet
+(1.000 € / 100.000 $), noch keine Entscheidung (Wochenende).
+
+**Erwartung:** Die Modellstudie fand für ein 1.000-€-Konto mit 1 %-Grenze keine ganzen
+Positionen; ein Butterfly auf eine 100-$-Aktie riskiert typisch 300–600 $. Null Trades im
+kleinen Buch sind daher das erwartete Ergebnis. Ungetestet: echte Quote-Zeitstempel
+(Yahoo liefert keine), ob die Ex-Tag-Schätzung (+80 Tage) bei Monatszahlern reicht,
+Verhalten bei Splits während der Laufzeit (Kontrakte werden angepasst, die Wurzel ändert sich).
+Die SPY- und ^SP500TR-Reihe im Markt-Bestand endet am 23.09.2026 (separat zu klären);
+der Tracker holt SPY deshalb selbst.
+
 ## Geplant: Hebel und Derivate (vorgemerkt am 25.09.2026, noch nicht begonnen)
 
 Auf Frage des Nutzers („gibt es die Option für Derivate und Leverage?“) nur in den Plan
