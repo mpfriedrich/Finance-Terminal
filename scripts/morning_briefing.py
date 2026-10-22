@@ -55,7 +55,10 @@ def refresh_prices() -> str:
         res = subprocess.run(
             [sys.executable, str(script)], capture_output=True, text=True, timeout=900
         )
-        return "ok" if res.returncode == 0 else f"failed: {res.stderr.strip()[:200]}"
+        # The END of stderr: the traceback or the build's own summary sits there. The
+        # start is yfinance's "possibly delisted" lines, which hid the real error for
+        # two days (21.10.2026, PLAN.md).
+        return "ok" if res.returncode == 0 else f"failed: {res.stderr.strip()[-300:]}"
     except Exception as exc:
         return f"failed: {exc}"
 

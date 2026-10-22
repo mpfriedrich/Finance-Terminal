@@ -34,6 +34,10 @@ import pandas as pd
 # Total-return index first; the plain S&P 500 index excludes dividends and would hand
 # every portfolio ~2 points a year of fake outperformance (PLAN.md R11, A15).
 BENCHMARK_CANDIDATES = ("^SP500TR", "SPY")
+# What scripts/add_benchmark.py stores once and build_prices.py keeps current. They are
+# not in `securities`, so the universe download never touched them: ^SP500TR and SPY
+# stopped on 23.09.2026 (the last add_benchmark run) while every stock moved on.
+BENCHMARK_SERIES = ("^SP500TR", "^GSPC", "SPY")
 
 
 class YahooUnreachable(ConnectionError):
@@ -149,18 +153,60 @@ def fetch_into_store(
     start: dt.date,
     end: dt.date,
     chunk: int = 200,
-) -> dict[str, int]:
-    """Download in chunks and upsert. Safe to re-run; existing bars are replaced."""
-    stats = {"requested": len(tickers), "rows": 0, "tickers_with_data": 0}
+    download=None,
+) -> dict:
+    """Download in chunks and upsert. Safe to re-run; existing bars are replaced.
+
+    A ticker without data is a note (`no_data`), never a failure: on any day a few of
+    5,000 names are halted, delisted or renamed. A chunk that fails anyway is rolled back
+    on its own, noted in `failed` with its error, and the next chunk goes on.
+
+    The incident behind this (21.10.2026): Yahoo answers a halted ticker with its LAST
+    bar even when that bar lies before `start` (BRR and SVA, both 14.10. for a window
+    from 15.10.). The old delete covered only the window, so the insert hit the stored
+    14.10. bar, the primary key raised, and the build died after chunk 3 of 27 —
+    600 tickers got the new session, 4,764 did not. Its first chunks had committed, the
+    window's delete had already run, and the yfinance "possibly delisted" lines on
+    stderr (BLFS, BRNS) were taken for the cause. Rows are now replaced by their own
+    keys as well as by the window, and each chunk is one transaction.
+    """
+    download = download or _download
+    stats: dict = {"requested": len(tickers), "rows": 0, "tickers_with_data": 0,
+                   "no_data": [], "failed": []}
     for i in range(0, len(tickers), chunk):
         batch = tickers[i : i + chunk]
-        frame = _download(batch, start, end)
-        if frame.empty:
+        try:
+            frame = download(batch, start, end)
+            if not frame.empty:
+                frame = frame.drop_duplicates(["ticker", "date"], keep="last")
+                _upsert(con, frame, start, end)
+        except Exception as exc:                                    # noqa: BLE001
+            stats["failed"].append(
+                f"{batch[0]}..{batch[-1]}: {type(exc).__name__}: {str(exc)[:160]}")
+            print(f"  prices {i + len(batch):>6}/{len(tickers)} · chunk "
+                  f"{batch[0]}..{batch[-1]} failed: {type(exc).__name__}", flush=True)
             continue
-        con.register("_px", frame)
+        got = set(frame.ticker) if not frame.empty else set()
+        stats["no_data"] += [t for t in batch if t not in got]
+        stats["rows"] += len(frame)
+        stats["tickers_with_data"] += len(got)
+        print(
+            f"  prices {i + len(batch):>6}/{len(tickers)} · {stats['rows']:>9} rows",
+            flush=True,
+        )
+    return stats
+
+
+def _upsert(con: duckdb.DuckDBPyConnection, frame: pd.DataFrame,
+            start: dt.date, end: dt.date) -> None:
+    """Replace the window and every key in `frame` (see fetch_into_store), all or none."""
+    con.register("_px", frame)
+    con.begin()
+    try:
         con.execute(
-            "DELETE FROM prices WHERE ticker IN (SELECT DISTINCT ticker FROM _px) "
-            "AND date BETWEEN ? AND ?",
+            "DELETE FROM prices p WHERE p.ticker IN (SELECT DISTINCT ticker FROM _px) "
+            "AND (p.date BETWEEN ? AND ? OR EXISTS (SELECT 1 FROM _px x "
+            "WHERE x.ticker = p.ticker AND x.date = p.date))",
             [start, end],
         )
         con.execute(
@@ -168,14 +214,40 @@ def fetch_into_store(
             "volume, split) SELECT ticker, date, open, high, low, close, close_adj, "
             "volume, split FROM _px"
         )
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
         con.unregister("_px")
-        stats["rows"] += len(frame)
-        stats["tickers_with_data"] += frame.ticker.nunique()
-        print(
-            f"  prices {i + len(batch):>6}/{len(tickers)} · {stats['rows']:>9} rows",
-            flush=True,
-        )
-    return stats
+
+
+def last_complete_session(
+    con: duckdb.DuckDBPyConnection, share: float = 0.9, lookback: int = 20
+) -> dt.date | None:
+    """The newest session on which at least `share` of the usual number of equities has
+    a bar; the usual number is the most seen on any of the last `lookback` sessions.
+
+    The incremental build starts from here, not from MAX(date): after the aborted build
+    of 21.10.2026, MAX(date) was the new session of the 600 tickers that got it, so the
+    next run's window began after the session the other 4,764 were missing and never
+    filled it. What this does not catch: one chunk failing day after day stays under
+    the 10 % — that is what `failed` in the build's output is for.
+
+    Sessions are counted on the equities in `securities`, as in session_coverage.
+    """
+    rows = con.execute(
+        """
+        SELECT p.date, COUNT(*) AS n FROM prices p
+        WHERE EXISTS (SELECT 1 FROM securities s WHERE s.ticker = p.ticker)
+        GROUP BY p.date ORDER BY p.date DESC LIMIT ?
+        """,
+        [lookback],
+    ).fetchall()
+    if not rows:
+        return None
+    usual = max(n for _, n in rows)
+    return next(d for d, n in rows if n >= share * usual)
 
 
 def fetch_benchmark(start: dt.date, end: dt.date) -> tuple[str, pd.DataFrame]:
