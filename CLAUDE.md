@@ -101,6 +101,10 @@ src/portfolio_lab/
                             file because the app locks user.duckdb; ledger = one balance;
                             scripts/butterfly_tracker.py (+ install_butterfly_tracker.sh);
                             decides only in US hours on live Yahoo quotes (PLAN.md)
+  forward/                  six forward paper books A-F (1,000 EUR each) in
+                            data/paper_forward.duckdb; research features ported and
+                            verified (scripts/forward_verify.py); scripts/forward_books.py,
+                            run by the morning job; PORTFOLIOS → BOOKS (PLAN.md)
   risk.py alerts.py insiders.py fts.py fred.py export.py summary.py macro.py options.py
   options.py (end of file)  implied_distribution (Breeden-Litzenberger), smile_slope
                             (put-call IV spread, live quotes only, parity-checked),

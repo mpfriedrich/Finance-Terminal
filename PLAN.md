@@ -1627,6 +1627,85 @@ Verhalten bei Splits während der Laufzeit (Kontrakte werden angepasst, die Wurz
 Die SPY- und ^SP500TR-Reihe im Markt-Bestand endet am 23.09.2026 (separat zu klären);
 der Tracker holt SPY deshalb selbst.
 
+## Paper-Portfolios A–F: prospektive Bücher mit je 1.000 € (22.10.2026, lokale Sitzung)
+
+**Auftrag des Nutzers:** sechs getrennte Paper-Portfolios (A–F) mit je 1.000 € ab dem
+tatsächlichen Start, im Tracker (PORTFOLIOS → BOOKS) und im Morgen-Brief. Nur Papier.
+Code: `src/portfolio_lab/forward/` (features, models, data, ledger, strategies, engine,
+report), `scripts/forward_books.py`, `scripts/forward_verify.py`; Buchungen in
+`data/paper_forward.duckdb` (eigene Datei, weil die App `user.duckdb` sperrt).
+
+**Gemeinsam A–D:** Long/Short, Signal nach Handelsschluss, Ausführung zur nächsten
+regulären Eröffnung, alle 5 US-Sitzungen vollständige Umschichtung, 20 Long / 20 Short,
+50/50, 100 % brutto, gleich gewichtet; Eignung und SSM-Ausschluss wie im Research.
+Kosten (Annahme) 0,10 % je Ein-/Ausstiegsnominal, 3 % p. a. Leihe auf das ursprüngliche
+Short-Nominal je Kalendertag. Konten in EUR; Fills zum EUR/USD-Schluss der Vorsitzung,
+Bewertung zum Schluss des Tages. Dividenden: Rendite jeweils aus Einstieg und Bewertung
+auf derselben `close_adj`-Basis (Yahoo bereinigt rückwirkend), Long erhält, Short zahlt.
+
+**Reproduktion gegen das Research (alle bestanden, `scripts/forward_verify.py`):**
+* B: Signal 28.05.2025, 3.231/3.231 gleiche geeignete Aktien, max. Score-Abweichung
+  1,2e-10, Top/Bottom 20 identisch.
+* v13 (C) und v29 (A) mit Peers und ALFRED-Makro: Top/Bottom 20 identisch, 1,6e-10.
+* D: erster Korb 31.12.2024 identisch (Long und Short).
+* F: Schwellenereignisse 28.08., 01.09., 10.09.2026 identisch.
+
+**A (A1):** v29 (23 Merkmale + Peers + Beschäftigung + Inflation + Fed-Zinsen, ohne
+Gold), Ridge α 1, Ziel 5-Tage-Überrendite zu SPY, Training auf den zehn Jahren vor dem
+Start (nur Ziele, die vor dem Stichtag vollständig bekannt waren), max. 256 Zeilen je
+Signaltag (Seed 62025), Skalierung/Clipping nur auf Trainingsdaten; jährlich neu.
+**B (B1):** `price_ml_inputs/frozen_model.json` unverändert (SHA-256 gespeichert).
+**C (C1):** Jahresversion 2026 v13 aus `rolling_windows/10y/annual_models.json`
+(Training 2016–2025); Neufit jeden Januar auf die vorherigen zehn Kalenderjahre.
+Rückblickend ausgewählt, nicht unabhängig bestätigt.
+**D (D1):** 0,5 / 0,3 / −0,2, unverändert; frühere Prüfung schwach.
+**F (F1):** Schwellen exakt aus `rare_signals_2011/specification.json`; nur der Übergang
+„aus → an“ zählt, Episoden vor dem Start werden nur beobachtet; 75 % des Kontowerts der
+Vorsitzung je Trade, bei zu wenig Cash proportional verkleinert, ohne Cash ausgelassen;
+Ausstieg nach fünf Sitzungen zur Eröffnung; ein offener Trade je Regel und Aktie. Extreme
+Bewegung mit wechselndem Verhältnis Kurs/Split-Kurs → „ungeklärt“, kein Trade.
+
+**E (E1) — eigene Hypothese, vor dem Start festgelegt:**
+* *Wirtschaftliche Begründung:* drei gut dokumentierte, unterschiedlich begründete
+  Prämien. Momentum (verzögerte Informationsverarbeitung, Jegadeesh/Titman 1993),
+  Bruttoprofitabilität (Märkte unterschätzen dauerhafte operative Ertragskraft,
+  Novy-Marx 2013) und Kapitaldisziplin (Firmen geben Aktien aus, wenn sie teuer sind, und
+  kaufen zurück, wenn sie billig sind; Pontiff/Woodgate 2008). Kombiniert, weil
+  Momentum-Einbrüche und Qualitäts-Prämie wenig gemeinsam haben.
+* *Warum diese Form:* In der Signalsuche dieses Projekts (14.10.2026) waren genau diese
+  drei international brutto die stabilsten (t 2,7 / 2,3 / 2,1), bestanden aber netto nicht,
+  weil monatlicher Vollumschlag im breiten 300-Mio.-Universum zu teuer war. E zielt auf
+  diesen gemessenen Fehler (Kosten), nicht auf eine höhere Rückblick-Rendite: große Werte
+  (niedrige Spreads, leihbarer) und ein Puffer gegen Umschlag. Erwartung ehrlich gering
+  (Sharpe-Größenordnung 0,3); kurze Beobachtungszeiträume bestätigen oder widerlegen das
+  nicht.
+* *Faktoren:* 12–1-Momentum `P[t−21]/P[t−252] − 1`; Bruttogewinn TTM / Bilanzsumme aus
+  dem Point-in-time-Frame; Aktienausgabe = −(Aktienzahl heute / vor einem Jahr − 1),
+  beide auf heutige Split-Basis (Anzahl × Kurs_roh / Kurs).
+* *Regel:* Score = Mittel der drei Perzentilränge über das geeignete Universum; alle
+  drei Werte müssen vorliegen. Kein Training, kein Retraining.
+* *Universum:* Research-Universum (NYSE/NASDAQ/CBOE, Eignung wie A–D, ohne SSM),
+  Börsenwert ≥ 2 Mrd. $, Median-Umsatz 60 Tage ≥ 10 Mio. $.
+* *Haltedauer:* Signal nach Schluss des letzten Handelstags im Monat, Ausführung zur
+  ersten Eröffnung des neuen Monats. Long bleibt, solange er unter den besten 40 ist,
+  Short unter den schwächsten 40; Lücken je Seite auf 20 aufgefüllt.
+* *Größe und Grenzen:* neue Position 2,5 % des Kontowerts (20 je Seite → 50/50,
+  100 % brutto); bei zu wenig Cash proportional kleiner; kein Hebel, keine Nachschüsse.
+* *Kosten:* wie A–D (0,10 % je Seite, 3 % p. a. Leihe).
+* Änderungen nur als E2 mit eigenem Beobachtungsabschnitt.
+
+**Datenlage beim Bau (22.10.2026):** Kurse vom 20. und 21.10. nur zu ~11 % geladen (595 von
+5.364 Aktien) — die Bücher warten, bis eine Sitzung ≥ 90 % des üblichen Umfangs hat. SPY im
+Markt-Bestand endet am 23.09.2026; der Tracker lädt SPY selbst (Yahoo). Kein FRED-API-
+Schlüssel: Makro aus den gespeicherten ALFRED-Vintages (bis 14.10.2026) plus eigenen
+täglichen FRED-Abrufen, jeweils ab dem Abruftag als bekannt.
+
+**Ungetestet / Grenzen:** keine Brokerdaten (Leihbarkeit nie bestätigt, keine
+Mindestgebühren, keine echten Spreads); Bruchstücke — mit 1.000 € und 40 Positionen
+(~12,50 € je Position) passt bei den meisten Aktien keine ganze Aktie; der Tracker zeigt
+das je Auftrag. Aktuelles Universum (Survivorship). ADS-Ratio-Wechsel werden nicht eigens
+geprüft (nur Split-Verhältnis).
+
 ## Geplant: Hebel und Derivate (vorgemerkt am 25.09.2026, noch nicht begonnen)
 
 Auf Frage des Nutzers („gibt es die Option für Derivate und Leverage?“) nur in den Plan

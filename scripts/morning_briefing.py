@@ -195,6 +195,23 @@ def main() -> int:
         warm_cache(price_note)
 
 
+def forward_books() -> str:
+    """Book the six forward paper books on the fresh prices and return their section of
+    the brief. A failure is reported in the brief, never fatal to it."""
+    try:
+        res = subprocess.run([sys.executable, str(Path(__file__).resolve().parent /
+                                                  "forward_books.py")],
+                             capture_output=True, text=True, timeout=3600, check=False)
+        out = res.stdout
+        start = out.find("# Paper-Portfolios")
+        if start >= 0:
+            return out[start:].strip()
+        return ("# Paper-Portfolios A–F\n\nAktualisierung fehlgeschlagen (Exit "
+                f"{res.returncode}). Log: data/briefings/run.log")
+    except Exception as exc:                                        # noqa: BLE001
+        return f"# Paper-Portfolios A–F\n\nAktualisierung fehlgeschlagen: {exc}"
+
+
 def deliver(today: dt.date, price_note: str) -> int:
     # Alerts on the fresh closes, before the briefing: they notify on their own.
     try:
@@ -203,6 +220,7 @@ def deliver(today: dt.date, price_note: str) -> int:
     except Exception as exc:                                        # noqa: BLE001
         print(f"alerts not checked: {exc}")
 
+    forward = forward_books()
     market = open_market(MARKET_DB, read_only=True)
     # Read a COPY of the portfolio store. DuckDB's write lock excludes readers as well,
     # so opening the live file would fail whenever the app was left running overnight.
@@ -213,12 +231,21 @@ def deliver(today: dt.date, price_note: str) -> int:
         print(f"could not read the portfolio store: {exc}")
         notify("Portfolio Lab", "Could not read your portfolios — no briefing written.")
         return 1
-    if not followed:
+    if not followed and not forward:
         notify("Portfolio Lab", "Nothing followed — no briefing written.")
         return 0
 
-    bundle = bfg.gather(market, followed)
-    result = bfg.write(bundle)
+    if followed:
+        bundle = bfg.gather(market, followed)
+        result = bfg.write(bundle)
+    else:
+        bundle = {"notable": []}
+        result = {"text": "", "evidence": ""}
+    if forward:
+        # The paper books' numbers come straight from their ledger, not from the model
+        # that writes the rest of the brief.
+        result["text"] = (result["text"] + "\n\n" + forward).strip()
+        result["evidence"] += "\n\nForward-Paper-Bücher: data/paper_forward.duckdb"
 
     stamp = today.isoformat()
     (OUT_DIR / f"{stamp}.md").write_text(result["text"], encoding="utf-8")

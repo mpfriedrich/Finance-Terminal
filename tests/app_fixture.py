@@ -89,7 +89,8 @@ def run(monkeypatch, data: Path, query: dict | None = None,
                        ("WORLD_DB", data / "world.duckdb"),
                        ("USER_DB", data / "user.duckdb"), ("CACHE_DIR", data / "cache"),
                        ("ALERTS_STATE", data / "alerts_state.json"),
-                       ("PAPER_OPTIONS_DB", data / "paper_options.duckdb")):
+                       ("PAPER_OPTIONS_DB", data / "paper_options.duckdb"),
+                       ("FORWARD_DB", data / "paper_forward.duckdb")):
         monkeypatch.setattr(config, name, path)
     monkeypatch.setattr(socket.socket, "connect", _no_network)
     monkeypatch.setattr(socket, "create_connection", _no_network)

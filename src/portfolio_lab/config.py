@@ -24,6 +24,9 @@ USER_DB = DATA_DIR / "user.duckdb"
 # holds the user store open read-write the whole time, and the tracker has to book trades
 # from a scheduled job while it is open. Both sides open this file only briefly.
 PAPER_OPTIONS_DB = DATA_DIR / "paper_options.duckdb"
+# The six forward paper books A-F (forward/), same reasoning: written by the morning job
+# and the tracker script, read by the app, each only for moments.
+FORWARD_DB = DATA_DIR / "paper_forward.duckdb"
 CACHE_DIR = DATA_DIR / "cache"
 # What alerts have fired, kept by the checker (alerts.py) outside the portfolio store.
 ALERTS_STATE = DATA_DIR / "alerts_state.json"

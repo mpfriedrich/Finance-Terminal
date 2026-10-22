@@ -76,6 +76,9 @@ from portfolio_lab.lab import translate as LT
 from portfolio_lab.lab.spec import StrategySpec
 from portfolio_lab import options as op
 from portfolio_lab import filing_butterfly as fbt
+from portfolio_lab.forward import ledger as fwl
+from portfolio_lab.forward import report as fwr
+from portfolio_lab.forward import strategies as fws
 from portfolio_lab import strategy as stg
 from portfolio_lab import research as rs
 from portfolio_lab.store import Store
@@ -3475,6 +3478,7 @@ def _view_books() -> None:
                     paper.close_book(store.con, b["id"])
                     st.rerun()
     _view_option_books()
+    _view_forward_books()
 
 
 def _fb_money(value, currency: str) -> str:
@@ -3699,6 +3703,171 @@ def _view_option_books() -> None:
         ("Model prices", ("the provider's implied volatility is kept per leg for analysis "
                          "only; it is never a fill price")),
     ], columns=["", "assumed"]), hide_index=True, width="stretch")
+
+
+_FW_HISTORY = {
+    "A": "results/rolling_windows/10y/no_ssm/v29_long_short_daily.csv",
+    "B": "results/price_ml_inputs/long_short_daily.csv",
+    "C": "results/rolling_windows/10y/no_ssm/v13_long_short_daily.csv",
+    "D": "results/model_d/no_ssm/fixed_2025_daily.csv",
+    "F": "results/winner_concentration_2011/75_omit0_daily.csv",
+}
+
+
+def _fw_read() -> dict | None:
+    """The six books, read in one short read-only visit (the tracker writes the same
+    file from the morning job)."""
+    if not cfg.FORWARD_DB.exists():
+        return None
+    con = fwl.connect(cfg.FORWARD_DB, read_only=True)
+    try:
+        if not con.execute("SELECT COUNT(*) FROM fw_books").fetchone()[0]:
+            return None
+        at, last = fwr.last_run(con)
+        return {"at": at, "last": last,
+                "books": [fwr.summary(con, b["id"]) for b in fws.BOOKS]}
+    finally:
+        con.close()
+
+
+def _fw_chart(fig, height, title):
+    _layout(fig, height, hovermode="x", legend=dict(orientation="h", y=-0.18),
+            yaxis=dict(title=title, gridcolor=ui.RULE, side="right", showspikes=True,
+                       spikemode="across", spikethickness=1, spikedash="dot"),
+            xaxis=dict(gridcolor=ui.RULE, showspikes=True, spikemode="across",
+                       spikethickness=1, spikedash="dot"))
+    return fig
+
+
+def _view_forward_books() -> None:
+    """Six forward paper books A-F (forward/), each 1,000 EUR from the day it started."""
+    st.markdown("#### Paper-Portfolios A–F — forward, je 1.000 € seit dem Start")
+    st.caption(
+        "Paper only: no order reaches a broker. Hypothetical simulation with fractional "
+        "shares; short positions without confirmed borrow. Costs are assumptions: 0.10 % "
+        "per entry and exit notional, 3 % a year borrow on the original short notional, "
+        "per calendar day. Accounts in EUR at the EUR/USD rate of each moment. Signals "
+        "after the close, fills at the next regular open. The historical research curves "
+        "are shown separately and are not part of these books.")
+    try:
+        data = _fw_read()
+    except Exception as exc:                                       # noqa: BLE001
+        st.info(f"The forward store is busy right now ({ui.error_text(exc)}). Reload.")
+        return
+    if data is None:
+        st.info("Not started yet. Run `uv run python scripts/forward_books.py` once; the "
+                "morning job then updates the books every weekday.")
+        return
+    last = data["last"]
+    when = (pd.Timestamp(data["at"]).tz_localize("UTC").tz_convert(
+        dt.datetime.now().astimezone().tzinfo).strftime("%d.%m.%Y %H:%M")
+        if data["at"] is not None else "—")
+    st.caption(f"Last update {when} (local time) · newest complete session "
+               f"{last.get('latest_complete')} · newest price data "
+               f"{last.get('latest_data')}" + "".join(f" · {n}" for n in last.get("notes", [])))
+
+    fig = go.Figure()
+    spy_done = False
+    for i, b in enumerate(data["books"]):
+        m = b["marks"]
+        if m.empty:
+            continue
+        fig.add_trace(go.Scatter(x=m["session"], y=m["equity"], name=b["code"] + " "
+                                 + b["name"].split("·")[0].split("—")[-1].strip(),
+                                 line=dict(color=PALETTE[i % len(PALETTE)], width=1.6),
+                                 hovertemplate="%{x|%d.%m.%Y}<br>%{y:,.2f} €"))
+        if not spy_done and m["spy"].notna().any():
+            fig.add_trace(go.Scatter(x=m["session"], y=m["spy"], name="SPY (1.000 €, "
+                                     "Dividenden, EUR)", line=dict(color=ui.DATA, width=1.2,
+                                                                   dash="dot"),
+                                     hovertemplate="%{x|%d.%m.%Y}<br>%{y:,.2f} €"))
+            spy_done = True
+    if fig.data:
+        st.plotly_chart(_fw_chart(fig, 300, "EUR after costs"), width="stretch",
+                        key="fw_compare")
+
+    rows = []
+    for b in data["books"]:
+        rows.append({
+            "book": b["name"], "version": b["version"],
+            "value €": b.get("equity"), "today €": b.get("day_eur"),
+            "today": ui.pct(b.get("day_pct"), 2), "since start €": b.get("total_eur"),
+            "since start": ui.pct(b.get("total_pct"), 2),
+            "SPY since start": ui.pct(b.get("spy_total_pct"), 2),
+            "vs SPY (pp)": None if b.get("vs_spy_pp") is None else round(b["vs_spy_pp"], 2),
+            "max DD": ui.pct(b.get("max_dd"), 2), "cash €": b.get("cash"),
+            "positions": b.get("open_positions"), "gross": ui.pct(b.get("gross"), 0),
+            "net": ui.pct(b.get("net"), 0), "as of": str(b.get("as_of", "—")),
+            "status": last.get("status", {}).get(b["code"], b.get("state", ""))})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    st.caption("No annualised figures before a year of observations: a few days do not "
+               "make an expected return.")
+
+    for i, b in enumerate(data["books"]):
+        with st.expander(f"{b['name']} · {b['version']}"):
+            st.markdown(b["description"])
+            if b.get("model"):
+                mdl = b["model"]
+                st.caption(f"Model: {mdl['source']} · training outcomes known up to "
+                           f"{mdl['latest_outcome']} · next retraining "
+                           f"{mdl['next_retrain'] or 'never (frozen)'}")
+            st.caption(f"Started {pd.Timestamp(b['started_at']):%d.%m.%Y %H:%M} UTC, first "
+                       f"session {b['first_session']} · next: {b['next']}")
+            m = b["marks"]
+            if not m.empty:
+                f1 = go.Figure()
+                f1.add_trace(go.Scatter(x=m["session"], y=m["equity"], name="book",
+                                        line=dict(color=PALETTE[i % len(PALETTE)],
+                                                  width=1.6),
+                                        hovertemplate="%{x|%d.%m.%Y}<br>%{y:,.2f} €"))
+                f1.add_trace(go.Scatter(x=m["session"], y=m["spy"], name="SPY same days",
+                                        line=dict(color=ui.DATA, width=1.1, dash="dot"),
+                                        hovertemplate="%{x|%d.%m.%Y}<br>%{y:,.2f} €"))
+                st.plotly_chart(_fw_chart(f1, 240, "EUR"), width="stretch",
+                                key=f"fw_eq_{b['code']}")
+                dd_ = fwr.drawdown(m["equity"], b["capital"]) * 100
+                f2 = go.Figure(go.Scatter(x=m["session"], y=dd_, name="drawdown",
+                                          fill="tozeroy", line=dict(color=ui.DOWN, width=1),
+                                          hovertemplate="%{x|%d.%m.%Y}<br>%{y:.2f} %"))
+                st.plotly_chart(_fw_chart(f2, 140, "drawdown %"), width="stretch",
+                                key=f"fw_dd_{b['code']}")
+            if len(b["positions"]):
+                st.markdown("**Open positions** (hypothetical, fractional)")
+                st.dataframe(b["positions"], hide_index=True, width="stretch")
+            if len(b["orders"]):
+                o = b["orders"]
+                shorts = (o["side"] == "short").sum()
+                whole = (o["whole_shares"].fillna(0) >= 1).sum()
+                st.markdown("**Orders and why** — simulated vs. what a real paper account "
+                            "could have done")
+                st.caption(f"{len(o)} simulated orders; {whole} would fit at least one "
+                           f"whole share; {shorts} short orders without confirmed borrow "
+                           "(no broker data). Nothing was replaced by options or CFDs.")
+                st.dataframe(o, hide_index=True, width="stretch", height=260)
+            if len(b["signals"]):
+                st.markdown("**Signals**")
+                st.dataframe(b["signals"], hide_index=True, width="stretch")
+            yrs = b.get("years")
+            if yrs is not None and len(yrs):
+                st.markdown("**Calendar years against SPY** (partial years marked)")
+                st.dataframe(yrs, hide_index=True, width="stretch")
+            hist = _FW_HISTORY.get(b["code"])
+            path = fwm_research() / hist if hist else None
+            if path is not None and path.exists():
+                with st.expander("Historical research curve (simulated, NOT this book)"):
+                    h = pd.read_csv(path, parse_dates=["date"])
+                    fh = go.Figure(go.Scatter(x=h["date"], y=h["equity"], name="research",
+                                              line=dict(color=ui.MUTED, width=1.2)))
+                    st.plotly_chart(_fw_chart(fh, 200, "research units"), width="stretch",
+                                    key=f"fw_hist_{b['code']}")
+                    st.caption(f"Source: {hist} (read-only). Earlier, already examined "
+                               "period; no forecast of this book.")
+
+
+def fwm_research():
+    from portfolio_lab.forward import models as fwm
+
+    return fwm.RESEARCH
 
 
 def _view_deals(default_subject: str = "") -> None:
