@@ -199,13 +199,19 @@ def fetch_into_store(
 
 def _upsert(con: duckdb.DuckDBPyConnection, frame: pd.DataFrame,
             start: dt.date, end: dt.date) -> None:
-    """Replace the window and every key in `frame` (see fetch_into_store), all or none."""
+    """Replace the window and every key in `frame` (see fetch_into_store), all or none.
+
+    The window ends, per ticker, at its newest bar in `frame`. On 22.10.2026 around
+    06:30 New York time Yahoo's batch answer left out the session of the 21st for most
+    tickers while single requests still had it; a delete over the whole window threw
+    away 21.10. bars already stored (SPY among them)."""
     con.register("_px", frame)
     con.begin()
     try:
         con.execute(
             "DELETE FROM prices p WHERE p.ticker IN (SELECT DISTINCT ticker FROM _px) "
-            "AND (p.date BETWEEN ? AND ? OR EXISTS (SELECT 1 FROM _px x "
+            "AND (p.date BETWEEN ? AND LEAST(?, (SELECT MAX(x.date) FROM _px x "
+            "WHERE x.ticker = p.ticker)) OR EXISTS (SELECT 1 FROM _px x "
             "WHERE x.ticker = p.ticker AND x.date = p.date))",
             [start, end],
         )

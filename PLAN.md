@@ -1768,9 +1768,23 @@ und Risiko — er stand einen Monat still. (^GSPC steht im Monitor und lief mit.
   druckt die Symbole ohne Daten als Hinweis, und meldet gescheiterte Pakete **am Ende**
   auf stderr mit Exit 1 (erst nachdem alles andere gespeichert ist).
 - `morning_briefing.refresh_prices`: zeigt das **Ende** von stderr (300 Zeichen).
+- Fenster endet pro Symbol beim neuesten gelieferten Kurs: am 22.10. gegen 06:30 New
+  Yorker Zeit ließ Yahoos Paket-Antwort den 21.10. für die meisten Symbole weg (einzeln
+  noch da, eine Stunde später auch einzeln nicht mehr). Das alte Löschen über das ganze
+  Fenster hätte gespeicherte 21.10.-Kurse dabei verworfen (bei SPY gesehen).
 - Tests: `tests/test_prices_update.py` (Fake-Downloader, kein Netz): Symbol ohne Daten,
   alter Kurs vor dem Fenster (scheitert ohne den Fix, geprüft), scheiterndes Paket mit
   Rollback, letzte vollständige Sitzung, Ende von stderr.
 
 **Wichtig:** Der Morgen-Job läuft aus `~/portfolio-lab` auf dem dort ausgecheckten Branch.
 Solange der Fix dort nicht ist, stirbt jeder Lauf wieder an BRR.
+
+**Nachgeladen 22.10.2026** (neuer Code gegen `~/portfolio-lab/data`, Exit 0):
+Aktien mit Kurs je Sitzung danach 15.10.: 5.334 · 16.10.: 5.335 · 19.10.: 5.322 ·
+20.10.: 5.324 (vorher 617). 5.346 von 5.364 Symbolen mit Daten, 18 nur als Hinweis
+(u. a. BLFS, BRNS, DOMO, WBD). SPY, ^SP500TR, ^GSPC per `add_benchmark.py` ohne Lücke bis
+20.10. Der **21.10. fehlt noch** (772 Aktien): Yahoo lieferte ihn zum Zeitpunkt des Laufs
+nicht. Der nächste Lauf startet bei der letzten vollständigen Sitzung (20.10.) und holt
+ihn. In einem zweiten Lauf meldeten unter Yahoos Drosselung 49 Symbole „keine Daten“
+(darunter LMT, M); ihre gespeicherten Kurse blieben unberührt, wie gewollt.
+Ungeprüft: der echte Morgenlauf mit dem neuen Code.

@@ -73,6 +73,15 @@ def test_a_stale_last_bar_before_the_window_does_not_stop_the_update(con):
     assert stored(con, "ZZZ") == [(D(2026, 10, 21), 10.0)]
 
 
+def test_stored_bars_newer_than_the_answer_are_kept(con):
+    # 22.10.2026: Yahoo's batch answer ended a session early for a while.
+    con.executemany("INSERT INTO prices (ticker, date, close) VALUES ('SPY', ?, ?)",
+                    [(D(2026, 10, 20), 1.0), (D(2026, 10, 21), 2.0)])
+    download = fake({"SPY": bars("SPY", [D(2026, 10, 20)], close=1.5)})
+    px.fetch_into_store(con, ["SPY"], START, END, download=download)
+    assert stored(con, "SPY") == [(D(2026, 10, 20), 1.5), (D(2026, 10, 21), 2.0)]
+
+
 def test_a_failing_chunk_is_rolled_back_alone_and_the_next_one_runs(con):
     con.execute("INSERT INTO prices (ticker, date, close) VALUES ('BAD', ?, 1.0)",
                 [D(2026, 10, 16)])
