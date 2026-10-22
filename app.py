@@ -3799,7 +3799,8 @@ def _view_forward_books() -> None:
             "positions": b.get("open_positions"), "gross": ui.pct(b.get("gross"), 0),
             "net": ui.pct(b.get("net"), 0), "as of": str(b.get("as_of", "—")),
             "status": last.get("status", {}).get(b["code"], b.get("state", ""))})
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    table = pd.DataFrame(rows).astype(object)
+    st.dataframe(table.where(table.notna(), "—"), hide_index=True, width="stretch")
     st.caption("No annualised figures before a year of observations: a few days do not "
                "make an expected return.")
 
