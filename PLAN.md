@@ -1706,6 +1706,28 @@ Mindestgebühren, keine echten Spreads); Bruchstücke — mit 1.000 € und 40 P
 das je Auftrag. Aktuelles Universum (Survivorship). ADS-Ratio-Wechsel werden nicht eigens
 geprüft (nur Split-Verhältnis).
 
+**Audit 24.10.2026, F1 + F2 behoben (bevor die erste Sitzung gebucht war, `fw_marks` leer):**
+* *F1 — Teil-Tage wurden gebucht.* Nur die Signale warteten auf eine vollständige Sitzung;
+  Fills und Bewertungen liefen an jedem Tag mit irgendeinem Kurs und waren danach eingefroren
+  (eine gebuchte Sitzung wird nie neu gerechnet). Jetzt bucht `run()` der Reihe nach und hält
+  an der ersten Sitzung, die < 90 % Abdeckung hat oder deren Schluss (16:00 New York) noch
+  nicht vorbei ist; diese und alle späteren warten auf den nächsten Lauf, offene Signale
+  bleiben „pending“ und füllen dann zur echten Eröffnung jener Sitzung. Neue Signale nur aus
+  Sitzungen vor dem Halt. Eine Sitzung ganz ohne Kurse, während spätere welche haben, gilt
+  weiter als Sonderschließung und wird übersprungen.
+* *F2 — keine Transaktion.* Jede Sitzung je Buch ist jetzt eine Transaktion (Leihe, Fills,
+  Signalstatus, Bewertung zusammen); ein Fehler rollt das Buch zurück, der Lauf hält an der
+  Sitzung, und der nächste Lauf bucht sie neu. Auch das Anlegen eines Buchs (Buch, Version,
+  Einzahlung) ist eine Transaktion. Ein Abbruch durch Timeout/Strg+C lässt die offene
+  Transaktion ungeschrieben (DuckDB).
+* Tests: `test_an_incomplete_session_is_not_booked_until_its_prices_are_complete`,
+  `test_a_session_is_not_booked_before_its_close`,
+  `test_a_run_that_breaks_mid_session_leaves_nothing_half_booked` — alle drei rot ohne Fix
+  (14 Orders am Teil-Tag, 6 Bewertungen mittags, halbe Buchung nach Absturz), grün mit; der
+  Endzustand nach jedem Umweg ist gleich dem eines ungestörten Laufs.
+* Keine Regeländerung an A–F (Ausführung zur Eröffnung, Kosten, Körbe unverändert), daher
+  keine neue Version.
+
 ## Geplant: Hebel und Derivate (vorgemerkt am 25.09.2026, noch nicht begonnen)
 
 Auf Frage des Nutzers („gibt es die Option für Derivate und Leverage?“) nur in den Plan

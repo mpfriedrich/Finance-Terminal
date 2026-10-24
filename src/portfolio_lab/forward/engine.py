@@ -87,12 +87,20 @@ def ensure_books(con, now: dt.datetime) -> None:
             continue
         first = first_session_after(now)
         config = {k: v for k, v in b.items() if k not in ("name", "description")}
-        con.execute("INSERT INTO fw_books VALUES (?,?,?,?,?,?,?,?,?)",
-                    [b["id"], b["code"], b["name"], b["description"], CAPITAL, now, first,
-                     b["version"], json.dumps(config)])
-        con.execute("INSERT INTO fw_versions VALUES (?,?,?,?,?)",
-                    [b["id"], b["version"], now, json.dumps(config), "Start"])
-        lg.book(con, b["id"], now, None, "deposit", CAPITAL, None, "Startkapital 1.000 EUR")
+        # One transaction: a book without its deposit would start with no cash.
+        con.execute("BEGIN")
+        try:
+            con.execute("INSERT INTO fw_books VALUES (?,?,?,?,?,?,?,?,?)",
+                        [b["id"], b["code"], b["name"], b["description"], CAPITAL, now,
+                         first, b["version"], json.dumps(config)])
+            con.execute("INSERT INTO fw_versions VALUES (?,?,?,?,?)",
+                        [b["id"], b["version"], now, json.dumps(config), "Start"])
+            lg.book(con, b["id"], now, None, "deposit", CAPITAL, None,
+                    "Startkapital 1.000 EUR")
+            con.execute("COMMIT")
+        except BaseException:
+            con.execute("ROLLBACK")
+            raise
 
 
 def refresh_inputs(con, market, live, today: dt.date, notes: list) -> None:
@@ -438,7 +446,13 @@ def fill_monthly(con, market, book_id, sig, S, px, fx_open, now) -> str:
 
 
 def process_session(con, market, S: dt.date, now, notes) -> bool:
-    """Book session S for every book. False when the EUR/USD rate is missing."""
+    """Book session S for every book. False when the EUR/USD rate is missing or a book
+    failed; the run then stops here, so no book skips a session another one booked.
+
+    Each book's session is one transaction (audit 24.10.2026 F2). Whether a session is
+    booked is decided by its mark alone, so the borrow, the fills, the signal status and
+    the mark must land together: a failure in between used to leave the borrow and some
+    fills in place, and the next run booked them a second time."""
     prev = cal.prev_session(S)
     fx_open, fx_close = fx_on(con, prev), fx_on(con, S)
     if not fx_open or not fx_close:
@@ -446,46 +460,58 @@ def process_session(con, market, S: dt.date, now, notes) -> bool:
         return False
     px = prices_at(market, S)
     for b in stg.BOOKS:
-        bid = b["id"]
-        first = con.execute("SELECT first_session FROM fw_books WHERE id=?",
-                            [bid]).fetchone()[0]
-        if S < first:
-            continue
-        last = con.execute("SELECT MAX(session) FROM fw_marks WHERE book_id=?",
-                           [bid]).fetchone()[0]
-        if last is not None and S <= last:
-            continue
-        lg.accrue_borrow(con, bid, now, last or S, S, S)
-        prev_eq = con.execute("SELECT equity FROM fw_marks WHERE book_id=? ORDER BY "
-                              "session DESC LIMIT 1", [bid]).fetchone()
-        prev_eq = float(prev_eq[0]) if prev_eq else CAPITAL
-        sigs = con.execute("SELECT * FROM fw_signals WHERE book_id=? AND exec_session=? "
-                           "AND status='pending'", [bid, S]).fetch_df().to_dict("records")
-        if b["kind"] == "rare":
-            for p in lg.open_positions(con, bid).to_dict("records"):
-                if p["planned_exit"] is not None and S >= p["planned_exit"]:
-                    _close_at_open(con, market, bid, p, S, px, fx_open, now,
-                                   "fünf Sitzungen gehalten", None)
-        for sig in sigs:
-            if pd.Timestamp(sig["created_at"]) >= pd.Timestamp(open_time(S)):
-                con.execute("UPDATE fw_signals SET status='missed', note='Signal nach der "
-                            "Eröffnung erstellt' WHERE id=?", [sig["id"]])
-                continue
-            if b["kind"] in ("model", "rule_d"):
-                result = fill_rebalance(con, market, bid, sig, S, px, fx_open, now)
-            elif b["kind"] == "rule_e":
-                result = fill_monthly(con, market, bid, sig, S, px, fx_open, now)
-            else:
-                result = fill_rare(con, market, bid, sig, S, px, fx_open, now, prev_eq)
-            con.execute("UPDATE fw_signals SET status='executed', note=? WHERE id=?",
-                        [result, sig["id"]])
-        prices = {}
-        for p in lg.open_positions(con, bid).to_dict("records"):
-            eq = equivalent(market, p, px["close_adj"].get(p["ticker"]))
-            if eq:
-                prices[p["id"]] = eq
-        lg.mark(con, bid, now, S, fx_close, prices)
+        con.execute("BEGIN")
+        try:
+            _book_session(con, market, b, S, px, fx_open, fx_close, now)
+            con.execute("COMMIT")
+        except Exception as exc:                                   # noqa: BLE001
+            con.execute("ROLLBACK")
+            notes.append(f"{b['code']}: {S} nicht gebucht ({type(exc).__name__}); "
+                         "der nächste Lauf versucht es erneut")
+            return False
     return True
+
+
+def _book_session(con, market, b: dict, S: dt.date, px, fx_open, fx_close, now) -> None:
+    bid = b["id"]
+    first = con.execute("SELECT first_session FROM fw_books WHERE id=?",
+                        [bid]).fetchone()[0]
+    if S < first:
+        return
+    last = con.execute("SELECT MAX(session) FROM fw_marks WHERE book_id=?",
+                       [bid]).fetchone()[0]
+    if last is not None and S <= last:
+        return
+    lg.accrue_borrow(con, bid, now, last or S, S, S)
+    prev_eq = con.execute("SELECT equity FROM fw_marks WHERE book_id=? ORDER BY "
+                          "session DESC LIMIT 1", [bid]).fetchone()
+    prev_eq = float(prev_eq[0]) if prev_eq else CAPITAL
+    sigs = con.execute("SELECT * FROM fw_signals WHERE book_id=? AND exec_session=? "
+                       "AND status='pending'", [bid, S]).fetch_df().to_dict("records")
+    if b["kind"] == "rare":
+        for p in lg.open_positions(con, bid).to_dict("records"):
+            if p["planned_exit"] is not None and S >= p["planned_exit"]:
+                _close_at_open(con, market, bid, p, S, px, fx_open, now,
+                               "fünf Sitzungen gehalten", None)
+    for sig in sigs:
+        if pd.Timestamp(sig["created_at"]) >= pd.Timestamp(open_time(S)):
+            con.execute("UPDATE fw_signals SET status='missed', note='Signal nach der "
+                        "Eröffnung erstellt' WHERE id=?", [sig["id"]])
+            continue
+        if b["kind"] in ("model", "rule_d"):
+            result = fill_rebalance(con, market, bid, sig, S, px, fx_open, now)
+        elif b["kind"] == "rule_e":
+            result = fill_monthly(con, market, bid, sig, S, px, fx_open, now)
+        else:
+            result = fill_rare(con, market, bid, sig, S, px, fx_open, now, prev_eq)
+        con.execute("UPDATE fw_signals SET status='executed', note=? WHERE id=?",
+                    [result, sig["id"]])
+    prices = {}
+    for p in lg.open_positions(con, bid).to_dict("records"):
+        eq = equivalent(market, p, px["close_adj"].get(p["ticker"]))
+        if eq:
+            prices[p["id"]] = eq
+    lg.mark(con, bid, now, S, fx_close, prices)
 
 
 def benchmark(con, book_id: str) -> pd.DataFrame:
@@ -638,16 +664,37 @@ def run(path: Path, market, live=None, now: dt.datetime | None = None, log=print
         ensure_models(con, market, today, now, log, notes)
         complete = dd.complete_sessions(market, first - dt.timedelta(days=10))
         data_days = list(dd.coverage(market, first - dt.timedelta(days=10)).index)
-        latest_complete = max(complete) if complete else None
-        summary["latest_complete"] = str(latest_complete)
-        summary["latest_data"] = str(max(data_days)) if data_days else None
-        # book every session from the first one up to the newest data
+        # Book every session from the first one on, in order, and stop at the first one
+        # that cannot be booked yet (audit 24.10.2026 F1). A booked session is never
+        # touched again, so a day with part of its prices (20./21.10.2026: 595 of
+        # 5,364) must wait for the rest instead of trading a basket of whatever loaded.
+        # A session whose close has not come yet waits too: its bar is not a close.
+        # A session without any bar while later ones have them is a closure the
+        # calendar does not know, and is passed over as before.
+        complete_set, stop = set(complete), None
         if data_days:
             S = first
             while S <= max(data_days):
-                if S in data_days and not process_session(con, market, S, now, notes):
+                if close_time(S) > now:
+                    stop = S
                     break
+                if S in data_days:
+                    if S not in complete_set:
+                        stop = S
+                        notes.append(f"{S}: Kurse unvollständig (Abdeckung < 90 %) — "
+                                     "Sitzung und alle folgenden warten")
+                        break
+                    if not process_session(con, market, S, now, notes):
+                        stop = S
+                        break
                 S = cal.next_session(S)
+        # Signals come only from sessions before that stop: a basket for a session after
+        # a hole would be filled before the hole is booked.
+        if stop is not None:
+            complete = [d for d in complete if d < stop]
+        latest_complete = max(complete) if complete else None
+        summary["latest_complete"] = str(latest_complete)
+        summary["latest_data"] = str(max(data_days)) if data_days else None
         if latest_complete is None or latest_complete < cal.prev_session(first):
             summary["status"] = {b["code"]: "wartet auf vollständige Kurse"
                                  for b in stg.BOOKS}

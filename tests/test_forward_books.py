@@ -328,6 +328,93 @@ def test_an_incomplete_day_is_not_traded_on(world):
     m1.close()
 
 
+def _state(path):
+    """What a run leaves behind, without the timestamps of when it ran."""
+    return {
+        "marks": _read(path, "SELECT book_id, session, equity, cash FROM fw_marks "
+                             "ORDER BY 1, 2").round(9).to_dict("records"),
+        "ledger": _read(path, "SELECT book_id, kind, COUNT(*) n, ROUND(SUM(amount), 9) s "
+                              "FROM fw_ledger GROUP BY 1, 2 ORDER BY 1, 2").to_dict("records"),
+        "orders": _read(path, "SELECT book_id, COUNT(*) n FROM fw_orders GROUP BY 1 "
+                              "ORDER BY 1").to_dict("records"),
+    }
+
+
+def _clean_run(world, live):
+    """WED then a full THU, nothing in between: the state every detour must end in."""
+    clean = world["dir"] / "clean.duckdb"
+    m1 = _market(world["dir"] / "c1.duckdb", WED)
+    en.run(clean, m1, live, now=at(WED, 20), log=lambda *_: None)
+    m1.close()
+    m2 = _market(world["dir"] / "c2.duckdb", THU)
+    en.run(clean, m2, live, now=at(THU, 20), log=lambda *_: None)
+    m2.close()
+    return _state(clean)
+
+
+def test_an_incomplete_session_is_not_booked_until_its_prices_are_complete(world):
+    # Audit 24.10.2026 F1: only signals waited for a complete day; fills and marks were
+    # booked on any day with some prices (20./21.10.: 595 of 5,364) and then frozen.
+    live = FakeLive()
+    m1 = _market(world["dir"] / "m1.duckdb", WED)
+    en.run(world["path"], m1, live, now=at(WED, 20), log=lambda *_: None)
+    m1.close()
+    m2 = _market(world["dir"] / "m2.duckdb", THU, partial=THU)       # 3 of 60 names
+    s = en.run(world["path"], m2, live, now=at(THU, 20), log=lambda *_: None)
+    m2.close()
+    for t in ("fw_orders", "fw_marks", "fw_positions"):
+        assert _read(world["path"], f"SELECT COUNT(*) n FROM {t}")["n"][0] == 0, t
+    assert _read(world["path"], "SELECT COUNT(*) n FROM fw_signals WHERE status='pending' "
+                                f"AND exec_session='{THU}'")["n"][0] == 5
+    assert any(str(THU) in n and "unvollständig" in n for n in s["notes"])
+    m3 = _market(world["dir"] / "m3.duckdb", THU)                    # the rest arrives
+    en.run(world["path"], m3, live, now=at(THU, 21), log=lambda *_: None)
+    m3.close()
+    assert _state(world["path"]) == _clean_run(world, live)
+
+
+def test_a_session_is_not_booked_before_its_close(world):
+    live = FakeLive()
+    m1 = _market(world["dir"] / "m1.duckdb", WED)
+    en.run(world["path"], m1, live, now=at(WED, 20), log=lambda *_: None)
+    m1.close()
+    m2 = _market(world["dir"] / "m2.duckdb", THU)     # Thursday's bar, but it is noon
+    en.run(world["path"], m2, live, now=at(THU, 12), log=lambda *_: None)
+    assert _read(world["path"], "SELECT COUNT(*) n FROM fw_marks")["n"][0] == 0
+    assert _read(world["path"], "SELECT COUNT(*) n FROM fw_signals WHERE "
+                                f"signal_session='{THU}'")["n"][0] == 0
+    m2.close()
+
+
+def test_a_run_that_breaks_mid_session_leaves_nothing_half_booked(world, monkeypatch):
+    # Audit 24.10.2026 F2: without a transaction a failure after the borrow, the fills
+    # or some of the 40 openings left them in place, and the next run booked them again.
+    live = FakeLive()
+    m1 = _market(world["dir"] / "m1.duckdb", WED)
+    en.run(world["path"], m1, live, now=at(WED, 20), log=lambda *_: None)
+    m1.close()
+    real = en.fill_rebalance
+
+    def breaks_in_c(con, market, book_id, *a):
+        out = real(con, market, book_id, *a)         # writes orders, positions, ledger
+        if book_id == "fw-c":
+            raise RuntimeError("simulated crash")
+        return out
+
+    monkeypatch.setattr(en, "fill_rebalance", breaks_in_c)
+    m2 = _market(world["dir"] / "m2.duckdb", THU)
+    s = en.run(world["path"], m2, live, now=at(THU, 20), log=lambda *_: None)
+    booked = set(_read(world["path"], "SELECT book_id FROM fw_marks")["book_id"])
+    assert booked == {"fw-a", "fw-b"}                  # C rolled back, D-F wait for it
+    assert _read(world["path"], "SELECT COUNT(*) n FROM fw_positions WHERE "
+                                "book_id='fw-c'")["n"][0] == 0
+    assert any("RuntimeError" in n for n in s["notes"])
+    monkeypatch.setattr(en, "fill_rebalance", real)
+    en.run(world["path"], m2, live, now=at(THU, 21), log=lambda *_: None)
+    m2.close()
+    assert _state(world["path"]) == _clean_run(world, live)
+
+
 def test_the_brief_names_every_book_and_says_it_is_paper(world):
     live = FakeLive()
     m1 = _market(world["dir"] / "m1.duckdb", WED)
