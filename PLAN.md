@@ -1914,3 +1914,52 @@ Jetzt `enableCORS = true` und `allowedHosts = ["localhost", "127.0.0.1", "*.loca
 - DNS-Rebinding (Host und Origin `evil.example.com`) → 403.
 - Handy-Fall `moritzs-macbook-pro.local` → 101; nackte LAN-IP → 403 (gewollt, sie wechselt).
 - Ungeprüft: echter Aufruf vom iPhone über den `.local`-Namen.
+
+## Audit 24.10.2026 — offene Befunde (vorgemerkt, nicht begonnen; Nutzer entscheidet)
+
+Gesamtbericht: Obsidian `Portfolio Lab/Audits/2026-10-24-audit.md` (Claude, 4 Agenten, und
+Codex; Stand `claude/forward-books` @ 73ffe72). **Behoben:** F1, F2, F24 (Forward-Bücher
+buchen nur vollständige, geschlossene Sitzungen, eine Transaktion je Buch und Sitzung), F4
+(Delisting-Regel, Version A2–F2) — alle auf diesem Branch; F3 (Split-Basis im Tagesupdate,
+8 Reihen im Bestand repariert) auf `claude/split-refetch`. Merge-Reihenfolge:
+`claude/price-update-fix` → `claude/split-refetch` → dieser Branch (vorher `main` einmergen).
+
+**Hoch**
+* F5 — NaN-Eröffnungskurs schreibt NaN dauerhaft ins Ledger (`forward/engine.py`
+  `equivalent`, `_value_at`; Schranke in `ledger.book` gegen nicht-endliche Beträge). 30 min.
+* F6 — TTM-Werte ohne eigenes Altersfilter: eine frische Aktienzahl macht einen Gewinn von
+  2019 „aktuell“ (`data/pit.py` `ttm_values`, `data_age_days` = Minimum). Beide Builder,
+  `CACHE_VERSION` erhöhen, Cache neu wärmen. 2–4 h.
+* F7 — Frame-Builder ungleich: nur `free.py` liefert `median_share_volume_60d`, ohne sie
+  entfällt die Plausibilitätsprüfung der Aktienzahl (Regel 5). 2–3 h.
+* F8 — Stufe A: verschwinden alle gehaltenen Titel, endet der Kalender mit ihnen, kein −30 %
+  (`backtest.py` `window_end`). 1–2 h.
+* F9 — CRSP: fehlender Eröffnungskurs = Schlusskurs (`data/crsp.py` COALESCE). Vor dem ersten
+  CRSP-Build beheben. 1 h.
+* F10 — SEC: Berichtswährung über die ganze Historie gewählt, ein späterer Wechsel löscht
+  frühere Fakten (`data/sec.py`). Erst messen, wie viele Filer wechseln (30 min), dann
+  entscheiden (Lösung 1–2 Tage).
+* F11 — Forward-Bücher lesen B, C und ALFRED aus dem Codex-Ordner (`forward/models.py`
+  `RESEARCH`); fehlt er, scheitern alle sechs. Nach `data/forward_inputs/` kopieren, je Buch
+  abfangen, App-Test auf `tmp_path`. 1–2 h.
+* F12 — `scripts/e_backtest.py` nennt den Survivorship-Bias nicht (R12). 30 min.
+
+**Mittel**
+* F13 Schreibsperre über Netzwerk/Training, App wartet bis 90 s (`tries` kurz in der App).
+* F14 Morgenjob verwirft stderr des Forward-Laufs.
+* F15 EDGAR 403 gilt als „keine Filings“ und wird nie wieder abgefragt.
+* F16 Butterfly-Lauf 01:30 Sydney liegt 01.11.–14.03. vor 09:45 New York → 02:00, neu
+  installieren. **Ab November relevant.**
+* F17 E: Split-Basis der Aktienausgabe zum falschen Datum (Regeländerung → E3).
+* F18 Butterfly: fehlender Long-Bid wird als 0 bewertet, Hinweis gelöscht.
+* F19 E: verpasstes Monatsende kostet einen Monat; Start mitten im Monat undokumentiert.
+* F20 Butterfly `pick_line` kann eine beendete Gattung wählen.
+* F21 Testlücken Engine (Dividende, FX, E/F, Lock) und Look-ahead-Grenze beim Training.
+* F22 `e_backtest.py`: fester Cache-Pfad, nach 7 Tagen stille flache Kurve.
+* F23 R23-Scanner: kaum deutsche Muster, `scripts/` nicht gescannt.
+
+**Niedrig** (gebündelt im Bericht): Doku veraltet (CLAUDE.md §10, Testzahlen, README ohne
+Forward-Bücher), EUR/USD eingefroren, Schemas ohne Migrationen, rohe Exception-Texte, „busy“
+für jeden Fehler, App-Tests ohne `app.error`, E long+short derselbe Titel, ewige „pending“,
+Kalender ohne verkürzte Tage, Verbindungsleck `pit_frame`, `connect(read_only)` legt Datei an,
+toter Zweig im Morgenbericht, Sprache/„WINNER“, 177 Ruff-Stilmeldungen.
