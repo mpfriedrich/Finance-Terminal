@@ -82,11 +82,10 @@ extra = sorted({r[0] for r in con.execute(
     [world.stored_symbols() + list(px.BENCHMARK_SERIES)]).fetchall()})
 extra_stats = px.fetch_into_store(con, extra, start, end) if extra else {"failed": []}
 # A split before today's window that was stored before restated histories were caught
-# (audit 24.10.2026 F3: seven of them) still shows as a jump by its factor: fetch those
-# histories again. Once repaired the check finds nothing and costs one query.
-broken = px.split_breaks(con)
-repair = px.refetch_history(con, broken, end) if broken else {"refetched": [],
-                                                              "failed": []}
+# (audit 24.10.2026 F3: eight of them) still shows as a jump by its factor: fetch those
+# histories again, and adjust here what Yahoo itself left unadjusted. Once repaired the
+# check finds nothing and costs one query (0.3 s).
+repair = px.repair_split_breaks(con, end)
 # Macro series (scripts/build_fred.py), refreshed only if they were stored once. A FRED
 # outage must not fail the price build, so each series is tried on its own.
 if con.execute("SELECT COUNT(*) FROM macro_series").fetchone()[0]:

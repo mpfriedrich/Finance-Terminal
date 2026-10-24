@@ -236,3 +236,31 @@ def test_a_split_broken_earlier_is_found_and_repaired(con):
     assert stats["refetched"] == ["KNDI"]
     assert set(adj(con, "KNDI")) == {1000.0}
     assert px.split_breaks(con) == []
+
+
+def test_a_split_yahoo_never_restated_is_adjusted_here(con):
+    # AIXI, DLXY, FRGT, GMEX, JL on 24.10.2026: Yahoo's own answer still had the closes
+    # before the reverse split unadjusted (AIXI 0.47 -> 3.26 on 08.09.2026), so fetching
+    # the history again changed nothing. The bars before the split are put on today's
+    # basis here, and close_raw comes out as traded.
+    store_history(con, "AIXI", HIST)
+    con.executemany(
+        "INSERT INTO prices (ticker, date, open, high, low, close, close_adj, volume, "
+        "split) VALUES ('AIXI', ?, 700, 700, 700, 700, 700, 100, ?)",
+        [(d, 1 / 7 if d == WINDOW[0] else None) for d in WINDOW])
+    unadjusted = pd.DataFrame([{"ticker": "AIXI", "date": d, "open": p, "high": p,
+                                "low": p, "close": p, "close_adj": p,
+                                "volume": 1000 if d in HIST else 100,
+                                "split": 1 / 7 if d == WINDOW[0] else float("nan")}
+                               for d in HIST + WINDOW
+                               for p in [100.0 if d in HIST else 700.0]])
+    stats = px.repair_split_breaks(con, END, download=yahoo_now(unadjusted))
+    assert stats["refetched"] == ["AIXI"] and stats["adjusted"] == ["AIXI"]
+    assert px.split_breaks(con) == []
+    assert adj(con, "AIXI") == [pytest.approx(700.0)] * len(HIST + WINDOW)
+    vol = dict(con.execute("SELECT date, volume FROM prices WHERE ticker='AIXI'").fetchall())
+    assert vol[HIST[0]] == 143                         # 1,000 old shares = 143 new
+    px.rebuild_raw_closes(con)
+    raw = dict(con.execute("SELECT date, close_raw FROM prices WHERE ticker='AIXI'"
+                           ).fetchall())
+    assert raw[HIST[0]] == pytest.approx(100.0) and raw[WINDOW[0]] == pytest.approx(700.0)

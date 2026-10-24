@@ -269,26 +269,67 @@ def refetch_history(con: duckdb.DuckDBPyConnection, tickers: list[str], end: dt.
     return stats
 
 
-def split_breaks(con: duckdb.DuckDBPyConnection) -> list[str]:
-    """Tickers whose stored close jumps by the split factor on a split day: the bars
-    before it were never restated (stored before _restated existed, or a refetch that
-    failed). A properly adjusted series barely moves at a split.
-
-    Only splits of at least 3-for-2 (or 1-for-1.45) count: below that a real day's move
-    and the factor cannot be told apart. Measured on market.duckdb, 24.10.2026: with a
-    25 % floor BEP (1.251, 30.07.2020, an 8 % move) and FWONA (1.424, 18.04.2016, a jump
-    that is in Yahoo's own history and comes back on every download) were flagged too."""
-    return [r[0] for r in con.execute(
+def _split_break_rows(con: duckdb.DuckDBPyConnection) -> list[tuple]:
+    """(ticker, split day, factor) where the stored close jumps by the factor."""
+    return con.execute(
         """
         WITH s AS (SELECT ticker, date, split FROM prices
                    WHERE split IS NOT NULL AND abs(ln(split)) > ln(1.45)),
         p AS (SELECT ticker, date, close,
                      LAG(close) OVER (PARTITION BY ticker ORDER BY date) AS before
               FROM prices WHERE ticker IN (SELECT ticker FROM s))
-        SELECT DISTINCT ticker FROM s JOIN p USING (ticker, date)
+        SELECT ticker, date, split FROM s JOIN p USING (ticker, date)
         WHERE before > 0 AND close > 0 AND abs(before / close / split - 1) < 0.15
-        ORDER BY 1
-        """).fetchall()]
+        ORDER BY 1, 2
+        """).fetchall()
+
+
+def split_breaks(con: duckdb.DuckDBPyConnection) -> list[str]:
+    """Tickers whose stored close jumps by the split factor on a split day: the bars
+    before it were never restated (stored before _restated existed, a refetch that
+    failed, or Yahoo's own history). A properly adjusted series barely moves at a split.
+
+    Only splits of at least 3-for-2 (or 1-for-1.45) count: below that a real day's move
+    and the factor cannot be told apart. Measured on market.duckdb, 24.10.2026: with a
+    25 % floor BEP (1.251, 30.07.2020, an 8 % move) and FWONA (1.424, 18.04.2016) were
+    flagged too."""
+    return sorted({r[0] for r in _split_break_rows(con)})
+
+
+def repair_split_breaks(con: duckdb.DuckDBPyConnection, end: dt.date,
+                        download=None) -> dict:
+    """Fetch every broken history again; where the break survives that, Yahoo itself
+    never restated it, and the bars before the split are put on today's basis here
+    (prices divided by the factor, volume multiplied by it), so close_raw comes out as
+    traded.
+
+    Measured 24.10.2026: of the eight breaks the refetch healed KNDI, VIVK and VTAK;
+    AIXI, DLXY, FRGT, GMEX and JL came back from Yahoo unadjusted (AIXI 0.47 before its
+    1-for-7 of 08.09.2026, 3.26 on the day). Should Yahoo restate one later, its
+    answer then agrees with ours and nothing changes."""
+    broken = split_breaks(con)
+    stats = refetch_history(con, broken, end, download=download) if broken else \
+        {"refetched": [], "failed": []}
+    stats["adjusted"] = []
+    rows = _split_break_rows(con)
+    if rows:
+        con.begin()
+        try:
+            for ticker, day, factor in rows:
+                con.execute(
+                    "UPDATE prices SET open = open / ?, high = high / ?, low = low / ?, "
+                    "close = close / ?, close_adj = close_adj / ?, "
+                    "volume = CAST(round(volume * ?) AS BIGINT) "
+                    "WHERE ticker = ? AND date < ?",
+                    [factor] * 6 + [ticker, day])
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+        stats["adjusted"] = sorted({r[0] for r in rows})
+        print(f"  split adjusted here (Yahoo's history was not): "
+              f"{' '.join(stats['adjusted'])}", flush=True)
+    return stats
 
 
 def _upsert(con: duckdb.DuckDBPyConnection, frame: pd.DataFrame,

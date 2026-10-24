@@ -1812,15 +1812,21 @@ Split-Faktors am Split-Tag: AIXI (08.09., 1:7), GMEX (28.09., 1:9), DLXY (28.09.
   Kurse vor dem Fenster, wird die ganze Historie dieses Tickers neu geladen (`refetch_history`,
   ab seinem ersten gespeicherten Tag). Kosten: ein Download je Ticker mit Split/Dividende im
   Fenster, bei Quartalsdividenden geschätzt einige Dutzend am Tag (nicht gemessen).
-* `split_breaks` findet alte Brüche (Sprung = Faktor am Split-Tag) und das Tagesupdate lädt sie
-  neu — so heilen die 8 bestehenden Fälle beim nächsten Lauf. 0,3 s auf dem vollen Bestand.
+* `split_breaks` findet alte Brüche (Sprung = Faktor am Split-Tag); `repair_split_breaks` lädt
+  sie neu und bereinigt, was danach noch bricht, selbst (Kurse vor dem Split ÷ Faktor, Volumen
+  × Faktor). Das Tagesupdate ruft es bei jedem Lauf; 0,3 s auf dem vollen Bestand.
+* **Ausgeführt 24.10.2026 auf dem echten Bestand** (mit Zustimmung): Neuladen heilte KNDI,
+  VIVK, VTAK. AIXI, DLXY, FRGT, GMEX, JL kamen von Yahoo selbst unbereinigt zurück (AIXI 0,47 $
+  vor dem 1:7 vom 08.09.2026, 3,26 $ am Tag) und wurden hier bereinigt; JL danach 3,17 $
+  bereinigt / 0,317 $ gehandelt am 09.12.2024, 3,13 $ am 10.12. `split_breaks` danach leer;
+  US-Hälfte des Welt-Bestands neu kopiert.
   Nur Splits ab 3:2 bzw. 1:1,45: darunter flaggte der Test BEP (1,251, echte 8-%-Bewegung) und
   FWONA (1,424, 2016, der Sprung steht so in Yahoos eigener Historie und käme bei jedem Download
   wieder).
 * Tests: `test_a_split_in_the_window_refetches_the_whole_history`,
   `test_a_dividend_in_the_window_refetches_the_whole_history`,
-  `test_an_unchanged_history_is_not_refetched`, `test_a_split_broken_earlier_is_found_and_repaired`
-  — alle vier rot ohne den Fix in `prices.py`.
+  `test_an_unchanged_history_is_not_refetched`, `test_a_split_broken_earlier_is_found_and_repaired`,
+  `test_a_split_yahoo_never_restated_is_adjusted_here` — alle rot ohne den Fix in `prices.py`.
 
 **Ungetestet / offen:** gegen echtes Yahoo nicht gelaufen (die Tests nutzen ein nachgebautes
 Yahoo). Liefert Yahoo für einen Ticker kürzere Historie als gespeichert, bleiben die älteren
