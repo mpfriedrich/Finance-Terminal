@@ -157,10 +157,13 @@ def test_years_mark_the_running_year_as_partial():
 # -- the whole engine on a synthetic market ----------------------------------------------
 
 N = 60
-SESSIONS = [d for d in pd.date_range("2024-01-02", "2026-10-23").date if cal.is_session(d)]
+SESSIONS = [d for d in pd.date_range("2024-01-02", "2026-11-06").date if cal.is_session(d)]
 
 
-def _market(path, last: dt.date, partial: dt.date | None = None):
+def _market(path, last: dt.date, partial: dt.date | None = None,
+            gone: dict | None = None):
+    """`gone` maps a ticker to its last day with a bar (a delisting)."""
+    gone = gone or {}
     rng = np.random.default_rng(7)
     rets = rng.normal(0.0004, 0.02, (len(SESSIONS), N))
     close = 50 * np.exp(np.cumsum(rets, axis=0))
@@ -179,7 +182,7 @@ def _market(path, last: dt.date, partial: dt.date | None = None):
             break
         names = range(3) if d == partial else range(N)
         rows += [(f"T{j:02d}", d, opens[i, j], close[i, j], close[i, j], close[i, j], 1e6)
-                 for j in names]
+                 for j in names if d <= gone.get(f"T{j:02d}", d)]
         rows.append(("EURUSD=X", d, 1.1, 1.1, 1.1, 1.1, 0))
     c.executemany("INSERT INTO prices VALUES (?,?,?,?,?,?,?)", rows)
     c.close()
@@ -413,6 +416,64 @@ def test_a_run_that_breaks_mid_session_leaves_nothing_half_booked(world, monkeyp
     en.run(world["path"], m2, live, now=at(THU, 21), log=lambda *_: None)
     m2.close()
     assert _state(world["path"]) == _clean_run(world, live)
+
+
+def test_a_share_without_bars_for_five_sessions_is_realised_as_delisted(world):
+    # Audit 24.10.2026 F4 (rule 3, R18): a share that stopped trading stayed open at its
+    # last mark forever, counted only as stale, its capital tied up.
+    live = FakeLive()
+    m1 = _market(world["dir"] / "m1.duckdb", WED)
+    en.run(world["path"], m1, live, now=at(WED, 20), log=lambda *_: None)
+    m1.close()
+    m2 = _market(world["dir"] / "m2.duckdb", THU)
+    en.run(world["path"], m2, live, now=at(THU, 20), log=lambda *_: None)
+    m2.close()
+    held = _read(world["path"], "SELECT * FROM fw_positions WHERE book_id='fw-d' AND "
+                                "status='open' ORDER BY side, ticker")
+    long_t = held[held.side == "long"].ticker.iloc[0]
+    short_t = held[held.side == "short"].ticker.iloc[0]
+    marks = held.set_index("ticker")["mark_usd"]
+    fifth = cal.sessions_from(cal.next_session(THU), 5)[-1]          # 29.10.2026
+    m3 = _market(world["dir"] / "m3.duckdb", fifth, gone={long_t: THU, short_t: THU})
+    en.run(world["path"], m3, live, now=at(cal.prev_session(fifth), 20),
+           log=lambda *_: None)
+    still = _read(world["path"], "SELECT status FROM fw_positions WHERE book_id='fw-d' "
+                                 f"AND ticker IN ('{long_t}', '{short_t}')")
+    assert set(still.status) == {"open"}                 # four sessions: maybe a halt
+    en.run(world["path"], m3, live, now=at(fifth, 20), log=lambda *_: None)
+    m3.close()
+    out = _read(world["path"], "SELECT * FROM fw_positions WHERE book_id='fw-d' AND "
+                               f"ticker IN ('{long_t}', '{short_t}')").set_index("ticker")
+    assert set(out.status) == {"closed"}
+    assert (pd.to_datetime(out.exit_session).dt.date == fifth).all()
+    # no CRSP return in this store: the long loses the assumed 30 % from its last mark,
+    # the short is closed at its last mark (no gain is assumed for it)
+    assert out.loc[long_t, "exit_usd"] == pytest.approx(0.7 * marks[long_t])
+    assert out.loc[short_t, "exit_usd"] == pytest.approx(marks[short_t])
+    orders = _read(world["path"], "SELECT ticker, status FROM fw_orders WHERE "
+                                  f"book_id='fw-d' AND exec_session='{fifth}'")
+    assert set(orders[orders.status == "delisted"].ticker) == {long_t, short_t}
+    for r in _read(world["path"], "SELECT * FROM fw_marks").itertuples():
+        assert r.equity == pytest.approx(r.cash + r.positions)
+
+
+def test_a_book_opened_under_an_older_version_moves_to_the_new_one(con, monkeypatch):
+    # The six real books opened on 22.10.2026 as A1-F1; the delisting rule is version 2.
+    old = [{**b, "version": b["code"] + "1"} for b in stg.BOOKS]
+    new = list(stg.BOOKS)
+    monkeypatch.setattr(stg, "BOOKS", old)
+    en.ensure_books(con, at(WED, 20).replace(tzinfo=None))
+    monkeypatch.setattr(stg, "BOOKS", new)
+    en.ensure_books(con, at(THU, 20).replace(tzinfo=None))
+    en.ensure_books(con, at(THU, 21).replace(tzinfo=None))   # once only
+    v = con.execute("SELECT book_id, version, note FROM fw_versions ORDER BY 1, 2"
+                    ).fetch_df()
+    assert list(v[v.book_id == "fw-a"].version) == ["A1", "A2"]
+    assert "Delisting" in v[v.version == "E2"].note.iloc[0]
+    assert set(con.execute("SELECT version FROM fw_books").fetch_df().version) == \
+        {b["version"] for b in new}
+    assert con.execute("SELECT COUNT(*) FROM fw_ledger WHERE kind='deposit'"
+                       ).fetchone()[0] == 6                # no second deposit
 
 
 def test_the_brief_names_every_book_and_says_it_is_paper(world):

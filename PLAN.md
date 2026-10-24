@@ -1728,6 +1728,24 @@ geprüft (nur Split-Verhältnis).
 * Keine Regeländerung an A–F (Ausführung zur Eröffnung, Kosten, Körbe unverändert), daher
   keine neue Version.
 
+**Version 2 aller Bücher (A2–F2, 24.10.2026): Delisting-Regel (Audit F4, Regel 3 / R18).**
+Vorher blieb eine Position, deren Aktie nicht mehr handelt, für immer offen zum letzten Kurs
+(nur als „stale“ gezählt, Kapital gebunden). Jetzt: keine Kurse an **5 Sitzungen in Folge**
+(alle vollständig, s. F1) → Abgang zur Sitzung, an der die fünfte fehlt, zum letzten Kurs ×
+(1 + echte Delisting-Rendite aus `delisting_returns`, wo vorhanden), sonst **Long −30 %,
+Short 0 %** (für den Short wird kein Gewinn angenommen — die vorsichtige Seite); Ausstiegsgebühr
+wie immer. Eigene Order mit Status „delisted“, Hinweis in der Tagesbewertung. Ein Handelsstopp
+> 5 Sitzungen wird damit ebenfalls geschlossen; kommt die Aktie zurück, wäre sie eine neue
+Position. `e_backtest.py` rechnete schon so (Long × 0,7, Short ohne Abschlag).
+Warum eine neue Version: Es ist eine Regeländerung, also nach den eigenen Regeln mit eigenem
+Beobachtungsabschnitt. Da noch keine Sitzung gebucht ist, ist der Abschnitt von Version 1
+leer; die bestehenden Bücher wechseln beim nächsten Lauf (`fw_versions` bekommt A2 … F2 mit
+Begründung, keine zweite Einzahlung). Tests:
+`test_a_share_without_bars_for_five_sessions_is_realised_as_delisted` (nach 4 Sitzungen noch
+offen, nach 5 geschlossen; Long 0,7 × letzter Kurs, Short = letzter Kurs),
+`test_a_book_opened_under_an_older_version_moves_to_the_new_one` — beide rot ohne den Fix.
+Ungetestet: der freie Bestand hat keine `delisting_returns`, dort greift immer die Annahme.
+
 ## Geplant: Hebel und Derivate (vorgemerkt am 25.09.2026, noch nicht begonnen)
 
 Auf Frage des Nutzers („gibt es die Option für Derivate und Leverage?“) nur in den Plan

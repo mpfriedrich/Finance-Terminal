@@ -2,6 +2,8 @@
 
 Fixed on 22.10.2026 before the first book opened. A change of rules gets a new version
 number and its own observation period (fw_versions); nothing here is tuned afterwards.
+Version 2 (24.10.2026, before any session was booked) adds the delisting rule of the
+audit's F4 to every book; nothing else changed.
 """
 
 from __future__ import annotations
@@ -16,36 +18,42 @@ RARE = {"jump_short": ("short", "ret5", 2.92252964071333),
         "vol_short": ("short", "vol60", 1.999262392887066),
         "drop_long": ("long", "ret1", -0.4680557667480151)}
 
+# What each version number changed, written into fw_versions when a book moves to it.
+VERSION_NOTES = {
+    "2": "Delisting-Regel (Audit 24.10.2026 F4): keine Kurse an 5 vollständigen Sitzungen "
+         "→ Abgang realisiert, echte Delisting-Rendite sonst Long −30 %, Short 0 %",
+}
+
 BOOKS = [
-    {"code": "A", "id": "fw-a", "kind": "model", "variant": "v29", "version": "A1",
+    {"code": "A", "id": "fw-a", "kind": "model", "variant": "v29", "version": "A2",
      "name": "A — CURRENT · Makro & Peers · 10 Jahre rollierend",
      "description": "Ridge (Alpha 1) auf 23 Kurs-/Marktmerkmalen, Peers, Beschäftigung, "
                     "Inflation und Fed-Zinsen (Faktorgruppe v29, ohne Gold). Trainiert auf "
                     "den zehn Jahren vor dem Start, jährlich rollierend neu. Vorab "
                     "festgelegte Hypothese, kein nachgewiesenes Optimum."},
-    {"code": "B", "id": "fw-b", "kind": "model", "variant": "frozen", "version": "B1",
+    {"code": "B", "id": "fw-b", "kind": "model", "variant": "frozen", "version": "B2",
      "name": "B — LEGACY 2025 · Eingefrorenes Kursmodell",
      "description": "Gespeichertes Ridge-Modell (Alpha 1) auf 23 Kurs- und Marktmerkmalen, "
                     "trainiert bis Ende 2024. Koeffizienten, Reihenfolge, Skalierung und "
                     "Clipping exakt übernommen; nie neu trainiert."},
-    {"code": "C", "id": "fw-c", "kind": "model", "variant": "v13", "version": "C1",
+    {"code": "C", "id": "fw-c", "kind": "model", "variant": "v13", "version": "C2",
      "name": "C — RESEARCH WINNER · v13 · 10 Jahre mit Retraining",
      "description": "Ridge (Alpha 1) auf 23 Kurs-/Marktmerkmalen, Peers, Beschäftigung und "
                     "Inflation (v13). Start mit der Jahresversion 2026 aus dem Research "
                     "(Training 2016–2025), jedes Jahr im Januar neu. Rückblickend als "
                     "stärkste Gruppe ausgewählt — nicht unabhängig bestätigt."},
-    {"code": "D", "id": "fw-d", "kind": "rule_d", "variant": "d", "version": "D1",
+    {"code": "D", "id": "fw-d", "kind": "rule_d", "variant": "d", "version": "D2",
      "name": "D — CODEX CHOICE · Momentum & Peer-Reversion",
      "description": "Feste Regel: 0,5 × 12–1-Momentum + 0,3 × 6–1-Momentum − 0,2 × relative "
                     "20-Tage-Peer-Bewegung, je durch die 60-Tage-Volatilität geteilt, "
                     "standardisiert und auf ±3 begrenzt. Die spätere historische Prüfung "
                     "war schwach; die Gewichte bleiben unverändert."},
-    {"code": "E", "id": "fw-e", "kind": "rule_e", "variant": "e", "version": "E1",
+    {"code": "E", "id": "fw-e", "kind": "rule_e", "variant": "e", "version": "E2",
      "name": "E — CLAUDE CHOICE · Momentum, Profitabilität, Kapitaldisziplin",
      "description": "Monatlicher Long/Short-Korb großer US-Aktien nach dem Mittel dreier "
                     "Ränge: 12–1-Momentum, Bruttogewinn je Vermögen und wenig neue Aktien. "
                     "Puffer gegen Umschlag. Begründung und Regeln in PLAN.md (E1)."},
-    {"code": "F", "id": "fw-f", "kind": "rare", "variant": "f", "version": "F1",
+    {"code": "F", "id": "fw-f", "kind": "rare", "variant": "f", "version": "F2",
      "name": "F — CODEX EXTREME REVERSION · 75 %",
      "description": "Experimentell und rückblickend entwickelt. Short nach ≥292,25 % in fünf "
                     "Tagen oder 60-Tage-Volatilität ≥199,93 % (≤200 %), Long nach ≥46,81 % "

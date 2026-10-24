@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from .. import filing_butterfly as cal
+from ..data import history
 from . import data as dd
 from . import features as fx
 from . import ledger as lg
@@ -83,10 +84,18 @@ class Live:
 
 def ensure_books(con, now: dt.datetime) -> None:
     for b in stg.BOOKS:
-        if con.execute("SELECT 1 FROM fw_books WHERE id=?", [b["id"]]).fetchone():
+        config = {k: v for k, v in b.items() if k not in ("name", "description")}
+        have = con.execute("SELECT version FROM fw_books WHERE id=?", [b["id"]]).fetchone()
+        if have:
+            if have[0] != b["version"]:
+                # A new rule version starts its own observation period from here.
+                con.execute("UPDATE fw_books SET version=?, config_json=? WHERE id=?",
+                            [b["version"], json.dumps(config), b["id"]])
+                con.execute("INSERT INTO fw_versions VALUES (?,?,?,?,?)",
+                            [b["id"], b["version"], now, json.dumps(config),
+                             stg.VERSION_NOTES.get(b["version"][1:], "neue Version")])
             continue
         first = first_session_after(now)
-        config = {k: v for k, v in b.items() if k not in ("name", "description")}
         # One transaction: a book without its deposit would start with no cash.
         con.execute("BEGIN")
         try:
@@ -445,6 +454,63 @@ def fill_monthly(con, market, book_id, sig, S, px, fx_open, now) -> str:
     return f"{len(new)} neue Positionen" + (" (verkleinert)" if scale < 1 else "")
 
 
+# A share with no bar on this many complete sessions in a row has left the market (rule
+# 3, R18). Fixed with the rule versions A2-F2 on 24.10.2026, before any session was
+# booked. Five is a week: a halt shorter than that keeps the position; a longer one is
+# closed here and would be a new position if it came back.
+GONE_AFTER = 5
+# The return assumed for a long when the store knows no real delisting return (R18,
+# Settings.delisting_return). A short is closed at its last mark: no gain is assumed
+# for it, which is the conservative side for the book.
+ASSUMED_DELISTING_RETURN = -0.30
+
+
+def _sessions_without_bar(market, ticker: str, S: dt.date) -> int:
+    last = market.execute("SELECT MAX(date) FROM prices WHERE ticker = ? AND close > 0 "
+                          "AND date <= ?", [ticker, S]).fetchone()[0]
+    if last is None:
+        return GONE_AFTER
+    n, d = 0, last
+    while n < GONE_AFTER:
+        d = cal.next_session(d)
+        if d > S:
+            break
+        n += 1
+    return n
+
+
+def realise_delisted(con, market, book_id, S, px, fx_close, now) -> int:
+    """Close, at session S, every open position whose share has had no bar on the last
+    GONE_AFTER sessions (all of them complete: the run books nothing else). The price is
+    the last mark on the entry basis times one plus the real delisting return where the
+    store has one (CRSP), else the assumed -30 % for a long and 0 % for a short; the
+    exit fee is charged as for any close. Audit 24.10.2026 F4: such a position used to
+    stay open at its last mark forever, counted only as stale."""
+    gone = []
+    for p in lg.open_positions(con, book_id).to_dict("records"):
+        if p["ticker"] in px.index:
+            continue
+        if _sessions_without_bar(market, p["ticker"], S) >= GONE_AFTER:
+            gone.append(p)
+    if not gone:
+        return 0
+    real = history.delisting_returns(market, [p["ticker"] for p in gone])
+    for p in gone:
+        r = real.get(p["ticker"])
+        if r is None:
+            r = ASSUMED_DELISTING_RETURN if p["side"] == "long" else 0.0
+            how = "angenommen"
+        else:
+            how = "Delisting-Rendite der Daten"
+        price = p["mark_usd"] * (1 + r)
+        reason = (f"keine Kurse seit {GONE_AFTER} Sitzungen: als Abgang realisiert, "
+                  f"{r:+.0%} ({how}) auf den letzten Kurs")
+        lg.close_position(con, p, now, S, price, fx_close, reason)
+        _order(con, book_id, None, now, S, p["ticker"], p["side"], "close", p["rule"],
+               "delisted", reason, price=price, fx_rate=fx_close, pid=p["id"])
+    return len(gone)
+
+
 def process_session(con, market, S: dt.date, now, notes) -> bool:
     """Book session S for every book. False when the EUR/USD rate is missing or a book
     failed; the run then stops here, so no book skips a session another one booked.
@@ -483,6 +549,7 @@ def _book_session(con, market, b: dict, S: dt.date, px, fx_open, fx_close, now) 
     if last is not None and S <= last:
         return
     lg.accrue_borrow(con, bid, now, last or S, S, S)
+    gone = realise_delisted(con, market, bid, S, px, fx_close, now)
     prev_eq = con.execute("SELECT equity FROM fw_marks WHERE book_id=? ORDER BY "
                           "session DESC LIMIT 1", [bid]).fetchone()
     prev_eq = float(prev_eq[0]) if prev_eq else CAPITAL
@@ -511,7 +578,8 @@ def _book_session(con, market, b: dict, S: dt.date, px, fx_open, fx_close, now) 
         eq = equivalent(market, p, px["close_adj"].get(p["ticker"]))
         if eq:
             prices[p["id"]] = eq
-    lg.mark(con, bid, now, S, fx_close, prices)
+    lg.mark(con, bid, now, S, fx_close, prices,
+            note=f"{gone} Abgang/Abgänge realisiert" if gone else "")
 
 
 def benchmark(con, book_id: str) -> pd.DataFrame:
