@@ -81,6 +81,12 @@ extra = sorted({r[0] for r in con.execute(
     "OR ticker IN (SELECT UNNEST(?))",
     [world.stored_symbols() + list(px.BENCHMARK_SERIES)]).fetchall()})
 extra_stats = px.fetch_into_store(con, extra, start, end) if extra else {"failed": []}
+# A split before today's window that was stored before restated histories were caught
+# (audit 24.10.2026 F3: seven of them) still shows as a jump by its factor: fetch those
+# histories again. Once repaired the check finds nothing and costs one query.
+broken = px.split_breaks(con)
+repair = px.refetch_history(con, broken, end) if broken else {"refetched": [],
+                                                              "failed": []}
 # Macro series (scripts/build_fred.py), refreshed only if they were stored once. A FRED
 # outage must not fail the price build, so each series is tried on its own.
 if con.execute("SELECT COUNT(*) FROM macro_series").fetchone()[0]:
@@ -109,8 +115,14 @@ history.refresh_price_windows(con)
 new_last = px.last_complete_session(con)
 rows = con.execute("SELECT COUNT(*) FROM prices").fetchone()[0]
 
-no_data, failed = stats.pop("no_data"), stats.pop("failed") + extra_stats["failed"]
+no_data = stats.pop("no_data")
+failed = stats.pop("failed") + extra_stats["failed"] + repair["failed"]
+refetched = sorted(set(stats.pop("refetched") + extra_stats.get("refetched", [])
+                       + repair["refetched"]))
 print(f"\nstats: {stats}", flush=True)
+# A split or dividend restates a whole history; those were downloaded again in full.
+print(f"histories fetched again after a split or dividend: {len(refetched)}"
+      f"{': ' + ' '.join(refetched[:40]) if refetched else ''}", flush=True)
 # A ticker without bars is a note, not a failure: halted, delisted or renamed.
 print(f"no bars in the window for {len(no_data)} tickers: {' '.join(no_data[:40])}"
       f"{' …' if len(no_data) > 40 else ''}", flush=True)

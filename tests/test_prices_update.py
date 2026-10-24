@@ -135,3 +135,104 @@ def test_the_morning_job_reports_the_end_of_stderr(monkeypatch):
         a, 1, "", noise + "prices: 1 chunk(s) failed, all others stored: BAD..BAD"))
     note = job.refresh_prices()
     assert note.startswith("failed:") and note.endswith("BAD..BAD")
+
+
+# -- a split or a dividend changes the whole history (audit 24.10.2026 F3) --------------
+
+HIST = [D(2026, 10, d) for d in (1, 2, 5, 6, 7, 8, 9, 12, 13, 14)]
+WINDOW = [D(2026, 10, d) for d in (15, 16, 19, 20, 21)]
+
+
+def adjusted_yahoo(ticker, split_day=None, ratio=1.0, dividend_day=None, factor=1.0):
+    """Yahoo's answer for every day, on today's basis: closes before a split divided by
+    it, adjusted closes before an ex-dividend day times its factor. Traded price 100."""
+    rows = []
+    for d in HIST + WINDOW:
+        close = 100 / ratio if split_day else 100.0
+        adj = close * (factor if dividend_day and d < dividend_day else 1.0)
+        rows.append({"ticker": ticker, "date": d, "open": close, "high": close,
+                     "low": close, "close": close, "close_adj": adj, "volume": 1000,
+                     "split": ratio if d == split_day else float("nan")})
+    return pd.DataFrame(rows)
+
+
+def yahoo_now(answer):
+    """The same answer, cut to whatever window is asked for, the way Yahoo serves it."""
+    calls = []
+
+    def download(tickers, start, end):
+        calls.append((list(tickers), start))
+        got = answer[answer.ticker.isin(tickers) & (answer.date >= start)
+                     & (answer.date <= end)]
+        return got.reset_index(drop=True)
+    download.calls = calls
+    return download
+
+
+def store_history(con, ticker, days=tuple(HIST + WINDOW[:2])):
+    """The bars as fetched day by day before anything happened: traded price 100, up to
+    the first two days of the window (the overlap the increment fetches again)."""
+    con.executemany(
+        "INSERT INTO prices (ticker, date, open, close, close_adj, volume) "
+        "VALUES (?, ?, 100, 100, 100, 1000)", [(ticker, d) for d in days])
+
+
+def adj(con, ticker):
+    return [r[1] for r in con.execute(
+        "SELECT date, close_adj FROM prices WHERE ticker = ? ORDER BY date",
+        [ticker]).fetchall()]
+
+
+def test_a_split_in_the_window_refetches_the_whole_history(con):
+    # VTAK 05.10.2026, 1-for-10: the increment replaced only its five days of overlap,
+    # the older bars stayed at the old basis, and the series fell to a tenth overnight
+    # (seven such breaks measured in market.duckdb on 24.10.2026).
+    store_history(con, "VTAK")
+    answer = adjusted_yahoo("VTAK", split_day=D(2026, 10, 19), ratio=0.1)
+    download = yahoo_now(answer)
+    stats = px.fetch_into_store(con, ["VTAK"], START, END, download=download)
+    assert stats["refetched"] == ["VTAK"]
+    assert set(adj(con, "VTAK")) == {1000.0}          # one basis, no jump anywhere
+    assert download.calls[-1] == (["VTAK"], HIST[0])  # from its first stored bar
+    px.rebuild_raw_closes(con)
+    raw = dict(con.execute("SELECT date, close_raw FROM prices WHERE ticker = 'VTAK'"
+                           ).fetchall())
+    assert [raw[d] for d in HIST] == [pytest.approx(100.0)] * len(HIST)  # as traded
+    assert raw[D(2026, 10, 19)] == pytest.approx(1000.0)   # one new share for ten old
+
+
+def test_a_dividend_in_the_window_refetches_the_whole_history(con):
+    # An ex-dividend day rescales every adjusted close before it; without the refetch
+    # the stored ones stayed unscaled and the dividend vanished from total return.
+    store_history(con, "DIV")
+    answer = adjusted_yahoo("DIV", dividend_day=D(2026, 10, 19), factor=0.99)
+    stats = px.fetch_into_store(con, ["DIV"], START, END, download=yahoo_now(answer))
+    assert stats["refetched"] == ["DIV"]
+    a = adj(con, "DIV")
+    assert a[:len(HIST) + 2] == [pytest.approx(99.0)] * (len(HIST) + 2)
+    assert a[len(HIST) + 2:] == [100.0] * 3
+
+
+def test_an_unchanged_history_is_not_refetched(con):
+    store_history(con, "AAA")
+    download = yahoo_now(adjusted_yahoo("AAA"))
+    stats = px.fetch_into_store(con, ["AAA"], START, END, download=download)
+    assert stats["refetched"] == []
+    assert len(download.calls) == 1
+
+
+def test_a_split_broken_earlier_is_found_and_repaired(con):
+    # The seven already in the store: their split lies before today's window, so only
+    # the stored jump at the split shows them.
+    store_history(con, "KNDI", HIST)
+    con.executemany(
+        "INSERT INTO prices (ticker, date, open, close, close_adj, volume, split) "
+        "VALUES ('KNDI', ?, 1000, 1000, 1000, 1000, ?)",
+        [(d, 0.1 if d == WINDOW[0] else None) for d in WINDOW])
+    store_history(con, "OK", HIST)                     # no split, no jump
+    assert px.split_breaks(con) == ["KNDI"]
+    answer = adjusted_yahoo("KNDI", split_day=WINDOW[0], ratio=0.1)
+    stats = px.refetch_history(con, px.split_breaks(con), END, download=yahoo_now(answer))
+    assert stats["refetched"] == ["KNDI"]
+    assert set(adj(con, "KNDI")) == {1000.0}
+    assert px.split_breaks(con) == []
