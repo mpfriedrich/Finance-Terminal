@@ -227,6 +227,14 @@ def ttm_values(con: duckdb.DuckDBPyConnection, asof: dt.date,
       "quarters"   — four contiguous ~90-day spans summed.
     A filer that yields neither is absent from the result and will be excluded from any
     screen that needs the metric — counted, never silently dropped.
+
+    The newest span is chosen first and only then aged (audit 24.10.2026 F6): a
+    figure filed more than MAX_FACT_AGE_DAYS before `asof` keeps its row, marked
+    `stale`, with value NaN. Without this a 2019 annual profit stayed "the" earnings of a
+    company whose fresh share count made the filer look current (`data_age_days` is the
+    youngest metric's age), and its P/E was computed on it (R14). Aging after selection,
+    not before, is the same order as share_counts and instant_values: filtering first
+    would let an older span step in for the stale newest one.
     """
     df = _visible(con, asof)
     if df.empty:
@@ -283,7 +291,19 @@ def ttm_values(con: duckdb.DuckDBPyConnection, asof: dt.date,
             .last()
         )
     out["age_days"] = (pd.Timestamp(asof) - pd.to_datetime(out["filed"])).dt.days
+    out["stale"] = out["age_days"] > MAX_FACT_AGE_DAYS
+    out["value"] = out["value"].where(~out["stale"])
     return out.reset_index(drop=True)
+
+
+def stale_ttm_fields(ttm: pd.DataFrame) -> pd.Series:
+    """cik -> the `<metric>_ttm` fields that were too old to use, comma-joined and
+    sorted, so the screen can say why a ratio is missing (audit 24.10.2026 F6)."""
+    if ttm.empty or "stale" not in ttm.columns or not ttm["stale"].any():
+        return pd.Series(dtype=object, name="stale_ttm")
+    gone = ttm[ttm["stale"]]
+    return (gone.assign(field=gone.metric + "_ttm").groupby("cik")["field"]
+                .agg(lambda f: ",".join(sorted(f))).rename("stale_ttm"))
 
 
 FOREIGN_FORMS = ("20-F", "40-F")
@@ -377,7 +397,10 @@ def fundamentals_wide(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataF
     if not shares.empty:
         frames.append(shares.assign(field=shares.metric))
     if not ttm.empty:
-        frames.append(ttm.assign(field=ttm.metric + "_ttm"))
+        # Stale TTM rows carry NaN and stay out of the pivot and of the age: they are
+        # reported in `stale_ttm` instead (F6).
+        fresh = ttm[~ttm["stale"]]
+        frames.append(fresh.assign(field=fresh.metric + "_ttm"))
     if not frames:
         return pd.DataFrame()
     long = pd.concat(frames, ignore_index=True)
@@ -388,7 +411,7 @@ def fundamentals_wide(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataF
     # whole filer down.
     ages = long.groupby("cik")["age_days"].min().rename("data_age_days")
     methods = (
-        ttm.assign(field=ttm.metric + "_method")
+        ttm[~ttm["stale"]].assign(field=ttm.metric + "_method")
         .pivot_table(index="cik", columns="field", values="method", aggfunc="last")
         if not ttm.empty
         else pd.DataFrame()
@@ -396,10 +419,14 @@ def fundamentals_wide(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataF
     out = wide.join(ages)
     if not methods.empty:
         out = out.join(methods)
+    stale = stale_ttm_fields(ttm)
+    if not stale.empty:
+        out = out.join(stale)
     # Revenue a year earlier, AS IT WAS KNOWN a year earlier, for growth. Both years are
     # converted at the same rate below, so growth is the company's, not the currency's.
     prior = ttm_values(con, asof - dt.timedelta(days=365), metrics=("revenue",))
     if not prior.empty:
+        # Aged against its own date like the current figure; a stale prior is NaN.
         out = out.join(prior.set_index("cik")["value"].rename("revenue_ttm_prior"))
     out = to_usd(out.reset_index(), con, asof)
     # Which filers are foreign private issuers, by the form of their latest filing:

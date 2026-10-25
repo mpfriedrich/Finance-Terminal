@@ -137,13 +137,28 @@ def wide_from_long(facts: pd.DataFrame, asof: dt.date) -> pd.DataFrame:
     MIN age, not max: the question the freshness floor asks is "has this company reported
     recently", so the most recent filing decides. Taking the oldest metric's age instead
     marks a company stale because one slow-moving annual figure lags (PLAN.md R14).
+
+    A trailing-twelve-month figure (`*_ttm`) older than pit.MAX_FACT_AGE_DAYS is dropped
+    to NaN and named in `stale_ttm`, exactly as pit.fundamentals_wide does for the SQL
+    sources, so a fresh share count cannot make a years-old profit current (audit
+    24.10.2026 F6, rule 5). The newest figure is chosen first, then aged.
     """
+    from .pit import MAX_FACT_AGE_DAYS
+
     if facts.empty:
         return pd.DataFrame(columns=["cik", "data_age_days"])
-    wide = facts.pivot_table(index="cik", columns="metric", values="value", aggfunc="last")
-    age = (pd.to_datetime(asof) - pd.to_datetime(facts["filed"])).dt.days
-    ages = age.groupby(facts["cik"]).min().rename("data_age_days")
-    return wide.join(ages).reset_index()
+    facts = facts.assign(
+        age_days=(pd.to_datetime(asof) - pd.to_datetime(facts["filed"])).dt.days)
+    ages = facts.groupby("cik")["age_days"].min().rename("data_age_days")
+    latest = facts.dropna(subset=["value"]).groupby(["cik", "metric"]).last().reset_index()
+    stale = latest.metric.str.endswith("_ttm") & (latest.age_days > MAX_FACT_AGE_DAYS)
+    wide = latest[~stale].pivot_table(index="cik", columns="metric", values="value",
+                                      aggfunc="last")
+    out = pd.DataFrame(index=pd.Index(sorted(facts.cik.unique()), name="cik")).join(wide)
+    if stale.any():
+        out = out.join(latest[stale].groupby("cik")["metric"]
+                       .agg(lambda f: ",".join(sorted(f))).rename("stale_ttm"))
+    return out.join(ages).reset_index()
 
 
 def build_screening_frame(
