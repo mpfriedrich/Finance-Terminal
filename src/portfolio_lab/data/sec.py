@@ -231,9 +231,17 @@ def extract_rows(doc: dict) -> list[tuple]:
     if cik is None or not facts:
         return []
 
-    currency = reporting_currency(facts)
+    # The currency is chosen PER FILING, not over the filer's whole history (audit
+    # 24.10.2026 F10). The whole-history majority dropped every fact in any other
+    # currency, so a filer that later switched from USD to EUR lost its earlier USD
+    # facts and a 2020 screen saw less than was known in 2020. Measured on the SEC
+    # archive of 21.09.2026: 154 of 16,978 filers switch currency between filings, and
+    # 17,466 monetary entries were lost that way. Within one filing the majority still
+    # decides, which drops convenience translations (31,450 entries).
+    currencies = filing_currencies(facts)
 
-    # (metric, period_start, period_end, value) -> (filed, accession, tag, rank, form)
+    # (metric, period_start, period_end, value, currency)
+    #   -> (filed, accession, tag, rank, form)
     best: dict[tuple, tuple] = {}
 
     for taxonomy, tags in facts.items():
@@ -243,14 +251,14 @@ def extract_rows(doc: dict) -> list[tuple]:
                 hit = _TAG_LOOKUP.get((taxonomy, tag, kind)) if kind else None
                 if hit is None:
                     continue
-                # One currency per filer. Some foreign filers also tag convenience
-                # translations of the same figure in USD; keeping both would put two
-                # values for one period side by side, in different units.
-                if kind == "money" and unit != currency:
-                    continue
                 metric, rank = hit
                 for e in entries:
                     if e.get("form") not in ACCEPTED_FORMS:
+                        continue
+                    # One currency per filing. Some foreign filers also tag convenience
+                    # translations of the same figure in USD; keeping both would put two
+                    # values for one period side by side, in different units.
+                    if kind == "money" and unit != currencies.get(e.get("accn") or ""):
                         continue
                     filed = _parse_date(e.get("filed"))
                     end = _parse_date(e.get("end"))
@@ -262,7 +270,8 @@ def extract_rows(doc: dict) -> list[tuple]:
                     start = _parse_date(e.get("start"))
                     if metric in DURATION_METRICS and start is None:
                         continue
-                    key = (metric, start, end, float(val))
+                    key = (metric, start, end, float(val),
+                           None if kind != "money" else unit)
                     prev = best.get(key)
                     if prev is None or filed < prev[0]:
                         best[key] = (filed, e.get("accn") or "", tag, rank,
@@ -270,17 +279,32 @@ def extract_rows(doc: dict) -> list[tuple]:
 
     # Where two candidate tags produced the same period, keep the higher-priority tag.
     by_period: dict[tuple, tuple] = {}
-    for (metric, start, end, val), (filed, accn, tag, rank, form) in best.items():
+    for (metric, start, end, val, unit), (filed, accn, tag, rank, form) in best.items():
         k = (metric, start, end, filed)
         prev = by_period.get(k)
         if prev is None or rank < prev[3]:
-            by_period[k] = (val, accn, tag, rank, form)
+            by_period[k] = (val, accn, tag, rank, form, unit)
 
     return [
-        (int(cik), metric, val, start, end, filed, accn, tag, rank,
-         None if metric == "shares_outstanding" else currency, form)
-        for (metric, start, end, filed), (val, accn, tag, rank, form) in by_period.items()
+        (int(cik), metric, val, start, end, filed, accn, tag, rank, unit, form)
+        for (metric, start, end, filed), (val, accn, tag, rank, form, unit)
+        in by_period.items()
     ]
+
+
+def filing_currencies(facts: dict) -> dict[str, str]:
+    """accession -> the currency most of that filing's tracked monetary facts use
+    (ties broken alphabetically, so the choice is stable)."""
+    counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for taxonomy, tags in facts.items():
+        for tag, payload in tags.items():
+            for unit, entries in (payload.get("units") or {}).items():
+                if _unit_kind(unit) != "money" or (taxonomy, tag, "money") not in _TAG_LOOKUP:
+                    continue
+                for e in entries:
+                    if e.get("form") in ACCEPTED_FORMS:
+                        counts[e.get("accn") or ""][unit] += 1
+    return {accn: max(sorted(c), key=lambda u: c[u]) for accn, c in counts.items()}
 
 
 def reporting_currency(facts: dict) -> str | None:

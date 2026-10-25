@@ -62,7 +62,7 @@ def _visible(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFrame:
     return con.execute(
         f"""
         WITH visible AS (
-            SELECT cik, metric, value, period_start, period_end, filed, tag_rank,
+            SELECT cik, metric, value, period_start, period_end, filed, tag_rank, currency,
                    ROW_NUMBER() OVER (
                        PARTITION BY cik, metric, period_end, {_SPAN_BUCKET}
                        ORDER BY filed ASC, tag_rank ASC, period_start ASC
@@ -70,7 +70,7 @@ def _visible(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFrame:
             FROM fundamentals
             WHERE filed <= ?
         )
-        SELECT cik, metric, value, period_start, period_end, filed
+        SELECT cik, metric, value, period_start, period_end, filed, currency
         FROM visible WHERE rn = 1
         """,
         [asof],
@@ -172,7 +172,7 @@ def instant_values(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFram
         WITH candidates AS (
             -- First filing over EVERYTHING visible, then the age limit; see share_counts.
             SELECT * FROM (
-                SELECT cik, metric, value, period_end, filed, tag_rank,
+                SELECT cik, metric, value, period_end, filed, tag_rank, currency,
                        MIN(filed) OVER (PARTITION BY cik, metric, period_end) AS first_date
                 FROM fundamentals
                 WHERE filed <= ? AND metric IN (SELECT UNNEST(?))
@@ -184,7 +184,7 @@ def instant_values(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFram
             -- The first filing of a period speaks for it; the tag preference below only
             -- chooses among the tags THAT filing used. Ranking tags across filings let
             -- an amendment under a better tag displace the original (R13).
-            SELECT cik, metric, value, period_end, filed, tag_rank,
+            SELECT cik, metric, value, period_end, filed, tag_rank, currency,
                    ROW_NUMBER() OVER (
                        PARTITION BY cik, metric, period_end, tag_rank
                        ORDER BY filed ASC
@@ -201,14 +201,14 @@ def instant_values(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFram
             WHERE date_diff('day', period_end, newest_period) <= ?
         ),
         best AS (
-            SELECT cik, metric, value, period_end, filed,
+            SELECT cik, metric, value, period_end, filed, currency,
                    ROW_NUMBER() OVER (
                        PARTITION BY cik, metric
                        ORDER BY tag_rank ASC, period_end DESC, filed ASC
                    ) AS rn2
             FROM recent
         )
-        SELECT cik, metric, value, period_end, filed FROM best WHERE rn2 = 1
+        SELECT cik, metric, value, period_end, filed, currency FROM best WHERE rn2 = 1
         """,
         [asof, list(INSTANT_METRICS), asof, MAX_FACT_AGE_DAYS, TAG_PREFERENCE_WINDOW_DAYS],
     ).fetch_df()
@@ -266,6 +266,11 @@ def ttm_values(con: duckdb.DuckDBPyConnection, asof: dt.date,
             )
             if any(abs(pd.Timedelta(g).days) > 10 for g in gaps):
                 continue
+            # Four quarters in two currencies cannot be summed before conversion, and
+            # converting each at the screen date would be the same as summing them in
+            # one: so a mixed roll is simply not a TTM figure (audit 24.10.2026 F10).
+            if grp.currency.fillna("").nunique() > 1:
+                continue
             rows.append(
                 {
                     "cik": cik,
@@ -273,12 +278,13 @@ def ttm_values(con: duckdb.DuckDBPyConnection, asof: dt.date,
                     "value": float(grp.value.sum()),
                     "period_end": grp.period_end.iloc[-1],
                     "filed": grp.filed.max(),
+                    "currency": grp.currency.iloc[-1],
                     "method": "quarters",
                 }
             )
     quarterly = pd.DataFrame(rows)
 
-    cols = ["cik", "metric", "value", "period_end", "filed", "method"]
+    cols = ["cik", "metric", "value", "period_end", "filed", "currency", "method"]
     annual = annual[cols]
     if quarterly.empty:
         out = annual
@@ -362,27 +368,44 @@ def fx_to_usd(con: duckdb.DuckDBPyConnection, currencies, asof: dt.date) -> dict
     return rates
 
 
-def to_usd(wide: pd.DataFrame, con: duckdb.DuckDBPyConnection,
-           asof: dt.date) -> pd.DataFrame:
-    """Convert every amount to USD at the rate of the screen date.
+def to_usd(long: pd.DataFrame, con: duckdb.DuckDBPyConnection,
+           asof: dt.date) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Convert every amount to USD at the rate of the screen date, FACT BY FACT.
 
     The rate of the screen date, not of the filing date: a balance sheet in euros is
     worth what those euros buy in dollars on the day the screen compares it with a
     dollar price — and it is the only rate an investor on that day could have used.
-    A filer whose currency has no rate keeps no amounts and is flagged, never mixed.
+
+    Per fact, not per filer (audit 24.10.2026 F10): a filer that switched from USD to EUR
+    keeps its earlier USD facts, so on one screen date its book value may be in euros and
+    a still-current TTM figure in dollars. Converting both at one filer-wide currency
+    would read dollars as euros. A fact without a currency (stores built before the
+    column existed) takes the filer's latest currency, else USD — the old behaviour.
+
+    `long` has cik, field, value, currency. Returns the converted rows and, per cik,
+    `reporting_currency` (the latest, for display) and `fx_missing`: a filer with any
+    amount in a currency without a current rate keeps no amount in that currency and
+    is flagged, never mixed.
     """
-    if wide.empty:
-        return wide
-    cur = reporting_currencies(con, asof)
-    wide = wide.merge(cur, on="cik", how="left")
-    wide["currency"] = wide["currency"].fillna("USD")
-    rates = fx_to_usd(con, wide["currency"].unique(), asof)
-    rate = wide["currency"].map(rates)
-    wide["fx_missing"] = rate.isna()
-    for field in MONEY_FIELDS:
-        if field in wide.columns:
-            wide[field] = wide[field] * rate
-    return wide.rename(columns={"currency": "reporting_currency"})
+    cur = reporting_currencies(con, asof).rename(columns={"currency": "reporting_currency"})
+    long = long.merge(cur, on="cik", how="left")
+    money = long["field"].isin(MONEY_FIELDS)
+    currency = long["currency"].where(long["currency"].notna(),
+                                      long["reporting_currency"]).fillna("USD")
+    rates = fx_to_usd(con, set(currency[money]) | set(cur.reporting_currency.dropna()),
+                      asof)
+    rate = currency.map(rates)
+    long.loc[money, "value"] = long.loc[money, "value"] * rate[money]
+    missing = (money & rate.isna()).groupby(long["cik"]).any()
+    flags = cur.set_index("cik")
+    filer_rate_missing = flags["reporting_currency"].map(rates).isna() & \
+        flags["reporting_currency"].notna()
+    flags = pd.DataFrame(index=pd.Index(long["cik"].unique(), name="cik"))
+    flags = flags.join(cur.set_index("cik"))
+    flags["reporting_currency"] = flags["reporting_currency"].fillna("USD")
+    flags["fx_missing"] = (missing.reindex(flags.index, fill_value=False)
+                           | filer_rate_missing.reindex(flags.index, fill_value=False))
+    return long.drop(columns=["reporting_currency"]), flags.reset_index()
 
 
 def fundamentals_wide(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataFrame:
@@ -403,12 +426,25 @@ def fundamentals_wide(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataF
         frames.append(fresh.assign(field=fresh.metric + "_ttm"))
     if not frames:
         return pd.DataFrame()
+    # Revenue a year earlier, AS IT WAS KNOWN a year earlier, for growth. Aged against
+    # its own date like the current figure (a stale prior is NaN), and converted at the
+    # screen date's rate like everything else, so growth is the company's, not the
+    # currency's.
+    prior = ttm_values(con, asof - dt.timedelta(days=365), metrics=("revenue",))
+    if not prior.empty:
+        frames.append(prior.assign(field="revenue_ttm_prior").drop(columns=["age_days"]))
     long = pd.concat(frames, ignore_index=True)
-    wide = long.pivot_table(index="cik", columns="field", values="value", aggfunc="last")
+    if "currency" not in long.columns:
+        long["currency"] = None
+    # Every amount in USD BEFORE the pivot, each in its own currency (F10).
+    long, flags = to_usd(long, con, asof)
+    wide = (long.pivot_table(index="cik", columns="field", values="value", aggfunc="last")
+                .reindex(pd.Index(sorted(long["cik"].unique()), name="cik")))
+    # A filer whose every amount lost its rate keeps its row: it is flagged, not lost.
     # MIN, not max: the rule is "has this company reported RECENTLY", so the most recent
     # filing decides. Using the oldest metric's age instead marked 3,310 of 6,041 active
     # companies stale on 2026-09-21, because one slow-moving annual figure dragged the
-    # whole filer down.
+    # whole filer down. (The prior-year revenue has no age and does not take part.)
     ages = long.groupby("cik")["age_days"].min().rename("data_age_days")
     methods = (
         ttm[~ttm["stale"]].assign(field=ttm.metric + "_method")
@@ -422,13 +458,7 @@ def fundamentals_wide(con: duckdb.DuckDBPyConnection, asof: dt.date) -> pd.DataF
     stale = stale_ttm_fields(ttm)
     if not stale.empty:
         out = out.join(stale)
-    # Revenue a year earlier, AS IT WAS KNOWN a year earlier, for growth. Both years are
-    # converted at the same rate below, so growth is the company's, not the currency's.
-    prior = ttm_values(con, asof - dt.timedelta(days=365), metrics=("revenue",))
-    if not prior.empty:
-        # Aged against its own date like the current figure; a stale prior is NaN.
-        out = out.join(prior.set_index("cik")["value"].rename("revenue_ttm_prior"))
-    out = to_usd(out.reset_index(), con, asof)
+    out = out.reset_index().merge(flags, on="cik", how="left")
     # Which filers are foreign private issuers, by the form of their latest filing:
     # their US listing may be an ADR, and listing.apply needs to know.
     forms = con.execute(
