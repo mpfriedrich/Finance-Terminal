@@ -182,7 +182,8 @@ def build_screening_frame(
     )
     if bars.empty:
         last_px = pd.DataFrame(columns=["ticker", "price"])
-        liquidity = pd.DataFrame(columns=["ticker", "median_dollar_volume_60d"])
+        liquidity = pd.DataFrame(columns=["ticker", "median_dollar_volume_60d",
+                                          "median_share_volume_60d"])
     else:
         bars = bars[pd.to_datetime(bars.date) <= pd.to_datetime(asof)].sort_values("date")
         last_px = (bars.groupby("ticker", as_index=False)
@@ -190,8 +191,14 @@ def build_screening_frame(
                        .rename(columns={"close": "price"}))
         recent = bars.groupby("ticker").tail(volume_sessions).copy()
         recent["dollar_volume"] = recent["close"] * recent["volume"]
-        liquidity = (recent.groupby("ticker")["dollar_volume"].median()
-                           .rename("median_dollar_volume_60d").reset_index())
+        # Share volume too, over the same last sessions as the fast path's SQL. Without
+        # it the share-count sanity check (volume against shares) silently skipped every
+        # row of this frame, so the two builders excluded different names (audit
+        # 24.10.2026 F7, rule 5).
+        liquidity = (recent.groupby("ticker")
+                           .agg(median_dollar_volume_60d=("dollar_volume", "median"),
+                                median_share_volume_60d=("volume", "median"))
+                           .reset_index())
         # Sessions are the last `volume_sessions` dates on which ANY name in this
         # universe traded — the same definition the live source uses in SQL, so the two
         # cannot drift apart on who counts as regularly traded.
