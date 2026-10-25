@@ -59,6 +59,8 @@ from zoneinfo import ZoneInfo
 import duckdb
 import pandas as pd
 
+from . import ui
+
 ET = ZoneInfo("America/New_York")
 FORMS = ("10-K", "10-Q")
 
@@ -680,6 +682,10 @@ def _finish(con, position, b, credit_usd, fees_usd, fx, now, reason) -> None:
 
 # -- live data (the only network code; tests pass a fake with the same methods) ----------
 
+class EdgarError(RuntimeError):
+    """EDGAR answered, but not with the index (403, 429, 5xx): the day stays open."""
+
+
 class Live:
     """EDGAR's index and Yahoo's quotes through the project's existing access paths."""
 
@@ -687,13 +693,20 @@ class Live:
         self.user_agent = user_agent
 
     def form_index(self, day: dt.date) -> str | None:
+        """The day's form.idx, or None when EDGAR has none (404: not published yet, or
+        no filings that day). Any other answer raises, so the day stays open and the
+        next run asks again. A 403 used to count as an empty day too, but SEC answers
+        403 to a rate limit or a rejected user agent, and that day's 10-K/10-Q were then
+        never looked at again (audit 24.10.2026 F15). The error names the status only:
+        requests' own message carries the URL (R24)."""
         import requests
 
         r = requests.get(form_index_url(day), headers={"User-Agent": self.user_agent},
                          timeout=30)
-        if r.status_code in (403, 404):
-            return None                  # not published yet, or no filings that day
-        r.raise_for_status()
+        if r.status_code == 404:
+            return None
+        if r.status_code != 200:
+            raise EdgarError(f"HTTP {r.status_code} für den Index vom {day}")
         return r.text
 
     def expiries(self, symbol: str) -> list[str]:
@@ -762,13 +775,25 @@ def _store_fx(market, day: dt.date) -> float | None:
     return None
 
 
-def _scan(con, live, today: dt.date, start: dt.date, now, log) -> int:
+def _scan(con, live, today: dt.date, start: dt.date, now, log,
+          notes: list[str] | None = None) -> int:
+    """Read every weekday's index since `start` that is not in fb_scan yet. Only a day
+    that EDGAR answered for is recorded. A day whose request failed stays open with a
+    note, and the days after it are still read: one day that keeps failing must not
+    hold back every later filing (audit 24.10.2026 F15)."""
     new = 0
     day = start
     while day <= today:
         if day.weekday() < 5 and not con.execute(
                 "SELECT 1 FROM fb_scan WHERE day = ?", [day]).fetchone():
-            text = live.form_index(day)
+            try:
+                text = live.form_index(day)
+            except Exception as exc:                               # noqa: BLE001
+                if notes is not None:
+                    notes.append(f"EDGAR {day} nicht gelesen ({ui.error_text(exc)}); "
+                                 "der Tag bleibt offen")
+                day += dt.timedelta(days=1)
+                continue
             if text is None:
                 if day >= today:
                     break                    # today's index appears after the day ends
@@ -866,10 +891,8 @@ def run(path: Path, market, live, now: dt.datetime | None = None, log=print) -> 
         ensure_books(con, now)
         start = min(r[0] for r in con.execute("SELECT opened_at FROM fb_books").fetchall())
         start_day = start.replace(tzinfo=dt.UTC).astimezone(ET).date()
-        try:
-            summary["new_events"] = _scan(con, live, today, start_day, now, log)
-        except Exception as exc:                                   # noqa: BLE001
-            summary["notes"].append(f"EDGAR nicht erreichbar: {type(exc).__name__}")
+        summary["new_events"] = _scan(con, live, today, start_day, now, log,
+                                      summary["notes"])
         try:
             fx = live.fx()
         except Exception:                                          # noqa: BLE001

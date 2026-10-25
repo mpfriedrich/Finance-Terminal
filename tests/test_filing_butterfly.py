@@ -424,3 +424,58 @@ def test_live_spot_reads_yfinance_fast_info_by_item(monkeypatch):
     monkeypatch.setattr(yfinance, "Ticker", Ticker)
     assert fb.Live("agent").spot("AAA") == 101.5
     assert fb.Live("agent").fx() == 101.5
+
+
+# -- audit 24.10.2026 ---------------------------------------------------------------------
+
+class _Response:
+    def __init__(self, status: int, text: str = ""):
+        self.status_code, self.text = status, text
+
+
+def test_edgar_only_404_means_no_index_any_other_answer_raises(monkeypatch):
+    """F15: SEC answers 403 to a rate limit or a rejected user agent. That is not a
+    day without filings; it must raise, without the URL in the message (R24)."""
+    import requests
+
+    answers = {}
+    monkeypatch.setattr(requests, "get", lambda url, **kw: answers["r"])
+    live = fb.Live("agent")
+    answers["r"] = _Response(404)
+    assert live.form_index(FILED) is None
+    answers["r"] = _Response(200, "index text")
+    assert live.form_index(FILED) == "index text"
+    for status in (403, 429, 503):
+        answers["r"] = _Response(status)
+        with pytest.raises(fb.EdgarError) as err:
+            live.form_index(FILED)
+        assert f"HTTP {status}" in str(err.value) and "sec.gov" not in str(err.value)
+
+
+def test_a_failed_edgar_day_stays_open_and_is_read_on_the_next_run(path, market):
+    """F15: the failing day gets a note and no fb_scan row; later days are still read;
+    the next run reads the day and finds its filing."""
+    live = FakeLive()
+    later = dt.date(2026, 10, 21)
+    live.index[later] = index_text([("10-K", "BBB INC", 222, later,
+                                     "0000000222-26-000002")])
+    real = live.form_index
+
+    def refusing(day):
+        if day == FILED:
+            raise fb.EdgarError(f"HTTP 403 für den Index vom {day}")
+        return real(day)
+
+    live.form_index = refusing
+    fb.run(path, market, live, now=at(FILED, 10), log=lambda *_: None)   # books open
+    s = fb.run(path, market, live, now=at(later, 18), log=lambda *_: None)
+    assert any("EDGAR 2026-10-20 nicht gelesen" in n and "HTTP 403" in n and
+               "bleibt offen" in n for n in s["notes"])
+    scanned = read(path, "SELECT day FROM fb_scan ORDER BY day")["day"]
+    assert FILED not in set(pd.to_datetime(scanned).dt.date)
+    assert list(read(path, "SELECT accession FROM fb_events")["accession"]) == [
+        "0000000222-26-000002"]                       # the day after was still read
+    live.form_index = real
+    fb.run(path, market, live, now=at(later, 19), log=lambda *_: None)
+    got = read(path, "SELECT accession FROM fb_events ORDER BY accession")["accession"]
+    assert list(got) == ["0000000111-26-000001", "0000000222-26-000002"]
