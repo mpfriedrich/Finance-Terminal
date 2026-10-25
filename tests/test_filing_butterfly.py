@@ -479,3 +479,32 @@ def test_a_failed_edgar_day_stays_open_and_is_read_on_the_next_run(path, market)
     fb.run(path, market, live, now=at(later, 19), log=lambda *_: None)
     got = read(path, "SELECT accession FROM fb_events ORDER BY accession")["accession"]
     assert list(got) == ["0000000111-26-000001", "0000000222-26-000002"]
+
+
+def test_a_missing_long_bid_keeps_the_last_mark_and_flags_it(path, market):
+    """F18: a long leg without a bid is no price. The last mark stays and is marked
+    uncertain; it is not revalued as if the call were worth 0."""
+    live = FakeLive()
+    open_books_and_enter(path, market, live)
+    first = read(path, "SELECT mark_value FROM fb_positions")["mark_value"].iloc[0]
+    assert first == pytest.approx((12.0 - 8.4) * 100 - 2.6)          # 357.40
+    live.quotes = {**OPEN_QUOTES, 90: (float("nan"), 11.2)}
+    live.calls_kwargs = {"last_trade": "2026-10-22T14:00:00Z"}
+    fb.run(path, market, live, now=at(dt.date(2026, 10, 22), 11), log=lambda *_: None)
+    p = read(path, "SELECT mark_value, mark_note FROM fb_positions")
+    assert p["mark_value"].iloc[0] == pytest.approx(first)
+    assert p["mark_note"].iloc[0] == "keine handelbare Quote, letzte Bewertung gilt"
+    con = fb.connect(path, read_only=True)
+    assert fb.state(con, "fb-usd-100000", 1.1)["uncertain"] == 1
+    con.close()
+
+
+def test_a_quoted_bid_of_zero_is_a_price_of_zero():
+    """F18: a real bid of 0 stays 0; a missing one gives no value."""
+    legs = [{"qty": 1, "bid": 0.0, "ask": 0.05}, {"qty": -2, "bid": 0.0, "ask": 0.05},
+            {"qty": 1, "bid": 0.0, "ask": 0.05}]
+    assert fb.liquidation_usd(legs) == pytest.approx(-2 * 0.05 * 100)
+    legs[0]["bid"] = None
+    assert fb.liquidation_usd(legs) is None
+    legs[0]["bid"] = float("nan")
+    assert fb.liquidation_usd(legs) is None

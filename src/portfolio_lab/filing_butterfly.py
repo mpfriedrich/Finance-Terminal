@@ -571,12 +571,18 @@ def size(structure: dict, st: dict, fx: float | None) -> dict:
 
 def liquidation_usd(legs: list[dict]) -> float | None:
     """What closing brings now: longs sold at the bid, shorts bought back at the ask.
-    None when a short leg has no ask (it cannot be bought back on this quote)."""
+    None when the quote is incomplete: a short leg without an ask (it cannot be bought
+    back) or a long leg without any bid. A quoted bid of 0 is a price (the call is
+    worth nothing to a buyer) and counts as 0; a MISSING bid is no price at all. It
+    used to count as 0 as well, which dropped the mark and cleared its note, so a gap
+    in Yahoo's chain looked like a loss (audit 24.10.2026 F18). The caller keeps the
+    last mark and flags it uncertain."""
     total = 0.0
     for leg in legs:
         if leg["qty"] > 0:
             px = _num(leg.get("bid"))
-            px = 0.0 if math.isnan(px) else px
+            if math.isnan(px) or px < 0:
+                return None
         else:
             px = _num(leg.get("ask"))
             if not px > 0:
@@ -633,7 +639,8 @@ def close_position(con, position: dict, quotes: dict, fx: float | None,
         priced.append(dict(leg, bid=q.get("bid"), ask=q.get("ask")))
     credit = liquidation_usd(priced)
     if credit is None:
-        return "Short-Call ohne Ask: Rückkauf auf dieser Quote nicht möglich"
+        return ("Quote unvollständig (Short-Call ohne Ask oder Long-Call ohne Bid): "
+                "Schließung auf dieser Quote nicht möglich")
     if b["currency"] == "EUR" and not fx:
         return "kein aktueller EUR/USD-Kurs"
     fees = FEE_PER_CONTRACT * sum(abs(leg["qty"]) for leg in legs)
