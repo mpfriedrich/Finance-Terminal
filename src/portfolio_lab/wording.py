@@ -41,6 +41,28 @@ BANNED: tuple[tuple[str, str], ...] = (
     (r"\bwir empfehlen\b", "a recommendation"),
     (r"\bjetzt kaufen\b", "urgency plus instruction"),
     (r"\bgarantierte? (rendite|gewinn)", "no return is guaranteed"),
+    # Audit 24.10.2026 F23: four German patterns let "Sie sollten ...", "Kaufempfehlung"
+    # or "wir raten" through. Phrase-level like the English ones: "kaufen" alone is an
+    # ordinary word ("Kaufen und Halten"), "risikoloser Zins" is the textbook term for
+    # the risk-free rate, and "Sollten Sie Fragen haben" is a condition, not advice —
+    # so "sollten Sie" only counts when an investment verb follows.
+    (r"\b(du solltest|ihr solltet|solltet ihr)\b", "tells the reader what to do"),
+    (r"\bsie sollten\b", "tells the reader what to do"),
+    ((r"\bsollten sie (jetzt |besser |lieber )?(kaufen|verkaufen|halten|investieren|"
+      r"einsteigen|aussteigen|zugreifen)\b"), "tells the reader what to do"),
+    (r"\b(kauf|verkaufs|halte|anlage|aktien)empfehlung(en)?\b", "a recommendation"),
+    (r"\b(ich|wir) (empfehle|empfehlen|rate|raten)\b", "a recommendation"),
+    (r"\b(empfiehlt sich|zu empfehlen|empfehlenswert)", "a recommendation"),
+    (r"\b(kaufen|verkaufen|investieren) sie\b", "tells the reader what to do"),
+    (r"\bjetzt (verkaufen|einsteigen|aussteigen|zugreifen|investieren)\b",
+     "urgency plus instruction"),
+    (r"\bist unterbewertet\b", "states an opinion as fact — say what the ratio is instead"),
+    (r"\bwird (steigen|sich verdoppeln|den markt schlagen|outperformen)\b",
+     "predicts the future"),
+    (r"\bsichere[rn]? (gewinn|rendite)\b", "no return is guaranteed"),
+    (r"\brisikolose[rn]? (gewinn|rendite)\b", "no return is risk-free"),
+    (r"\bkann (man )?nicht verlieren\b", "claims an impossible certainty"),
+    (r"\b(top[- ]?tipp|beste[n]? aktien?)\b", "a recommendation in superlative form"),
 )
 
 # Anything that could route an order. Absence is the control (R23).

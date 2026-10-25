@@ -4,6 +4,7 @@ Two halves, and the first matters more than it looks: a scanner that never catch
 anything passes on an empty codebase just as happily as on a clean one. So the samples
 below prove the check has teeth BEFORE the real interface is asked to pass it.
 """
+import re
 import tomllib
 from pathlib import Path
 
@@ -15,7 +16,13 @@ ROOT = Path(__file__).resolve().parents[1]
 UI_FILES = [ROOT / "app.py", ROOT / "src" / "portfolio_lab" / "command.py"] + [
     p for p in sorted((ROOT / "src" / "portfolio_lab").rglob("*.py"))
     if "__pycache__" not in str(p)
+    # The banned-phrase list itself: its patterns are strings, and since F23 some of
+    # them (a group in brackets) match their own source text.
+    and p.name != "wording.py"
 ]
+# Audit 24.10.2026 F23: the morning briefing is written and mailed from scripts/, so
+# its strings reach a reader just as the app's do.
+SCRIPT_FILES = sorted((ROOT / "scripts").glob("*.py"))
 
 
 # --- the check has teeth ---------------------------------------------------------------
@@ -35,6 +42,54 @@ UI_FILES = [ROOT / "app.py", ROOT / "src" / "portfolio_lab" / "command.py"] + [
 ])
 def test_recommendation_language_is_caught(sentence):
     assert wording.scan_text(sentence), f"missed: {sentence}"
+
+
+# Audit 24.10.2026 F23: one sentence per German pattern, so that each pattern is shown
+# to bite on its own and a pattern that silently stops matching fails by name.
+GERMAN_ADVICE = [
+    "Du solltest die drei billigsten Titel nehmen.",
+    "Ihr solltet jetzt umschichten.",
+    "Sie sollten diese Aktie halten.",
+    "Sollten Sie jetzt kaufen? Ja.",
+    "Unsere Kaufempfehlung für diese Woche.",
+    "Eine klare Verkaufsempfehlung.",
+    "Wir raten zu Vorsicht bei Nebenwerten.",
+    "Ich empfehle den günstigsten Titel.",
+    "Ein Einstieg empfiehlt sich vor den Zahlen.",
+    "Kaufen Sie, solange der Kurs tief ist.",
+    "Jetzt einsteigen, bevor die Zahlen kommen.",
+    "PRGO ist unterbewertet.",
+    "Der Kurs wird steigen.",
+    "Ein sicherer Gewinn von 8 % im Jahr.",
+    "Eine risikolose Rendite.",
+    "Mit diesem Titel kann man nicht verlieren.",
+    "Die besten Aktien im Screen: unser Top-Tipp.",
+]
+
+
+@pytest.mark.parametrize("sentence", GERMAN_ADVICE)
+def test_german_advice_language_is_caught(sentence):
+    assert wording.scan_text(sentence), f"missed: {sentence}"
+
+
+def test_every_german_pattern_has_its_own_sample():
+    """Each German pattern added for F23 matches at least one sample above, so none of
+    them is decoration."""
+    start = next(i for i, (p, _) in enumerate(wording.BANNED) if "du solltest" in p)
+    for pattern, _ in wording.BANNED[start:]:
+        assert any(re.search(pattern, s, re.IGNORECASE) for s in GERMAN_ADVICE), pattern
+
+
+@pytest.mark.parametrize("sentence", [
+    "Kaufen und Halten, ohne Umschichtung.",
+    "Der risikolose Zins kommt von FRED.",
+    "Sollten Sie Fragen haben, steht es im README.",
+    "Die Bewertungen der Analysten sind Fremdmeinungen.",
+    "Die Regel kauft einmal und hält.",
+    "Die Spalte zeigt, wozu die Analysten raten.",
+])
+def test_ordinary_german_is_not_caught(sentence):
+    assert wording.scan_text(sentence) == [], f"false positive: {sentence}"
 
 
 @pytest.mark.parametrize("sentence", [
@@ -70,8 +125,14 @@ def test_attributed_third_party_labels_are_allowed_and_listed():
 # --- and the real interface passes it --------------------------------------------------
 
 def test_the_interface_contains_no_recommendation_language():
-    hits = wording.scan_files(UI_FILES)
+    hits = wording.scan_files(UI_FILES + SCRIPT_FILES)
     assert hits == [], "\n".join(f"{f}: '{phrase}' — {why}" for f, phrase, why in hits)
+
+
+def test_the_mailed_briefing_is_part_of_the_scan():
+    """Audit 24.10.2026 F23: scripts/ was outside the scan, and the morning briefing is
+    mailed from there."""
+    assert ROOT / "scripts" / "morning_briefing.py" in SCRIPT_FILES
 
 
 def test_nothing_installed_could_place_an_order():
