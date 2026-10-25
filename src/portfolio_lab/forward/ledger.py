@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import time
 import uuid
 from pathlib import Path
@@ -99,6 +100,12 @@ def uid() -> str:
 
 
 def book(con, book_id, at, session, kind, amount, position_id=None, note="") -> None:
+    """One ledger row. A non-finite amount is refused: cash is the SUM of these rows, so
+    a single NaN would make the book's cash and value NaN for good (audit 24.10.2026
+    F5). This one gate covers every booking path; the caller's transaction then rolls
+    the whole session back and the next run tries again."""
+    if amount is None or not math.isfinite(float(amount)):
+        raise ValueError(f"{book_id}: {kind} amount is not a finite number ({amount})")
     con.execute("INSERT INTO fw_ledger VALUES (?,?,?,?,?,?,?,?)",
                 [uid(), book_id, at, session, kind, float(amount), position_id, note])
 

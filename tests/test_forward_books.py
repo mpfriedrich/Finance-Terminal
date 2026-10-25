@@ -161,9 +161,11 @@ SESSIONS = [d for d in pd.date_range("2024-01-02", "2026-11-06").date if cal.is_
 
 
 def _market(path, last: dt.date, partial: dt.date | None = None,
-            gone: dict | None = None):
-    """`gone` maps a ticker to its last day with a bar (a delisting)."""
-    gone = gone or {}
+            gone: dict | None = None, null_open: dict | None = None,
+            holes: tuple = ()):
+    """`gone` maps a ticker to its last day with a bar (a delisting); `null_open` maps a
+    ticker to a day whose bar has open = NULL; `holes` are days without any bar."""
+    gone, null_open = gone or {}, null_open or {}
     rng = np.random.default_rng(7)
     rets = rng.normal(0.0004, 0.02, (len(SESSIONS), N))
     close = 50 * np.exp(np.cumsum(rets, axis=0))
@@ -180,8 +182,11 @@ def _market(path, last: dt.date, partial: dt.date | None = None,
     for i, d in enumerate(SESSIONS):
         if d > last:
             break
+        if d in holes:
+            continue
         names = range(3) if d == partial else range(N)
-        rows += [(f"T{j:02d}", d, opens[i, j], close[i, j], close[i, j], close[i, j], 1e6)
+        rows += [(f"T{j:02d}", d, None if null_open.get(f"T{j:02d}") == d else opens[i, j],
+                  close[i, j], close[i, j], close[i, j], 1e6)
                  for j in names if d <= gone.get(f"T{j:02d}", d)]
         rows.append(("EURUSD=X", d, 1.1, 1.1, 1.1, 1.1, 0))
     c.executemany("INSERT INTO prices VALUES (?,?,?,?,?,?,?)", rows)
@@ -455,6 +460,45 @@ def test_a_share_without_bars_for_five_sessions_is_realised_as_delisted(world):
     assert set(orders[orders.status == "delisted"].ticker) == {long_t, short_t}
     for r in _read(world["path"], "SELECT * FROM fw_marks").itertuples():
         assert r.equity == pytest.approx(r.cash + r.positions)
+
+
+def test_a_nan_amount_is_refused_by_the_ledger(con):
+    # Audit 24.10.2026 F5: one NaN row made SUM(amount), the cash and the book NaN.
+    lg.book(con, "x", dt.datetime(2026, 10, 22), None, "deposit", 1000.0)
+    for bad in (float("nan"), float("inf"), None):
+        with pytest.raises(ValueError):
+            lg.book(con, "x", dt.datetime(2026, 10, 22), None, "proceeds", bad)
+    assert lg.cash(con, "x") == pytest.approx(1000.0)
+
+
+def test_a_held_share_with_a_null_open_stays_open_and_the_cash_finite(world):
+    # Audit 24.10.2026 F5: `not nan` and `nan <= 0` are both False, so a NULL open on a
+    # rebalancing day became NaN proceeds and a NaN book for good.
+    live = FakeLive()
+    m1 = _market(world["dir"] / "m1.duckdb", WED)
+    en.run(world["path"], m1, live, now=at(WED, 20), log=lambda *_: None)
+    m1.close()
+    m2 = _market(world["dir"] / "m2.duckdb", THU)
+    en.run(world["path"], m2, live, now=at(THU, 20), log=lambda *_: None)
+    m2.close()
+    held = _read(world["path"], "SELECT ticker FROM fw_positions WHERE book_id='fw-d' AND "
+                                "status='open' AND side='long' ORDER BY ticker")
+    t = held.ticker.iloc[0]
+    sig_day, fill_day = dt.date(2026, 10, 28), dt.date(2026, 10, 29)   # D's next basket
+    m3 = _market(world["dir"] / "m3.duckdb", fill_day, null_open={t: fill_day})
+    en.run(world["path"], m3, live, now=at(sig_day, 20), log=lambda *_: None)
+    en.run(world["path"], m3, live, now=at(fill_day, 20), log=lambda *_: None)
+    m3.close()
+    o = _read(world["path"], f"SELECT status FROM fw_orders WHERE book_id='fw-d' AND "
+                             f"ticker='{t}' AND action='close' AND exec_session='{fill_day}'")
+    assert list(o.status) == ["unresolved"]
+    assert _read(world["path"], f"SELECT status FROM fw_positions WHERE book_id='fw-d' AND "
+                                f"ticker='{t}'").status.tolist() == ["open"]
+    marks = _read(world["path"], "SELECT * FROM fw_marks")
+    assert str(fill_day) in set(marks.session.astype(str))
+    assert np.isfinite(marks[["cash", "equity", "positions"]].to_numpy()).all()
+    led = _read(world["path"], "SELECT amount FROM fw_ledger")
+    assert np.isfinite(led.amount.to_numpy()).all()
 
 
 def test_a_book_opened_under_an_older_version_moves_to_the_new_one(con, monkeypatch):

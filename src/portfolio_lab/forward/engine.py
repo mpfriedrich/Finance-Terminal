@@ -276,18 +276,31 @@ def prices_at(market, day: dt.date) -> pd.DataFrame:
 def adj_open(market, ticker: str, day: dt.date) -> float | None:
     r = market.execute("SELECT open * close_adj / close FROM prices WHERE ticker=? AND "
                        "date=? AND close > 0", [ticker, day]).fetchone()
-    return float(r[0]) if r and r[0] and r[0] > 0 else None
+    return float(r[0]) if r and _usable(r[0]) else None
+
+
+def _usable(price) -> bool:
+    """A real, positive price. NaN passes `not x` and `x <= 0` alike (audit 24.10.2026
+    F5: `prices.open` may be NULL, and a NaN open became NaN proceeds, NaN cash and a
+    NaN book for good), so finiteness is checked explicitly."""
+    try:
+        return price is not None and math.isfinite(float(price)) and float(price) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def equivalent(market, pos: dict, adj_now: float | None) -> float | None:
     """The price on the entry price's basis: entry x (adjusted now / adjusted entry),
-    both read today, so dividends between entry and now count."""
-    if not adj_now or adj_now <= 0:
+    both read today, so dividends between entry and now count. None when either price
+    is missing, NaN or not positive: the caller then keeps the last mark or leaves the
+    order unresolved, never books a made-up value."""
+    if not _usable(adj_now):
         return None
     base = adj_open(market, pos["ticker"], pos["opened_session"])
-    if not base:
+    if not _usable(base):
         return None
-    return pos["entry_usd"] * adj_now / base
+    out = pos["entry_usd"] * adj_now / base
+    return out if _usable(out) else None
 
 
 def _order(con, book_id, sig_id, now, S, ticker, side, action, rule, status, note,
