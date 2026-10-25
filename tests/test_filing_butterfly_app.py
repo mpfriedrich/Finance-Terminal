@@ -5,7 +5,7 @@ import shutil
 import pytest
 
 from portfolio_lab import filing_butterfly as fb
-from tests.app_fixture import build_data, run, texts
+from tests.app_fixture import build_data, errors, run, texts
 from tests.test_filing_butterfly import ENTRY, FILED, FakeLive, at
 
 
@@ -45,6 +45,7 @@ def _market():
 def test_the_view_says_how_to_start_before_the_first_run(monkeypatch, fresh):
     app = run(monkeypatch, fresh, query={"cmd": "PORT"})
     assert not app.exception
+    assert errors(app) == [], errors(app)
     body = texts(app)
     assert "SEC Filing Butterfly" in body and "butterfly_tracker.py" in body
 
@@ -56,6 +57,7 @@ def test_both_books_and_the_shared_candidate_are_shown(monkeypatch, fresh):
     fb.run(path, market, live, now=at(ENTRY, 11), log=lambda *_: None)
     app = run(monkeypatch, fresh, query={"cmd": "PORT"})
     assert not app.exception
+    assert errors(app) == [], errors(app)
     labels = "\n".join(e.label for e in app.expander)
     assert "SEC Filing Butterfly – 1.000 EUR · value 1,000.00 €" in labels
     assert "SEC Filing Butterfly – Vollbudget 100.000 USD" in labels

@@ -9,7 +9,7 @@ import duckdb
 import pytest
 
 from portfolio_lab import command, layout
-from tests.app_fixture import build_data, run, texts
+from tests.app_fixture import build_data, errors, run, texts
 
 
 @pytest.fixture(scope="module")
@@ -54,6 +54,7 @@ def test_go_right_after_enter_keeps_the_answer(monkeypatch, fresh):
     at.button(key="cmd_go").click()
     at.run()
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     assert command.current(at.session_state) == "AAA"
     assert "Type a symbol" not in at.session_state["cmd_msg"]
     at.button(key="cmd_go").click().run()          # GO on an empty line: nothing
@@ -66,6 +67,7 @@ def test_the_first_command_after_a_rebuild_runs(monkeypatch, fresh):
     _add_security(fresh, "ZZZ", "Zeta Holdings")
     at.text_input(key="cmd_input").input("BBB FA").run()
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     assert command.current(at.session_state) == "BBB"
     assert at.session_state[layout.section_key(layout.SECURITY)] == "FINANCIALS"
     at.text_input(key="cmd_input").input("ZZZ").run()   # the new build is the one read
@@ -78,6 +80,7 @@ def test_picking_a_ticker_that_is_a_function_code_loads_the_company(monkeypatch,
     at = run(monkeypatch, fresh, state={"cmd_choices": (["AAA", "MA"], None)})
     at.button(key="cand_MA").click().run()
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     assert command.current(at.session_state) == "MA"
     assert at.session_state[layout.section_key(layout.SECURITY)] == "OVERVIEW"
     assert at.session_state["cmd_focus"] == "DES"
@@ -98,6 +101,7 @@ def test_a_price_only_symbol_says_what_it_does_not_have(monkeypatch, fresh):
     at = run(monkeypatch, fresh)
     at.text_input(key="cmd_input").input("GC=F FA").run()
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     assert "not available for GC=F" in texts(at)
 
 
@@ -145,6 +149,7 @@ def test_a_leg_on_a_second_underlying_is_refused(monkeypatch, fresh):
     _fake_chain(monkeypatch)
     at = run(monkeypatch, fresh, state=_options_of("BBB"))
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     assert at.button(key="opt_b_add").disabled
     assert "The saved position is on AAA" in texts(at)
 
@@ -156,6 +161,7 @@ def test_legs_on_two_underlyings_are_each_valued_at_their_own_price(monkeypatch,
     close = _closes(fresh)
     at = run(monkeypatch, fresh, state=_options_of("AAA"))
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     shown = texts(at)
     assert "underlying" in shown and "on 2 underlyings" in shown
     assert f"AAA at {close['AAA']:,.2f}" in shown
@@ -182,6 +188,7 @@ def test_presets_ask_before_replacing_saved_legs(monkeypatch, fresh):
     _fake_chain(monkeypatch)
     at = run(monkeypatch, fresh, state=_options_of("AAA"))
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     assert "Presets — replace the 1 saved legs" in _popovers(at)
     assert "preset_0" not in _keys_outside_popovers(at)
 
@@ -191,6 +198,7 @@ def test_the_price_table_shows_the_traded_close_apart(monkeypatch, fresh):
     at = run(monkeypatch, fresh, state={command.HISTORY_KEY: ["AAA"], "cmd_focus": "HP",
                                         layout.MAIN_KEY: layout.SECURITY})
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     shown = texts(at)
     assert "close as traded" in shown and "adjusted for splits and dividends" in shown
 
@@ -211,6 +219,7 @@ def test_the_map_layer_and_the_rule_inputs_survive_another_tab(monkeypatch, fres
 
     at = run(monkeypatch, fresh, state={layout.MAIN_KEY: layout.WORLD})
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     find("radio", "Layer").set_value("PORT CARGO")
     on(layout.WORLD).run()
     on(layout.SCREEN).run()
@@ -227,6 +236,7 @@ def test_the_map_layer_and_the_rule_inputs_survive_another_tab(monkeypatch, fres
     assert find("date_input", "From").value == dt.date(2015, 6, 1)
     on(layout.WORLD).run()
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     assert find("radio", "Layer").value == "PORT CARGO"
 
 
@@ -238,6 +248,7 @@ def test_an_unreachable_yahoo_is_not_shown_as_no_data(monkeypatch, fresh):
     at = run(monkeypatch, fresh, state={command.HISTORY_KEY: ["SPY"], "cmd_focus": "HP",
                                         layout.MAIN_KEY: layout.SECURITY})
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     shown = texts(at)
     assert "Yahoo could not be reached" in shown            # the page and HP
     assert "No price history for SPY" not in shown
@@ -247,6 +258,7 @@ def test_an_unreachable_yahoo_is_not_shown_as_no_data(monkeypatch, fresh):
                                         layout.MAIN_KEY: layout.SECURITY,
                                         layout.section_key(layout.SECURITY): "FINANCIALS"})
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     assert "Dividend history could not be reached" in texts(at)
 
 
@@ -264,6 +276,7 @@ def test_a_rule_on_an_unreachable_yahoo_symbol_says_so(monkeypatch, fresh):
     at.session_state[layout.MAIN_KEY] = layout.SCREEN
     at.run()
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     shown = texts(at)
     assert "Yahoo could not be reached" in shown
     assert "No overlapping price history" not in shown
@@ -294,6 +307,7 @@ def test_the_builder_and_saved_legs_without_a_loaded_security(monkeypatch, fresh
     at = run(monkeypatch, fresh, state={"cmd_focus": "OMON",
                                         layout.MAIN_KEY: layout.SECURITY})
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     assert f"AAA at {close['AAA']:,.2f}" in texts(at)
 
 
@@ -308,6 +322,7 @@ def test_a_price_only_symbol_has_options_deals_and_rates(monkeypatch, fresh):
                                             "cmd_focus": focus,
                                             layout.MAIN_KEY: layout.SECURITY})
         assert not at.exception, (focus, at.exception)
+        assert errors(at) == [], errors(at)
         shown = texts(at) + " ".join(str(t.key) for t in at.text_input)
         assert expect in shown, focus
 
@@ -332,6 +347,7 @@ def test_a_yahoo_only_symbol_is_measured_against_rates(monkeypatch, fresh):
                                         "cmd_focus": "HRA",
                                         layout.MAIN_KEY: layout.SECURITY})
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     shown = texts(at)
     assert "What it does when rates move" in shown
     assert "No price history for SPY" not in shown

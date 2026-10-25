@@ -123,6 +123,17 @@ def run(monkeypatch, data: Path, query: dict | None = None,
     return at.run()
 
 
+def errors(at: AppTest, *allowed: str) -> list[str]:
+    """Every st.error the run drew, except those containing one of `allowed`.
+
+    Audit 24.10.2026 (low 7): the app tests asserted only `not at.exception`, but
+    `_guarded` turns a failing view into an st.error, so a broken view passed. A test
+    asserts `errors(at) == []`, naming the errors it means to provoke.
+    """
+    return [str(e.value) for e in at.error
+            if not any(a in str(e.value) for a in allowed)]
+
+
 def texts(at: AppTest) -> str:
     """Everything the run wrote as text, in one string, for `in` checks."""
     parts = []
