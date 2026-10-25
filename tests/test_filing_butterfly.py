@@ -565,3 +565,44 @@ def test_a_new_migration_runs_exactly_once_and_reaches_readers(path, monkeypatch
     assert "extra" in cols
     fb.connect(path).close()                          # the tracker: not applied again
     fb.connect(path, read_only=True).close()
+
+
+def test_no_fetch_happens_while_the_real_store_is_open(path, market, monkeypatch):
+    """F13: every EDGAR and Yahoo request runs while the real store is closed, so the
+    app is not kept waiting on the write lock; the bookings are the same as before."""
+    open_cons = []
+    real_connect = fb.connect
+
+    class Tracked:
+        def __init__(self, con, p):
+            self._con, self._p = con, p
+
+        def __getattr__(self, name):
+            return getattr(self._con, name)
+
+        def close(self):
+            open_cons.remove(self._p)
+            self._con.close()
+
+    def connect(p, read_only=False, tries=30):
+        open_cons.append(p)
+        return Tracked(real_connect(p, read_only=read_only, tries=tries), p)
+
+    monkeypatch.setattr(fb, "connect", connect)
+    live = FakeLive()
+    fetched = []
+    for name in ("form_index", "expiries", "calls", "spot", "fx", "ex_dividend",
+                 "history", "close_on"):
+        method = getattr(live, name)
+
+        def guarded(*args, _m=method, _n=name):
+            assert path not in open_cons, f"{_n} fetched while the store was open"
+            fetched.append(_n)
+            return _m(*args)
+        setattr(live, name, guarded)
+    summary = open_books_and_enter(path, market, live)
+    assert summary["opened"] == 1 and "calls" in fetched and "form_index" in fetched
+    assert read(path, "SELECT COUNT(*) n FROM fb_positions")["n"].iloc[0] == 1
+    assert read(path, "SELECT COUNT(*) n FROM fb_ledger")["n"].iloc[0] == 2 + 2
+    assert not open_cons
+    assert fetched.count("fx") == 2              # two runs, each asks once, not twice

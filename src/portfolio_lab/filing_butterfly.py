@@ -51,6 +51,8 @@ import datetime as dt
 import json
 import math
 import re
+import shutil
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -280,8 +282,9 @@ MIGRATIONS: list[tuple[str, str]] = [
 
 def connect(path: Path, read_only: bool = False, tries: int = 30) -> duckdb.DuckDBPyConnection:
     """Open the options paper store. A lock held by the other side is waited out
-    rather than reported. The tracker holds its write lock for its whole run, network
-    fetches included, so a wait can last that long (audit 24.10.2026 F13).
+    rather than reported. The tracker writes only after all its fetches (`run`, audit
+    24.10.2026 F13), so a wait lasts the seconds of its database work, not the minutes
+    of EDGAR and Yahoo requests.
 
     A reader of a store with pending migrations (an older file, or none yet) opens it
     once for writing to apply them, so the app never reads a table without a column
@@ -939,9 +942,58 @@ def _candidate(market, live, ev: dict, today: dt.date, now_aware) -> dict:
     return out
 
 
+class _Recorded:
+    """Stands in for `Live`: the first call of each method and arguments goes to the
+    real source and is kept (its result or its exception); a repeat is answered from
+    what was kept. A DataFrame is handed out as a copy, so no pass can change what the
+    next one sees."""
+
+    def __init__(self, live):
+        self._live, self._kept = live, {}
+
+    def __getattr__(self, name):
+        method = getattr(self._live, name)
+
+        def call(*args):
+            key = (name, *args)
+            if key not in self._kept:
+                try:
+                    self._kept[key] = (True, method(*args))
+                except Exception as exc:                           # noqa: BLE001
+                    self._kept[key] = (False, exc)
+            ok, value = self._kept[key]
+            if not ok:
+                raise value
+            return value.copy() if isinstance(value, (pd.DataFrame, pd.Series)) else value
+        return call
+
+
 def run(path: Path, market, live, now: dt.datetime | None = None, log=print) -> dict:
-    """One pass: scan, decide, manage, mark. Safe to repeat: nothing is booked twice."""
-    now_aware = (now or dt.datetime.now(dt.UTC)).astimezone(dt.UTC)
+    """One pass: scan, decide, manage, mark. Safe to repeat: nothing is booked twice.
+
+    Fetch first, then write briefly (audit 24.10.2026 F13). The tracker used to hold
+    the store's write lock through every EDGAR and Yahoo request, so the app waited up
+    to its 30 tries and then showed the store as busy. Now the whole pass runs once on
+    a throwaway copy of the store, with every answer from `live` kept; then it runs
+    again on the real store, answered from what was kept, without network. Both passes
+    see the same store, the same `now` and the same answers, so they take the same
+    decisions; the write lock is held only for the database work of the second."""
+    now = (now or dt.datetime.now(dt.UTC)).astimezone(dt.UTC)
+    connect(path).close()                       # create or migrate, then let go
+    kept = _Recorded(live)
+    with tempfile.TemporaryDirectory() as tmp:
+        copy = Path(tmp) / path.name
+        shutil.copyfile(path, copy)
+        wal = path.with_name(path.name + ".wal")
+        if wal.exists():                        # not checkpointed yet: part of the store
+            shutil.copyfile(wal, copy.with_name(copy.name + ".wal"))
+        _run_once(copy, market, kept, now, lambda *_: None)
+    return _run_once(path, market, kept, now, log)
+
+
+def _run_once(path: Path, market, live, now: dt.datetime, log) -> dict:
+    """The pass itself, on whichever store and source `run` hands it."""
+    now_aware = now
     now = _naive(now_aware)
     today = now_aware.astimezone(ET).date()
     live_session = in_session(now_aware)

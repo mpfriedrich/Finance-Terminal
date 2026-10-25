@@ -6,7 +6,9 @@ close or mark the open positions, store the day's book values and SPY. Repeating
 books nothing twice. It never places an order anywhere: paper only.
 
 The bookings live in data/paper_options.duckdb, which the PORTFOLIOS tab reads. The app
-can stay open while this runs.
+can stay open while this runs: every EDGAR and Yahoo request is made on a copy of the
+store first, and the real store is written only for the database work afterwards, a
+few seconds (fb.run, audit 24.10.2026 F13). During those seconds the app waits.
 
 Run: uv run python scripts/butterfly_tracker.py            (update + report)
      uv run python scripts/butterfly_tracker.py --report   (report only, no network)
