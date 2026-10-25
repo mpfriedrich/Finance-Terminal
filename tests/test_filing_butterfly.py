@@ -524,3 +524,44 @@ def test_an_ended_line_with_more_old_turnover_does_not_win(market):
     market.execute("DELETE FROM prices WHERE ticker IN ('AAA', 'AAA-B')")
     line, why = fb.pick_line(market, 111, ENTRY)
     assert line["ticker"] == "AAA-OLD" and why.startswith("Kursdaten veraltet")
+
+
+def _old_store(path):
+    """A store as the tracker wrote it before named migrations: the ten tables, no
+    fb_migrations, one book already opened."""
+    con = duckdb.connect(str(path))
+    for _name, sql in fb.MIGRATIONS[:10]:
+        con.execute(sql)
+    con.execute("INSERT INTO fb_books VALUES ('fb-usd-100000', 'old', 'USD', 100000, "
+                "TIMESTAMP '2026-10-18 12:00:00', '{}')")
+    con.close()
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_an_old_store_opens_and_records_its_migrations(path, read_only):
+    """Low item 4: a store without fb_migrations opens (for the app read-only too),
+    keeps its rows and records every migration name once."""
+    _old_store(path)
+    con = fb.connect(path, read_only=read_only)
+    try:
+        names = [r[0] for r in con.execute("SELECT name FROM fb_migrations ORDER BY name")
+                 .fetchall()]
+        assert names == [name for name, _sql in fb.MIGRATIONS]
+        assert con.execute("SELECT name FROM fb_books").fetchall() == [("old",)]
+    finally:
+        con.close()
+
+
+def test_a_new_migration_runs_exactly_once_and_reaches_readers(path, monkeypatch):
+    """Low item 4: an appended ALTER TABLE reaches an existing store once; replaying
+    it on the next open would fail ("column already exists")."""
+    _old_store(path)
+    fb.connect(path).close()
+    monkeypatch.setattr(fb, "MIGRATIONS", fb.MIGRATIONS + [
+        ("999_test_column", "ALTER TABLE fb_runs ADD COLUMN extra INTEGER")])
+    con = fb.connect(path, read_only=True)            # the app opens first
+    cols = [r[0] for r in con.execute("DESCRIBE fb_runs").fetchall()]
+    con.close()
+    assert "extra" in cols
+    fb.connect(path).close()                          # the tracker: not applied again
+    fb.connect(path, read_only=True).close()

@@ -214,28 +214,41 @@ def parse_form_index(text: str) -> pd.DataFrame:
 
 # -- the store ----------------------------------------------------------------------------
 
-MIGRATIONS = [
-    """CREATE TABLE IF NOT EXISTS fb_books (
+# Append-only and named, like data/schema.py: a store records the names it has applied
+# in fb_migrations, so a new entry (an ALTER TABLE ... ADD COLUMN) runs exactly once.
+# The old list was replayed whole on every open and only worked because each entry was
+# CREATE TABLE IF NOT EXISTS; a new column would never have reached an existing store
+# (audit 24.10.2026, low item 4). Never edit or reorder an entry; append a new one.
+# A store from before the names applies the ten originals once more: they are all
+# IF NOT EXISTS, so that only records their names.
+MIGRATIONS: list[tuple[str, str]] = [
+    ("001_fb_books",
+     """CREATE TABLE IF NOT EXISTS fb_books (
         id VARCHAR PRIMARY KEY, name VARCHAR NOT NULL, currency VARCHAR NOT NULL,
-        capital DOUBLE NOT NULL, opened_at TIMESTAMP NOT NULL, rules_json VARCHAR NOT NULL)""",
-    """CREATE TABLE IF NOT EXISTS fb_ledger (
+        capital DOUBLE NOT NULL, opened_at TIMESTAMP NOT NULL, rules_json VARCHAR NOT NULL)"""),
+    ("002_fb_ledger",
+     """CREATE TABLE IF NOT EXISTS fb_ledger (
         id VARCHAR PRIMARY KEY, book_id VARCHAR NOT NULL, booked_at TIMESTAMP NOT NULL,
         kind VARCHAR NOT NULL, amount DOUBLE NOT NULL, amount_usd DOUBLE,
-        fx DOUBLE, position_id VARCHAR, note VARCHAR)""",
-    """CREATE TABLE IF NOT EXISTS fb_scan (day DATE PRIMARY KEY, scanned_at TIMESTAMP,
-        filings INTEGER)""",
-    """CREATE TABLE IF NOT EXISTS fb_events (
+        fx DOUBLE, position_id VARCHAR, note VARCHAR)"""),
+    ("003_fb_scan",
+     """CREATE TABLE IF NOT EXISTS fb_scan (day DATE PRIMARY KEY, scanned_at TIMESTAMP,
+        filings INTEGER)"""),
+    ("004_fb_events",
+     """CREATE TABLE IF NOT EXISTS fb_events (
         accession VARCHAR PRIMARY KEY, cik BIGINT NOT NULL, company VARCHAR,
         form VARCHAR NOT NULL, filed DATE NOT NULL, first_session DATE NOT NULL,
         detected_at TIMESTAMP NOT NULL, status VARCHAR NOT NULL, decided_at TIMESTAMP,
         ticker VARCHAR, reason VARCHAR, quotes_ok BOOLEAN, structure_json VARCHAR,
-        line_json VARCHAR)""",
-    """CREATE TABLE IF NOT EXISTS fb_decisions (
+        line_json VARCHAR)"""),
+    ("005_fb_decisions",
+     """CREATE TABLE IF NOT EXISTS fb_decisions (
         accession VARCHAR NOT NULL, book_id VARCHAR NOT NULL, decided_at TIMESTAMP NOT NULL,
         opened BOOLEAN NOT NULL, reason VARCHAR, units INTEGER, max_loss DOUBLE,
         risk_budget DOUBLE, spendable DOUBLE, fx DOUBLE, position_id VARCHAR,
-        PRIMARY KEY (accession, book_id))""",
-    """CREATE TABLE IF NOT EXISTS fb_positions (
+        PRIMARY KEY (accession, book_id))"""),
+    ("006_fb_positions",
+     """CREATE TABLE IF NOT EXISTS fb_positions (
         id VARCHAR PRIMARY KEY, book_id VARCHAR NOT NULL, accession VARCHAR NOT NULL,
         cik BIGINT NOT NULL, ticker VARCHAR NOT NULL, expiry DATE NOT NULL,
         close_on DATE NOT NULL, units INTEGER NOT NULL, multiplier INTEGER NOT NULL,
@@ -244,33 +257,42 @@ MIGRATIONS = [
         status VARCHAR NOT NULL, closed_at TIMESTAMP, close_usd DOUBLE,
         close_fees_usd DOUBLE, fx_close DOUBLE, close_reason VARCHAR,
         mark_value DOUBLE, mark_at TIMESTAMP, mark_note VARCHAR,
-        UNIQUE (book_id, accession))""",
-    """CREATE TABLE IF NOT EXISTS fb_legs (
+        UNIQUE (book_id, accession))"""),
+    ("007_fb_legs",
+     """CREATE TABLE IF NOT EXISTS fb_legs (
         position_id VARCHAR NOT NULL, leg INTEGER NOT NULL, contract VARCHAR NOT NULL,
         strike DOUBLE NOT NULL, qty INTEGER NOT NULL, open_price DOUBLE NOT NULL,
         bid DOUBLE, ask DOUBLE, last DOUBLE, volume DOUBLE, open_interest DOUBLE,
-        last_trade VARCHAR, close_price DOUBLE, PRIMARY KEY (position_id, leg))""",
-    """CREATE TABLE IF NOT EXISTS fb_marks (
+        last_trade VARCHAR, close_price DOUBLE, PRIMARY KEY (position_id, leg))"""),
+    ("008_fb_marks",
+     """CREATE TABLE IF NOT EXISTS fb_marks (
         book_id VARCHAR NOT NULL, day DATE NOT NULL, marked_at TIMESTAMP NOT NULL,
         equity DOUBLE NOT NULL, cash DOUBLE NOT NULL, reserved DOUBLE NOT NULL,
         open_value DOUBLE NOT NULL, uncertain INTEGER NOT NULL, fx DOUBLE,
-        PRIMARY KEY (book_id, day))""",
-    """CREATE TABLE IF NOT EXISTS fb_benchmark (day DATE PRIMARY KEY, spy DOUBLE,
-        eurusd DOUBLE)""",
-    """CREATE TABLE IF NOT EXISTS fb_runs (run_at TIMESTAMP PRIMARY KEY, summary_json VARCHAR)""",
+        PRIMARY KEY (book_id, day))"""),
+    ("009_fb_benchmark",
+     """CREATE TABLE IF NOT EXISTS fb_benchmark (day DATE PRIMARY KEY, spy DOUBLE,
+        eurusd DOUBLE)"""),
+    ("010_fb_runs",
+     """CREATE TABLE IF NOT EXISTS fb_runs (run_at TIMESTAMP PRIMARY KEY, summary_json VARCHAR)"""),
 ]
 
 
 def connect(path: Path, read_only: bool = False, tries: int = 30) -> duckdb.DuckDBPyConnection:
-    """Open the options paper store. The app and the tracker hold it for moments only;
-    a lock held by the other side is waited out rather than reported."""
+    """Open the options paper store. A lock held by the other side is waited out
+    rather than reported. The tracker holds its write lock for its whole run, network
+    fetches included, so a wait can last that long (audit 24.10.2026 F13).
+
+    A reader of a store with pending migrations (an older file, or none yet) opens it
+    once for writing to apply them, so the app never reads a table without a column
+    the code expects."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    if read_only and not path.exists():
-        con = duckdb.connect(str(path))
-        _migrate(con)
-        con.close()
     for attempt in range(tries):
         try:
+            if read_only and (not path.exists() or _pending(path)):
+                con = duckdb.connect(str(path))
+                _migrate(con)
+                con.close()
             con = duckdb.connect(str(path), read_only=read_only)
             if not read_only:
                 _migrate(con)
@@ -282,9 +304,31 @@ def connect(path: Path, read_only: bool = False, tries: int = 30) -> duckdb.Duck
     raise RuntimeError("unreachable")
 
 
+def _applied(con) -> set[str]:
+    has = con.execute("SELECT 1 FROM information_schema.tables "
+                      "WHERE table_name = 'fb_migrations'").fetchone()
+    return {r[0] for r in con.execute("SELECT name FROM fb_migrations").fetchall()} \
+        if has else set()
+
+
+def _pending(path: Path) -> bool:
+    con = duckdb.connect(str(path), read_only=True)
+    try:
+        return bool({name for name, _sql in MIGRATIONS} - _applied(con))
+    finally:
+        con.close()
+
+
 def _migrate(con) -> None:
-    for sql in MIGRATIONS:
+    """Apply the migrations this store has not recorded yet, each once, in order."""
+    con.execute("CREATE TABLE IF NOT EXISTS fb_migrations (name VARCHAR PRIMARY KEY, "
+                "applied_at TIMESTAMP)")
+    done = _applied(con)
+    for name, sql in MIGRATIONS:
+        if name in done:
+            continue
         con.execute(sql)
+        con.execute("INSERT INTO fb_migrations VALUES (?, current_timestamp)", [name])
 
 
 def rules() -> dict:
