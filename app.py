@@ -3756,7 +3756,8 @@ def _fw_chart(fig, height, title):
 
 def _view_forward_books() -> None:
     """Six forward paper books A-F (forward/), each 1,000 EUR from the day it started."""
-    st.markdown("#### Paper-Portfolios A–F — forward, je 1.000 € seit dem Start")
+    # English like the rest of the interface (audit 24.10.2026, low 14).
+    st.markdown("#### Paper portfolios A–F — forward, 1,000 € each since the start")
     st.caption(
         "Paper only: no order reaches a broker. Hypothetical simulation with fractional "
         "shares; short positions without confirmed borrow. Costs are assumptions: 0.10 % "

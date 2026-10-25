@@ -135,6 +135,16 @@ def test_the_mailed_briefing_is_part_of_the_scan():
     assert ROOT / "scripts" / "morning_briefing.py" in SCRIPT_FILES
 
 
+def test_the_app_headings_are_english():
+    """Audit 24.10.2026, low 14: the forward books' heading was German inside the
+    English interface. A heading with an umlaut or a German function word fails."""
+    german = re.compile(r"[äöüÄÖÜß]|\b(je|seit|dem|und|der|für|mit|nicht|noch)\b")
+    headings = [t for t in wording.strings_in(ROOT / "app.py") if t.lstrip().startswith("#")]
+    assert headings, "no headings found: the check would pass on nothing"
+    bad = [h for h in headings if german.search(h)]
+    assert bad == [], bad
+
+
 def test_nothing_installed_could_place_an_order():
     """The dependency half of R23. Not routing orders is easiest to guarantee when there
     is nothing in the environment that knows how to."""
