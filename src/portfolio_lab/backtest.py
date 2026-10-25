@@ -173,7 +173,17 @@ def buy_and_hold(
     # assumption a backtest can make, because the companies that stop trading are rarely
     # the ones that did well. So the stated delisting return is applied once, at the last
     # bar, and the position is held at that level afterwards (R18).
+    #
+    # The calendar is the MARKET's (the benchmark's), not the holdings' (audit 24.10.2026
+    # F8). Built from the held names alone it ended with them: when every holding stopped
+    # trading early the window ended on their last bar, nothing looked delisted, and the
+    # stated loss was never taken. Stage B fixed the same hole with `source.sessions`.
+    # Without a benchmark series the holdings' own dates are all there is, so that case
+    # still cannot see a basket that vanished entirely.
     last_bar = wide.apply(lambda col: col.last_valid_index())
+    if not bench.empty:
+        later = bench.index[bench.index > wide.index[0]]
+        wide = wide.reindex(wide.index.union(later))
     window_end = wide.index[-1]
     gone = [c for c in wide.columns
             if last_bar[c] is not None and (window_end - last_bar[c]).days > 10]
