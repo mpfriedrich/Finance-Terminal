@@ -342,12 +342,18 @@ def receive(usd: float, currency: str, fx: float | None) -> float:
 def pick_line(market, cik: int, day: dt.date) -> tuple[dict | None, str]:
     """The company's share class with the highest average traded value over the 20
     sessions BEFORE `day`, and whether it clears the universe rules. Prices of `day`
-    itself are not used: the decision is taken during that session."""
+    itself are not used: the decision is taken during that session.
+
+    Only lines still trading compete: a last bar at most 6 days before `day`, the same
+    limit the stale-price rule below applies. Without that, an ended line of the same
+    CIK (an old CRSP line in the world store) could win on its turnover from years ago,
+    and the event fell out as "Kursdaten veraltet" although the live line was fine
+    (audit 24.10.2026 F20). With no current line, the stale one is still reported."""
     tickers = [r[0] for r in market.execute(
         "SELECT DISTINCT ticker FROM securities WHERE cik = ?", [int(cik)]).fetchall()]
     if not tickers:
         return None, "keine Aktie zur CIK im Bestand"
-    best = None
+    best = best_stale = None
     for t in tickers:
         bars = market.execute(
             "SELECT date, COALESCE(close_raw, close) AS px, volume FROM prices "
@@ -359,8 +365,13 @@ def pick_line(market, cik: int, day: dt.date) -> tuple[dict | None, str]:
         line = {"ticker": t, "history": len(bars), "price": float(bars["px"].iloc[-1]),
                 "last_date": str(bars["date"].iloc[-1])[:10], "dollar_volume_20d": dv,
                 "classes": len(tickers)}
-        if best is None or dv > best["dollar_volume_20d"]:
+        current = (day - dt.date.fromisoformat(line["last_date"])).days <= 6
+        if current and (best is None or dv > best["dollar_volume_20d"]):
             best = line
+        if not current and (best_stale is None or line["last_date"] >
+                            best_stale["last_date"]):
+            best_stale = line
+    best = best or best_stale
     if best is None:
         return None, "keine Kurse vor dem Entscheidungstag"
     last = dt.date.fromisoformat(best["last_date"])

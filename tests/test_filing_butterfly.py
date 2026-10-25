@@ -508,3 +508,19 @@ def test_a_quoted_bid_of_zero_is_a_price_of_zero():
     assert fb.liquidation_usd(legs) is None
     legs[0]["bid"] = float("nan")
     assert fb.liquidation_usd(legs) is None
+
+
+def test_an_ended_line_with_more_old_turnover_does_not_win(market):
+    """F20: an ended line of the same CIK traded far more years ago; the line still
+    trading is chosen, not the ended one (which would read as stale prices)."""
+    market.execute("INSERT INTO securities VALUES (111, 'AAA-OLD')")
+    old_days = pd.bdate_range(end="2024-12-31", periods=300).date
+    market.executemany("INSERT INTO prices VALUES ('AAA-OLD',?,100,100,100,100,?)",
+                       [(d, 50_000_000) for d in old_days])
+    line, why = fb.pick_line(market, 111, ENTRY)
+    assert (line["ticker"], why) == ("AAA", "")
+    assert line["classes"] == 3
+    # with no current line at all, the newest stale line is reported as stale
+    market.execute("DELETE FROM prices WHERE ticker IN ('AAA', 'AAA-B')")
+    line, why = fb.pick_line(market, 111, ENTRY)
+    assert line["ticker"] == "AAA-OLD" and why.startswith("Kursdaten veraltet")
