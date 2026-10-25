@@ -22,10 +22,15 @@ WORLD_DB = DATA_DIR / "world.duckdb"
 USER_DB = DATA_DIR / "user.duckdb"
 # Options paper books (filing_butterfly.py). Their own file, not user.duckdb: the app
 # holds the user store open read-write the whole time, and the tracker has to book trades
-# from a scheduled job while it is open. Both sides open this file only briefly.
+# from a scheduled job while it is open. The app opens this file only briefly; the
+# tracker holds its write lock through the EDGAR and quote fetches, which can take
+# tens of seconds, so the app reads with two tries and says "updating" (audit
+# 24.10.2026 F13).
 PAPER_OPTIONS_DB = DATA_DIR / "paper_options.duckdb"
 # The six forward paper books A-F (forward/), same reasoning: written by the morning job
-# and the tracker script, read by the app, each only for moments.
+# and the tracker script, read by the app. The writer holds the lock through Yahoo,
+# FRED and model training (a minute or more), not only for moments (audit 24.10.2026
+# F13).
 FORWARD_DB = DATA_DIR / "paper_forward.duckdb"
 CACHE_DIR = DATA_DIR / "cache"
 # What alerts have fired, kept by the checker (alerts.py) outside the portfolio store.
