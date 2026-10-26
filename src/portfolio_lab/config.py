@@ -27,6 +27,9 @@ PAPER_OPTIONS_DB = DATA_DIR / "paper_options.duckdb"
 # The six forward paper books A-F (forward/), same reasoning: written by the morning job
 # and the tracker script, read by the app, each only for moments.
 FORWARD_DB = DATA_DIR / "paper_forward.duckdb"
+# The research inputs of books B and C and the ALFRED vintages, copied once from the
+# research folder with their SHA-256 (forward/models.py, audit 24.10.2026 F11).
+FORWARD_INPUTS = DATA_DIR / "forward_inputs"
 CACHE_DIR = DATA_DIR / "cache"
 # What alerts have fired, kept by the checker (alerts.py) outside the portfolio store.
 ALERTS_STATE = DATA_DIR / "alerts_state.json"

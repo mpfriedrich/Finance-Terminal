@@ -3,7 +3,9 @@
 Fixed on 22.10.2026 before the first book opened. A change of rules gets a new version
 number and its own observation period (fw_versions); nothing here is tuned afterwards.
 Version 2 (24.10.2026, before any session was booked) adds the delisting rule of the
-audit's F4 to every book; nothing else changed.
+audit's F4 to every book; nothing else changed. E3 (audit 24.10.2026 F17, F19, low 8):
+the share count's split basis is read on its filing date, a missed month end is caught
+up, and a short universe never puts one name on both sides.
 """
 
 from __future__ import annotations
@@ -22,6 +24,9 @@ RARE = {"jump_short": ("short", "ret5", 2.92252964071333),
 VERSION_NOTES = {
     "2": "Delisting-Regel (Audit 24.10.2026 F4): keine Kurse an 5 vollständigen Sitzungen "
          "→ Abgang realisiert, echte Delisting-Rendite sonst Long −30 %, Short 0 %",
+    "E3": "Audit 24.10.2026 F17/F19: Split-Basis der Aktienzahl am Meldedatum statt am "
+          "Signaltag; ein verpasstes Monatsende wird an der nächsten vollständigen "
+          "Sitzung nachgeholt; bei weniger als 40 Titeln nie derselbe Titel long und short",
 }
 
 BOOKS = [
@@ -48,11 +53,11 @@ BOOKS = [
                     "20-Tage-Peer-Bewegung, je durch die 60-Tage-Volatilität geteilt, "
                     "standardisiert und auf ±3 begrenzt. Die spätere historische Prüfung "
                     "war schwach; die Gewichte bleiben unverändert."},
-    {"code": "E", "id": "fw-e", "kind": "rule_e", "variant": "e", "version": "E2",
+    {"code": "E", "id": "fw-e", "kind": "rule_e", "variant": "e", "version": "E3",
      "name": "E — CLAUDE CHOICE · Momentum, Profitabilität, Kapitaldisziplin",
      "description": "Monatlicher Long/Short-Korb großer US-Aktien nach dem Mittel dreier "
                     "Ränge: 12–1-Momentum, Bruttogewinn je Vermögen und wenig neue Aktien. "
-                    "Puffer gegen Umschlag. Begründung und Regeln in PLAN.md (E1)."},
+                    "Puffer gegen Umschlag. Begründung und Regeln in PLAN.md (E1, E3)."},
     {"code": "F", "id": "fw-f", "kind": "rare", "variant": "f", "version": "F2",
      "name": "F — CODEX EXTREME REVERSION · 75 %",
      "description": "Experimentell und rückblickend entwickelt. Short nach ≥292,25 % in fünf "
@@ -104,10 +109,80 @@ def d_scores(panel, i: int, base_ok: np.ndarray) -> tuple[np.ndarray, np.ndarray
     return fx.d_scores(row, ok), ok
 
 
+def share_dates(market, asof) -> pd.Series:
+    """When each filer's share count in the frame of `asof` was filed (cik -> date),
+    from the same point-in-time selection the frame used (pit.share_counts). Empty for
+    a store without SEC facts; the frame's own date then stands in."""
+    import duckdb
+
+    from ..data import pit
+
+    try:
+        df = pit.share_counts(market, asof)
+    except duckdb.Error:
+        return pd.Series(dtype="datetime64[ns]")
+    if df.empty:
+        return pd.Series(dtype="datetime64[ns]")
+    return pd.Series(pd.to_datetime(df["filed"]).to_numpy(), index=df["cik"].to_numpy())
+
+
+def with_share_dates(frame: pd.DataFrame, market, asof) -> pd.DataFrame:
+    """The frame with `shares_filed`: the filing date its share count is measured on."""
+    dates = share_dates(market, asof)
+    if dates.empty or "cik" not in frame:
+        return frame
+    return frame.assign(shares_filed=frame["cik"].map(dates))
+
+
+def basis_at(panel, when: pd.Series) -> pd.Series:
+    """Traded over split-adjusted close (raw / close) per ticker on the last session on
+    or before `when[ticker]`: the factor that turns a share count of that day into one
+    on today's split basis. NaN before the panel starts."""
+    ratio = getattr(panel, "basis", None)       # a long simulation computes it once
+    if ratio is None:
+        ratio = (panel.raw / panel.close).ffill(limit=10)
+    cal = pd.DatetimeIndex(panel.calendar)
+    when = pd.to_datetime(when.reindex(panel.tickers))
+    out = np.full(len(panel.tickers), np.nan)
+    have = when.notna().to_numpy()
+    pos = cal.searchsorted(when[have].to_numpy(), side="right") - 1
+    cols = np.flatnonzero(have)
+    good = pos >= 0
+    vals = ratio.reindex(columns=panel.tickers).to_numpy()
+    out[cols[good]] = vals[pos[good], cols[good]]
+    return pd.Series(out, index=panel.tickers)
+
+
+def issuance(panel, frame: pd.DataFrame, frame_year_ago: pd.DataFrame, asof_now,
+             asof_prev) -> pd.Series:
+    """Minus the growth in shares over a year, both counts on today's split basis.
+
+    E3 (audit 24.10.2026 F17): each count is put on today's basis with raw / close of
+    the day it was FILED (`shares_filed`, else the frame's date), not of the signal day
+    and 252 sessions before it. A split between a filing and the signal day used to look
+    like a 50 % buyback or a 100 % issuance. One function for the live book and the
+    historical simulation (scripts/e_backtest.py)."""
+    def dated(f, asof):
+        d = pd.Series(pd.Timestamp(asof), index=f.index)
+        if "shares_filed" in f:
+            d = pd.to_datetime(f["shares_filed"]).fillna(pd.Timestamp(asof))
+        return d
+
+    f = frame.drop_duplicates("ticker").set_index("ticker").reindex(panel.tickers)
+    prev = frame_year_ago.drop_duplicates("cik").set_index("cik")
+    now_basis = basis_at(panel, dated(f, asof_now))
+    prev_when = dated(prev, asof_prev)
+    prev_basis = basis_at(panel, f["cik"].map(prev_when))
+    sh_now = pd.to_numeric(f["shares_outstanding"], errors="coerce")
+    sh_prev = pd.to_numeric(f["cik"].map(prev["shares_outstanding"]), errors="coerce")
+    return -((sh_now * now_basis) / (sh_prev * prev_basis) - 1)
+
+
 def e_scores(panel, i: int, frame: pd.DataFrame, frame_year_ago: pd.DataFrame,
-             base_ok: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """E1: mean of the percentile ranks of 12-1 momentum, gross profit / total assets
-    and minus the split-adjusted growth in shares over a year; large, liquid shares."""
+             base_ok: np.ndarray, asof_now, asof_prev) -> tuple[np.ndarray, np.ndarray]:
+    """E: mean of the percentile ranks of 12-1 momentum, gross profit / total assets
+    and minus the split-adjusted growth in shares over a year; large, liquid shares
+    (market cap and the frame's 60-day median traded value)."""
     p = panel.close
     mom = (p.shift(21) / p.shift(252) - 1).iloc[i].reindex(panel.tickers)
     f = frame.drop_duplicates("ticker").set_index("ticker").reindex(panel.tickers)
@@ -115,19 +190,11 @@ def e_scores(panel, i: int, frame: pd.DataFrame, frame_year_ago: pd.DataFrame,
     cap = pd.to_numeric(f["shares_outstanding"], errors="coerce") * raw_px
     gpa = pd.to_numeric(f["gross_profit_ttm"], errors="coerce") / \
         pd.to_numeric(f["total_assets"], errors="coerce").where(lambda v: v > 0)
-    prev = frame_year_ago.drop_duplicates("cik").set_index("cik")["shares_outstanding"]
-    sh_prev = pd.to_numeric(f["cik"].map(prev), errors="coerce")
-    # Shares on today's split basis: count x close_raw / close on that date. After a
-    # 2:1 split the old 1,000 shares were traded at 100 raw = 50 adjusted: 1,000 x 2.
-    j_prev = max(i - 252, 0)
-    basis_now = (panel.raw.iloc[i] / panel.close.iloc[i]).reindex(panel.tickers)
-    basis_prev = (panel.raw.iloc[j_prev] / panel.close.iloc[j_prev]).reindex(panel.tickers)
-    growth = (pd.to_numeric(f["shares_outstanding"], errors="coerce") * basis_now) / \
-        (sh_prev * basis_prev) - 1
-    issuance = -growth
+    iss = issuance(panel, frame, frame_year_ago, asof_now, asof_prev)
     dv = pd.to_numeric(f.get("median_dollar_volume_60d"), errors="coerce")
-    ok = base_ok & (cap >= E_MIN_CAP).to_numpy() & (dv >= E_MIN_DOLLAR_VOLUME).to_numpy()
-    parts = pd.DataFrame({"mom": mom, "gpa": gpa, "iss": issuance})
+    ok = np.asarray(base_ok, bool) & (cap >= E_MIN_CAP).to_numpy() & \
+        (dv >= E_MIN_DOLLAR_VOLUME).to_numpy()
+    parts = pd.DataFrame({"mom": mom, "gpa": gpa, "iss": iss})
     ok &= np.isfinite(parts.to_numpy(dtype=float)).all(axis=1)
     ranks = parts[ok].rank(pct=True)
     s = np.full(len(panel.tickers), np.nan)

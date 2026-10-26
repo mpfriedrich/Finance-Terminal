@@ -2,6 +2,7 @@
 no research files (artifacts and vintages are fixtures)."""
 
 import datetime as dt
+import json
 from types import SimpleNamespace
 
 import duckdb
@@ -9,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from portfolio_lab import config
 from portfolio_lab import filing_butterfly as cal
 from portfolio_lab.forward import engine as en
 from portfolio_lab.forward import features as fx
@@ -116,9 +118,53 @@ def test_e_counts_shares_on_todays_split_basis():
                           "gross_profit_ttm": [1e9], "total_assets": [5e9],
                           "median_dollar_volume_60d": [50e6]})
     year_ago = frame.assign(shares_outstanding=1000e6)
-    s, ok = stg.e_scores(P, len(days) - 1, frame, year_ago, np.array([True]))
+    s, ok = stg.e_scores(P, len(days) - 1, frame, year_ago, np.array([True]),
+                         days[-1], days[-1] - pd.Timedelta(days=365))
     # growth = 2100 / (1000 x 2) - 1 = 5 %; one share: percentile ranks are 1.0
     assert ok[0] and s[0] == pytest.approx(1.0)
+
+
+def test_e_reads_the_split_basis_on_the_filing_date():
+    # Audit 24.10.2026 F17: the basis was read on the signal day and 252 sessions
+    # before, the counts are from filings. AAA: 1,050 shares filed before a 2:1 split
+    # are 2,100 today, a year earlier 1,000 (2,000 today): +5 %, an issuer. BBB has no
+    # split and bought back 10 %. Measured on the signal day, AAA looked like a 47.5 %
+    # buyback and ranked above BBB.
+    days = pd.bdate_range("2024-01-01", periods=300)
+    close = pd.Series(np.linspace(50, 60, 300), index=days)
+    raw_a = close.copy()
+    raw_a.iloc[:250] = close.iloc[:250] * 2           # 2:1 split on session 250
+    P = SimpleNamespace(tickers=["AAA", "BBB"], exclude=set(), calendar=days,
+                        close=pd.DataFrame({"AAA": close, "BBB": close}),
+                        raw=pd.DataFrame({"AAA": raw_a, "BBB": close}))
+    now, prev = days[-1], days[-1] - pd.Timedelta(days=365)
+    frame = pd.DataFrame({"ticker": ["AAA", "BBB"], "cik": [1, 2],
+                          "shares_outstanding": [1050e6, 900e6],
+                          "shares_filed": [days[240], days[240]],
+                          "gross_profit_ttm": [1e9, 1e9], "total_assets": [5e9, 5e9],
+                          "median_dollar_volume_60d": [50e6, 50e6]})
+    year_ago = frame.assign(shares_outstanding=[1000e6, 1000e6],
+                            shares_filed=[days[0], days[0]])
+    iss = stg.issuance(P, frame, year_ago, now, prev)
+    assert iss["AAA"] == pytest.approx(-0.05) and iss["BBB"] == pytest.approx(0.10)
+    s, ok = stg.e_scores(P, len(days) - 1, frame, year_ago, np.array([True, True]),
+                         now, prev)
+    assert ok.all() and s[1] > s[0]
+
+
+def test_e_never_holds_one_name_long_and_short(con):
+    # Audit 24.10.2026, low item 8: with fewer than 40 ranked names the top and the
+    # bottom 20 overlap; the same share was opened on both sides.
+    names = [f"T{j:02d}" for j in range(30)]
+    lg.book(con, "fw-e", dt.datetime(2026, 10, 22), None, "deposit", 1000.0)
+    px = pd.DataFrame({"open": 10.0, "open_adj": 10.0, "open_raw": 10.0}, index=names)
+    sig = {"id": "s1", "payload_json": json.dumps(
+        {"ranking": [{"ticker": t, "score": 1 - k / 30} for k, t in enumerate(names)]})}
+    en.fill_monthly(con, None, "fw-e", sig, THU, px, 1.1, dt.datetime(2026, 10, 22))
+    pos = lg.open_positions(con, "fw-e")
+    assert not pos.ticker.duplicated().any()
+    assert (pos.side == "long").sum() == (pos.side == "short").sum() == 15
+    assert set(pos[pos.side == "long"].ticker) == set(names[:15])
 
 
 def test_vintages_are_cut_where_our_own_snapshot_begins(con, monkeypatch):
@@ -161,9 +207,11 @@ SESSIONS = [d for d in pd.date_range("2024-01-02", "2026-11-06").date if cal.is_
 
 
 def _market(path, last: dt.date, partial: dt.date | None = None,
-            gone: dict | None = None):
-    """`gone` maps a ticker to its last day with a bar (a delisting)."""
-    gone = gone or {}
+            gone: dict | None = None, null_open: dict | None = None,
+            holes: tuple = ()):
+    """`gone` maps a ticker to its last day with a bar (a delisting); `null_open` maps a
+    ticker to a day whose bar has open = NULL; `holes` are days without any bar."""
+    gone, null_open = gone or {}, null_open or {}
     rng = np.random.default_rng(7)
     rets = rng.normal(0.0004, 0.02, (len(SESSIONS), N))
     close = 50 * np.exp(np.cumsum(rets, axis=0))
@@ -180,8 +228,11 @@ def _market(path, last: dt.date, partial: dt.date | None = None,
     for i, d in enumerate(SESSIONS):
         if d > last:
             break
+        if d in holes:
+            continue
         names = range(3) if d == partial else range(N)
-        rows += [(f"T{j:02d}", d, opens[i, j], close[i, j], close[i, j], close[i, j], 1e6)
+        rows += [(f"T{j:02d}", d, None if null_open.get(f"T{j:02d}") == d else opens[i, j],
+                  close[i, j], close[i, j], close[i, j], 1e6)
                  for j in names if d <= gone.get(f"T{j:02d}", d)]
         rows.append(("EURUSD=X", d, 1.1, 1.1, 1.1, 1.1, 0))
     c.executemany("INSERT INTO prices VALUES (?,?,?,?,?,?,?)", rows)
@@ -222,6 +273,26 @@ def _artifact(cols, impute=False):
     return a
 
 
+def _research(root, vint):
+    """B's frozen model, C's yearly models and ALFRED's vintages, written where the
+    research copy keeps them, in its layout."""
+    b = {**_artifact(fx.BASE23, impute=True), "post2024_prices_loaded": False}
+    c = _artifact(fx.V13)
+    years = {"2026": {"models": {"v13": {k: c[k] for k in ("features", "scaler", "model")}},
+                      "window_start": "2016-01-01", "latest_outcome": "2025-12-30",
+                      "samples": 1}}
+    for name, rel in md.INPUTS.items():
+        f = root / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        if name == "b":
+            f.write_text(json.dumps(b))
+        elif name == "c":
+            f.write_text(json.dumps(years))
+        else:
+            vint.to_parquet(f, index=False)
+    return root
+
+
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     months = pd.date_range("2021-01-01", "2026-09-01", freq="MS")
@@ -230,10 +301,12 @@ def world(tmp_path, monkeypatch):
         "available_through": en.FAR, "observation_date": months.strftime("%Y-%m-%d"),
         "value": np.linspace(100, 110, len(months)) + k, "series_id": sid})
         for k, sid in enumerate(fx.MACRO_SERIES)], ignore_index=True)
-    monkeypatch.setattr(en, "_ALFRED", vint)
-    monkeypatch.setattr(md, "load_b", lambda *a: _artifact(fx.BASE23, impute=True))
-    monkeypatch.setattr(md, "load_c_2026", lambda *a: _artifact(fx.V13))
-    monkeypatch.setattr(md, "sha256", lambda p: "fixture")
+    # The three research inputs in the research layout, in a research folder of their
+    # own; the books copy them into their inputs folder on first use (audit F11).
+    research = _research(tmp_path / "research", vint)
+    monkeypatch.setattr(md, "RESEARCH", research)
+    monkeypatch.setattr(config, "FORWARD_INPUTS", tmp_path / "forward_inputs")
+    monkeypatch.setattr(en, "_ALFRED", None)
     trained = []
 
     def train(panel, cols, start, cutoff, variant, log=print):
@@ -457,6 +530,148 @@ def test_a_share_without_bars_for_five_sessions_is_realised_as_delisted(world):
         assert r.equity == pytest.approx(r.cash + r.positions)
 
 
+def test_a_nan_amount_is_refused_by_the_ledger(con):
+    # Audit 24.10.2026 F5: one NaN row made SUM(amount), the cash and the book NaN.
+    lg.book(con, "x", dt.datetime(2026, 10, 22), None, "deposit", 1000.0)
+    for bad in (float("nan"), float("inf"), None):
+        with pytest.raises(ValueError):
+            lg.book(con, "x", dt.datetime(2026, 10, 22), None, "proceeds", bad)
+    assert lg.cash(con, "x") == pytest.approx(1000.0)
+
+
+def test_a_held_share_with_a_null_open_stays_open_and_the_cash_finite(world):
+    # Audit 24.10.2026 F5: `not nan` and `nan <= 0` are both False, so a NULL open on a
+    # rebalancing day became NaN proceeds and a NaN book for good.
+    live = FakeLive()
+    m1 = _market(world["dir"] / "m1.duckdb", WED)
+    en.run(world["path"], m1, live, now=at(WED, 20), log=lambda *_: None)
+    m1.close()
+    m2 = _market(world["dir"] / "m2.duckdb", THU)
+    en.run(world["path"], m2, live, now=at(THU, 20), log=lambda *_: None)
+    m2.close()
+    held = _read(world["path"], "SELECT ticker FROM fw_positions WHERE book_id='fw-d' AND "
+                                "status='open' AND side='long' ORDER BY ticker")
+    t = held.ticker.iloc[0]
+    sig_day, fill_day = dt.date(2026, 10, 28), dt.date(2026, 10, 29)   # D's next basket
+    m3 = _market(world["dir"] / "m3.duckdb", fill_day, null_open={t: fill_day})
+    en.run(world["path"], m3, live, now=at(sig_day, 20), log=lambda *_: None)
+    en.run(world["path"], m3, live, now=at(fill_day, 20), log=lambda *_: None)
+    m3.close()
+    o = _read(world["path"], f"SELECT status FROM fw_orders WHERE book_id='fw-d' AND "
+                             f"ticker='{t}' AND action='close' AND exec_session='{fill_day}'")
+    assert list(o.status) == ["unresolved"]
+    assert _read(world["path"], f"SELECT status FROM fw_positions WHERE book_id='fw-d' AND "
+                                f"ticker='{t}'").status.tolist() == ["open"]
+    marks = _read(world["path"], "SELECT * FROM fw_marks")
+    assert str(fill_day) in set(marks.session.astype(str))
+    assert np.isfinite(marks[["cash", "equity", "positions"]].to_numpy()).all()
+    led = _read(world["path"], "SELECT amount FROM fw_ledger")
+    assert np.isfinite(led.amount.to_numpy()).all()
+
+
+def test_missing_research_inputs_stop_only_the_books_that_need_them(world, monkeypatch):
+    # Audit 24.10.2026 F11: without the research folder every book failed, D, E and F
+    # too, because the vintages were read on every run.
+    import shutil
+
+    shutil.rmtree(md.RESEARCH)
+    live = FakeLive()
+    m1 = _market(world["dir"] / "m1.duckdb", WED)
+    s = en.run(world["path"], m1, live, now=at(WED, 20), log=lambda *_: None)
+    m1.close()
+    by = _read(world["path"], "SELECT book_id, status FROM fw_signals").set_index("book_id")
+    assert by.loc["fw-d", "status"] == by.loc["fw-e", "status"] == "pending"
+    assert by.loc["fw-f", "status"] == "observed"
+    assert not {"fw-a", "fw-b", "fw-c"} & set(by.index)
+    notes = "\n".join(s["notes"])
+    assert "fw-b: Modell nicht geladen" in notes and "fw-c: Modell nicht geladen" in notes
+    assert "ALFRED" in notes
+    assert str(world["dir"]) not in notes                # no local path in the notes
+
+
+def test_research_inputs_are_copied_once_with_their_hash(world):
+    live = FakeLive()
+    m1 = _market(world["dir"] / "m1.duckdb", WED)
+    en.run(world["path"], m1, live, now=at(WED, 20), log=lambda *_: None)
+    m1.close()
+    inputs = config.FORWARD_INPUTS
+    manifest = json.loads((inputs / "manifest.json").read_text())
+    assert set(manifest) == {"b", "c", "alfred"}
+    for name, m in manifest.items():
+        assert m["sha256"] == md.sha256(inputs / m["file"]), name
+    src = _read(world["path"], "SELECT book_id, source, sha256 FROM fw_models").set_index(
+        "book_id")
+    assert src.loc["fw-b", "source"] == "forward_inputs/frozen_model.json"
+    assert src.loc["fw-b", "sha256"] == manifest["b"]["sha256"]
+    # the research folder may change or vanish: the books read their copy
+    (md.RESEARCH / md.INPUTS["b"]).write_text("{}")
+    assert md.load_b()["features"] == fx.BASE23
+    # a copy that no longer matches its hash is refused
+    (inputs / "frozen_model.json").write_text("{}")
+    with pytest.raises(ValueError):
+        md.stored("b")
+
+
+def test_a_missed_month_end_is_caught_up_on_the_next_complete_session(world):
+    # Audit 24.10.2026 F19: E was due only when L itself was the month's last session,
+    # so a month end run too late moved the next basket a whole month.
+    live = FakeLive()
+    oct29, oct30, nov2, nov3 = (dt.date(2026, 10, 29), dt.date(2026, 10, 30),
+                                dt.date(2026, 11, 2), dt.date(2026, 11, 3))
+    m1 = _market(world["dir"] / "m1.duckdb", WED)
+    en.run(world["path"], m1, live, now=at(WED, 20), log=lambda *_: None)
+    m1.close()
+    m2 = _market(world["dir"] / "m2.duckdb", nov2)
+    en.run(world["path"], m2, live, now=at(oct29, 20), log=lambda *_: None)
+    en.run(world["path"], m2, live, now=at(nov2, 12), log=lambda *_: None)  # too late
+    e = _read(world["path"], "SELECT signal_session, status FROM fw_signals WHERE "
+                             "book_id='fw-e' ORDER BY 1")
+    assert e.set_index(e.signal_session.astype(str)).loc[str(oct30), "status"] == "missed"
+    en.run(world["path"], m2, live, now=at(nov2, 20), log=lambda *_: None)
+    m2.close()
+    e = _read(world["path"], "SELECT signal_session, exec_session, status FROM fw_signals "
+                             f"WHERE book_id='fw-e' AND signal_session='{nov2}'")
+    assert list(e.status) == ["pending"] and e.exec_session.iloc[0].date() == nov3
+    assert en.month_anchor(nov3) == oct30 and en.month_anchor(oct30) == oct30
+
+
+def test_a_signal_whose_session_never_gets_bars_is_marked_missed(world):
+    # Audit 24.10.2026, low item 9: a session without any bar is passed over as a
+    # closure the calendar does not know, and its signals stayed "pending" for good.
+    live = FakeLive()
+    m1 = _market(world["dir"] / "m1.duckdb", WED)
+    en.run(world["path"], m1, live, now=at(WED, 20), log=lambda *_: None)
+    m1.close()
+    m2 = _market(world["dir"] / "m2.duckdb", FRI, holes=(THU,))
+    en.run(world["path"], m2, live, now=at(FRI, 20), log=lambda *_: None)
+    m2.close()
+    left = _read(world["path"], f"SELECT book_id, status FROM fw_signals WHERE "
+                                f"exec_session='{THU}' AND book_id <> 'fw-f'")
+    assert set(left.status) == {"missed"} and len(left) == 5, left
+    assert _read(world["path"], "SELECT COUNT(*) n FROM fw_orders")["n"][0] == 0
+    # E is due again at once (F19): its start basket is built after Friday's close
+    e = _read(world["path"], f"SELECT status FROM fw_signals WHERE book_id='fw-e' AND "
+                             f"signal_session='{FRI}'")
+    assert list(e.status) == ["pending"]
+
+
+def test_an_error_note_carries_no_address_or_key(world, monkeypatch):
+    # R24: notes reach the brief, the mail and the app; ui.error_text cuts URLs and
+    # key=value pairs out of the exception's message.
+    live = FakeLive()
+
+    def broken(day):
+        raise RuntimeError("GET https://example.invalid/x?api_key=SECRET123 failed")
+
+    monkeypatch.setattr(live, "pit_frame", broken)
+    m1 = _market(world["dir"] / "m1.duckdb", WED)
+    s = en.run(world["path"], m1, live, now=at(WED, 20), log=lambda *_: None)
+    m1.close()
+    notes = "\n".join(s["notes"])
+    assert "E: Signal fehlgeschlagen (RuntimeError" in notes
+    assert "SECRET123" not in notes and "example.invalid" not in notes
+
+
 def test_a_book_opened_under_an_older_version_moves_to_the_new_one(con, monkeypatch):
     # The six real books opened on 22.10.2026 as A1-F1; the delisting rule is version 2.
     old = [{**b, "version": b["code"] + "1"} for b in stg.BOOKS]
@@ -469,11 +684,25 @@ def test_a_book_opened_under_an_older_version_moves_to_the_new_one(con, monkeypa
     v = con.execute("SELECT book_id, version, note FROM fw_versions ORDER BY 1, 2"
                     ).fetch_df()
     assert list(v[v.book_id == "fw-a"].version) == ["A1", "A2"]
-    assert "Delisting" in v[v.version == "E2"].note.iloc[0]
+    assert "Delisting" in v[v.version == "A2"].note.iloc[0]
+    assert "F17" in v[v.version == "E3"].note.iloc[0]
     assert set(con.execute("SELECT version FROM fw_books").fetch_df().version) == \
         {b["version"] for b in new}
     assert con.execute("SELECT COUNT(*) FROM fw_ledger WHERE kind='deposit'"
                        ).fetchone()[0] == 6                # no second deposit
+
+
+def test_the_running_e2_book_moves_to_e3_alone(con, monkeypatch):
+    # The real books run as A2-F2 since 24.10.2026; F17/F19 change E's rules only.
+    old = [{**b, "version": "E2"} if b["code"] == "E" else b for b in stg.BOOKS]
+    new = list(stg.BOOKS)
+    monkeypatch.setattr(stg, "BOOKS", old)
+    en.ensure_books(con, at(WED, 20).replace(tzinfo=None))
+    monkeypatch.setattr(stg, "BOOKS", new)
+    en.ensure_books(con, at(THU, 20).replace(tzinfo=None))
+    v = con.execute("SELECT book_id, version FROM fw_versions ORDER BY 1, 2").fetch_df()
+    assert list(v[v.book_id == "fw-e"].version) == ["E2", "E3"]
+    assert (v.groupby("book_id").size().drop("fw-e") == 1).all()
 
 
 def test_the_brief_names_every_book_and_says_it_is_paper(world):
@@ -520,3 +749,105 @@ def test_the_portfolios_view_shows_all_six_books(world, tmp_path, monkeypatch):
         assert b["name"] in labels
     frames = "\n".join(str(d.value) for d in app.dataframe)
     assert "unbestätigt" in frames                   # short borrow is never claimed
+
+
+# -- the store itself ---------------------------------------------------------------------
+
+OLD_SCHEMA = [                      # the store as the first books made it, 22.10.2026
+    "CREATE TABLE fw_fx (day DATE PRIMARY KEY, eurusd DOUBLE, source VARCHAR)",
+    "CREATE TABLE fw_runs (run_at TIMESTAMP PRIMARY KEY, summary_json VARCHAR)",
+]
+
+
+def test_a_store_of_the_old_schema_opens_and_migrates(tmp_path):
+    # Audit 24.10.2026, low item 4: CREATE TABLE IF NOT EXISTS never adds a column.
+    path = tmp_path / "old.duckdb"
+    c = duckdb.connect(str(path))
+    for sql in OLD_SCHEMA:
+        c.execute(sql)
+    c.execute("INSERT INTO fw_fx VALUES ('2026-10-21', 1.16, 'store')")
+    c.close()
+    con = lg.connect(path)
+    cols = [r[0] for r in con.execute("DESCRIBE fw_fx").fetchall()]
+    assert "fetched_at" in cols
+    assert con.execute("SELECT eurusd FROM fw_fx").fetchone()[0] == 1.16
+    names = {r[0] for r in con.execute("SELECT name FROM fw_migrations").fetchall()}
+    assert names == {n for n, _ in lg.MIGRATIONS}
+    con.close()
+    con = lg.connect(path)                                 # applied once only
+    assert con.execute("SELECT COUNT(*) FROM fw_migrations").fetchone()[0] == \
+        len(lg.MIGRATIONS)
+    con.close()
+    ro = lg.connect(path, read_only=True)
+    assert ro.execute("SELECT COUNT(*) FROM fw_books").fetchone()[0] == 0
+    ro.close()
+
+
+def test_a_read_only_visit_does_not_create_the_store(tmp_path):
+    # Audit 24.10.2026, low item 12.
+    path = tmp_path / "sub" / "fw.duckdb"
+    with pytest.raises(FileNotFoundError):
+        lg.connect(path, read_only=True)
+    assert not path.exists() and not path.parent.exists()
+
+
+def test_a_locked_store_is_retried(tmp_path, monkeypatch):
+    real, calls = duckdb.connect, []
+
+    def flaky(*a, **k):
+        calls.append(1)
+        if len(calls) < 3:
+            raise duckdb.IOException("Could not set lock on file")
+        return real(*a, **k)
+
+    monkeypatch.setattr(lg.duckdb, "connect", flaky)
+    monkeypatch.setattr(lg.time, "sleep", lambda s: None)
+    con = lg.connect(tmp_path / "fw.duckdb")
+    assert len(calls) == 3
+    con.close()
+    calls.clear()
+    with pytest.raises(duckdb.IOException):
+        lg.connect(tmp_path / "fw.duckdb", tries=2)
+
+
+def test_an_intraday_eurusd_value_is_replaced_until_its_day_is_over(con):
+    # Audit 24.10.2026, low item 3: INSERT OR IGNORE kept the first value of a day.
+    day = dt.date(2026, 10, 23)
+    lg.store_fx(con, day, 1.16, "store", None)              # the market store's value
+    lg.store_fx(con, day, 1.17, "yahoo", dt.datetime(2026, 10, 23, 15))   # intraday
+    assert en.fx_on(con, day) == pytest.approx(1.17)
+    lg.store_fx(con, day, 1.18, "yahoo", dt.datetime(2026, 10, 24, 0, 30))  # day over
+    assert en.fx_on(con, day) == pytest.approx(1.18)
+    lg.store_fx(con, day, 1.19, "yahoo", dt.datetime(2026, 10, 25, 9))     # final stays
+    lg.store_fx(con, day, 1.20, "store", None)
+    assert en.fx_on(con, day) == pytest.approx(1.18)
+
+
+def test_live_opens_one_source_per_run_and_closes_it(tmp_path, monkeypatch):
+    # Audit 24.10.2026, low item 11: each pit_frame call opened a new source.
+    from portfolio_lab.data import sources
+
+    opened, closed = [], []
+
+    class Src:
+        def __init__(self):
+            self.con = SimpleNamespace(close=lambda: closed.append(1))
+
+        def snapshot(self):
+            return SimpleNamespace(fingerprint=lambda: "fp")
+
+        def screening_frame(self, day):
+            return pd.DataFrame({"ticker": ["AAA"], "day": [str(day)]})
+
+    def open_selected(settings):
+        opened.append(settings.data_source)
+        return Src(), None
+
+    monkeypatch.setattr(sources, "open_selected", open_selected)
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+    live = en.Live()
+    live.pit_frame(dt.date(2026, 10, 30))
+    live.pit_frame(dt.date(2025, 10, 30))
+    assert opened == ["free"] and closed == []
+    live.close()
+    assert closed == [1]

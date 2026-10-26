@@ -22,7 +22,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .. import filing_butterfly as cal
+from .. import nyse as cal
+from .. import ui
 from ..data import history
 from . import data as dd
 from . import features as fx
@@ -41,7 +42,8 @@ def open_time(day: dt.date) -> dt.datetime:
 
 
 def close_time(day: dt.date) -> dt.datetime:
-    t = dt.datetime(day.year, day.month, day.day, 16, 0, tzinfo=cal.ET)
+    """The end of `day`'s regular session (13:00 on an early close), as naive UTC."""
+    t = dt.datetime(day.year, day.month, day.day, cal.close_hour(day), 0, tzinfo=cal.ET)
     return t.astimezone(dt.UTC).replace(tzinfo=None)
 
 
@@ -70,14 +72,26 @@ class Live:
     def fred(self) -> pd.DataFrame:
         return dd.fred_snapshot()
 
-    def pit_frame(self, day: dt.date) -> pd.DataFrame:
-        from ..config import CACHE_DIR, Settings
-        from ..data.sources import open_selected
-        from ..pit_cache import FrameCache
+    _cache = None
 
-        src, _ = open_selected(Settings(data_source="free"))
-        cache = FrameCache(src, CACHE_DIR / "pit", src.snapshot().fingerprint())
-        return cache.frame_for(day)
+    def pit_frame(self, day: dt.date) -> pd.DataFrame:
+        """The free store's screening frame of `day` from the pit cache. One source and
+        one cache per run: every call used to open a new connection to the market store
+        and never close it (audit 24.10.2026, low item 11); `close` ends it."""
+        if self._cache is None:
+            from .. import config
+            from ..data.sources import open_selected
+            from ..pit_cache import FrameCache
+
+            src, _ = open_selected(config.Settings(data_source="free"))
+            self._cache = FrameCache(src, config.CACHE_DIR / "pit",
+                                     src.snapshot().fingerprint())
+        return self._cache.frame_for(day)
+
+    def close(self) -> None:
+        if self._cache is not None:
+            self._cache.source.con.close()
+            self._cache = None
 
 
 # -- setup ------------------------------------------------------------------------------
@@ -93,7 +107,8 @@ def ensure_books(con, now: dt.datetime) -> None:
                             [b["version"], json.dumps(config), b["id"]])
                 con.execute("INSERT INTO fw_versions VALUES (?,?,?,?,?)",
                             [b["id"], b["version"], now, json.dumps(config),
-                             stg.VERSION_NOTES.get(b["version"][1:], "neue Version")])
+                             stg.VERSION_NOTES.get(b["version"], stg.VERSION_NOTES.get(
+                                b["version"][1:], "neue Version"))])
             continue
         first = first_session_after(now)
         # One transaction: a book without its deposit would start with no cash.
@@ -112,7 +127,7 @@ def ensure_books(con, now: dt.datetime) -> None:
             raise
 
 
-def refresh_inputs(con, market, live, today: dt.date, notes: list) -> None:
+def refresh_inputs(con, market, live, today: dt.date, notes: list, now=None) -> None:
     """SPY and EUR/USD from Yahoo, today's FRED vintage. A failure is a note, not a stop:
     the books then wait for the data instead of using made-up values."""
     try:
@@ -125,18 +140,20 @@ def refresh_inputs(con, market, live, today: dt.date, notes: list) -> None:
         notes.append(f"SPY nicht geladen: {type(exc).__name__}")
     store = market.execute("SELECT date, close FROM prices WHERE ticker='EURUSD=X' AND "
                            "date >= '2026-01-01'").fetchall()
-    for d, v in store:
-        con.execute("INSERT OR IGNORE INTO fw_fx VALUES (?,?,'store')", [d, float(v)])
     try:
         for d, v in live.fx(today - dt.timedelta(days=30)).items():
             if v and not math.isnan(v):
-                con.execute("INSERT OR IGNORE INTO fw_fx VALUES (?,?,'yahoo')",
-                            [d, float(v)])
+                lg.store_fx(con, pd.Timestamp(d).date(), float(v), "yahoo", now)
     except Exception as exc:                                       # noqa: BLE001
         notes.append(f"EUR/USD live nicht geladen: {type(exc).__name__}")
+    for d, v in store:             # only where Yahoo gave nothing (lg.store_fx)
+        if v and not math.isnan(v):
+            lg.store_fx(con, pd.Timestamp(d).date(), float(v), "store", None)
     try:
         snap = live.fred()
         alfred = _alfred()
+        if alfred is None:
+            alfred = pd.DataFrame(columns=VINTAGE_COLUMNS)
         for r in snap.itertuples():
             obs = pd.Timestamp(r.observation_date).date()
             cur = con.execute("SELECT value FROM fw_macro WHERE series_id=? AND "
@@ -159,19 +176,35 @@ def refresh_inputs(con, market, live, today: dt.date, notes: list) -> None:
         notes.append(f"FRED nicht geladen: {type(exc).__name__}")
 
 
-_ALFRED = None
+_ALFRED = None          # tests set a frame here; otherwise read from the stored copy
+_ALFRED_READ: dict = {}
+VINTAGE_COLUMNS = ["available_from", "available_through", "observation_date", "value",
+                   "series_id"]
 
 
-def _alfred() -> pd.DataFrame:
-    global _ALFRED
-    if _ALFRED is None:
-        _ALFRED = pd.read_parquet(md.ALFRED)
-    return _ALFRED
+def _alfred() -> pd.DataFrame | None:
+    """ALFRED's vintages from the stored copy, or None when there is none (audit
+    24.10.2026 F11: a missing research folder used to stop all six books, although
+    only A and C use macro inputs)."""
+    if _ALFRED is not None:
+        return _ALFRED
+    try:
+        path = md.stored("alfred")
+    except (md.MissingInput, ValueError):
+        return None
+    key = (str(path), path.stat().st_mtime_ns)
+    if key not in _ALFRED_READ:
+        _ALFRED_READ.clear()
+        _ALFRED_READ[key] = pd.read_parquet(path)
+    return _ALFRED_READ[key]
 
 
 def vintages(con) -> pd.DataFrame:
-    """ALFRED's vintages, cut where one of our own FRED snapshots begins, plus ours."""
-    a = _alfred().copy()
+    """ALFRED's vintages, cut where one of our own FRED snapshots begins, plus ours.
+    Without ALFRED only ours; the books that need macro inputs (A, C) are then not
+    scored at all (make_signals), so this never feeds them a shortened history."""
+    a = _alfred()
+    a = pd.DataFrame(columns=VINTAGE_COLUMNS) if a is None else a.copy()
     for col in ("available_from", "available_through", "observation_date"):
         a[col] = a[col].astype(str).str[:10]
     ours = con.execute("SELECT series_id, observation_date, value, available_from, "
@@ -188,8 +221,10 @@ def vintages(con) -> pd.DataFrame:
             a.loc[has, "available_through"].to_numpy(),
             day_before.dt.strftime("%Y-%m-%d").to_numpy())
         a = a[a.available_from <= a.available_through]
-    return pd.concat([a[["available_from", "available_through", "observation_date",
-                         "value", "series_id"]], ours], ignore_index=True)
+    parts = [x for x in (a[VINTAGE_COLUMNS], ours[VINTAGE_COLUMNS]) if len(x)]
+    if not parts:
+        return pd.DataFrame(columns=VINTAGE_COLUMNS)
+    return pd.concat(parts, ignore_index=True)
 
 
 def spy_frame(con) -> pd.DataFrame:
@@ -229,16 +264,31 @@ def _store_model(con, book_id, now, artifact, source, sha, next_retrain) -> None
 
 
 def ensure_models(con, market, today: dt.date, now, log, notes) -> None:
-    """B and C from the research files, A trained at the start; retraining when due."""
+    """B and C from the stored research inputs, A trained at the start; retraining
+    when due. Each book on its own: a missing or changed input only stops that book and
+    leaves a note (audit 24.10.2026 F11). The source is recorded without the local
+    folder, so no full path reaches the app or the brief."""
     if active_model(con, "fw-b") is None:
-        b = md.load_b()
-        _store_model(con, "fw-b", now, b, str(md.B_ARTIFACT), md.sha256(md.B_ARTIFACT),
-                     None)
+        try:
+            path = md.stored("b")
+            b = md.load_b(path)
+            _store_model(con, "fw-b", now, b, f"forward_inputs/{path.name}",
+                         md.sha256(path), None)
+        except Exception as exc:                                   # noqa: BLE001
+            notes.append(f"fw-b: Modell nicht geladen ({ui.error_text(exc)})")
     if active_model(con, "fw-c") is None:
-        c = md.load_c_2026()
-        c["outcomes_before"] = "2026-01-01"
-        _store_model(con, "fw-c", now, c, f"{md.C_ARTIFACT} [2026][v13]",
-                     md.sha256(md.C_ARTIFACT), cal.sessions_from(dt.date(2027, 1, 1), 1)[0])
+        try:
+            path = md.stored("c")
+            c = md.load_c_2026(path)
+            c["outcomes_before"] = "2026-01-01"
+            _store_model(con, "fw-c", now, c, f"forward_inputs/{path.name} [2026][v13]",
+                         md.sha256(path), cal.sessions_from(dt.date(2027, 1, 1), 1)[0])
+        except Exception as exc:                                   # noqa: BLE001
+            notes.append(f"fw-c: Modell nicht geladen ({ui.error_text(exc)})")
+    if _alfred() is None:
+        notes.append("ALFRED-Vintages fehlen: A und C werden weder trainiert noch "
+                     "bewertet, D, E und F laufen weiter")
+        return
     due = []
     a = active_model(con, "fw-a")
     if a is None or (a["_next"] and today >= a["_next"]):
@@ -258,8 +308,7 @@ def ensure_models(con, market, today: dt.date, now, log, notes) -> None:
             art = md.train_window(panel, cols, start, cutoff, variant, log)
             _store_model(con, book_id, now, art, "trained in the tracker", None, nxt)
         except Exception as exc:                                   # noqa: BLE001
-            notes.append(f"{book_id}: Training fehlgeschlagen ({type(exc).__name__}: "
-                         f"{str(exc)[:120]})")
+            notes.append(f"{book_id}: Training fehlgeschlagen ({ui.error_text(exc)})")
 
 
 # -- prices of one session ---------------------------------------------------------------
@@ -276,18 +325,31 @@ def prices_at(market, day: dt.date) -> pd.DataFrame:
 def adj_open(market, ticker: str, day: dt.date) -> float | None:
     r = market.execute("SELECT open * close_adj / close FROM prices WHERE ticker=? AND "
                        "date=? AND close > 0", [ticker, day]).fetchone()
-    return float(r[0]) if r and r[0] and r[0] > 0 else None
+    return float(r[0]) if r and _usable(r[0]) else None
+
+
+def _usable(price) -> bool:
+    """A real, positive price. NaN passes `not x` and `x <= 0` alike (audit 24.10.2026
+    F5: `prices.open` may be NULL, and a NaN open became NaN proceeds, NaN cash and a
+    NaN book for good), so finiteness is checked explicitly."""
+    try:
+        return price is not None and math.isfinite(float(price)) and float(price) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def equivalent(market, pos: dict, adj_now: float | None) -> float | None:
     """The price on the entry price's basis: entry x (adjusted now / adjusted entry),
-    both read today, so dividends between entry and now count."""
-    if not adj_now or adj_now <= 0:
+    both read today, so dividends between entry and now count. None when either price
+    is missing, NaN or not positive: the caller then keeps the last mark or leaves the
+    order unresolved, never books a made-up value."""
+    if not _usable(adj_now):
         return None
     base = adj_open(market, pos["ticker"], pos["opened_session"])
-    if not base:
+    if not _usable(base):
         return None
-    return pos["entry_usd"] * adj_now / base
+    out = pos["entry_usd"] * adj_now / base
+    return out if _usable(out) else None
 
 
 def _order(con, book_id, sig_id, now, S, ticker, side, action, rule, status, note,
@@ -434,22 +496,28 @@ def fill_monthly(con, market, book_id, sig, S, px, fx_open, now) -> str:
     equity = cash + value
     each = equity * 0.5 / stg.TOP_N
     new = []
+    # Each side at most half the ranking, and a name taken once is taken: with fewer
+    # than 40 ranked names the top 20 and the bottom 20 overlap, and the same share
+    # used to be opened long and short at once (audit 24.10.2026, low item 8; E3).
+    per_side = min(stg.TOP_N, n // 2)
+    taken = set(held["ticker"])
     for side, order in (("long", ranking), ("short", ranking[::-1])):
         have = set(held.loc[held["side"] == side, "ticker"])
-        need = stg.TOP_N - len(have)
+        need = per_side - len(have)
         for t in order:
             if need <= 0:
                 break
-            if t in set(held["ticker"]) or not _valid_open(px, t):
+            if t in taken or not _valid_open(px, t):
                 continue
             new.append((t, side, pos_of[t]))
+            taken.add(t)
             need -= 1
     if not new:
         return "keine Änderungen"
     scale = min(1.0, cash / (len(new) * each * (1 + lg.COST))) if each > 0 else 0.0
     for t, side, k in new:
         _open_at(con, book_id, sig["id"], now, S, t, side, "monthly", px, fx_open,
-                 each * scale, f"E1 {side}", score=payload["ranking"][k]["score"],
+                 each * scale, f"E3 {side}", score=payload["ranking"][k]["score"],
                  rank=k + 1, status="filled" if scale >= 1 else "resized")
     return f"{len(new)} neue Positionen" + (" (verkleinert)" if scale < 1 else "")
 
@@ -557,7 +625,12 @@ def _book_session(con, market, b: dict, S: dt.date, px, fx_open, fx_close, now) 
                        "AND status='pending'", [bid, S]).fetch_df().to_dict("records")
     if b["kind"] == "rare":
         for p in lg.open_positions(con, bid).to_dict("records"):
-            if p["planned_exit"] is not None and S >= p["planned_exit"]:
+            # The store hands planned_exit back as a pandas Timestamp, which cannot be
+            # compared with a date: every F position raised a TypeError on the session
+            # after its entry, and the run stopped there for all six books (found by the
+            # hand-made market test of audit 24.10.2026 F21).
+            if pd.notna(p["planned_exit"]) and \
+                    S >= pd.Timestamp(p["planned_exit"]).date():
                 _close_at_open(con, market, bid, p, S, px, fx_open, now,
                                "fünf Sitzungen gehalten", None)
     for sig in sigs:
@@ -573,6 +646,13 @@ def _book_session(con, market, b: dict, S: dt.date, px, fx_open, fx_close, now) 
             result = fill_rare(con, market, bid, sig, S, px, fx_open, now, prev_eq)
         con.execute("UPDATE fw_signals SET status='executed', note=? WHERE id=?",
                     [result, sig["id"]])
+    # A signal for a session before S that is still pending was never filled: its
+    # session had no bars at all and was passed over (a closure the calendar does not
+    # know). It used to stay "pending" for good (audit 24.10.2026, low item 9); a
+    # later session being booked bounds the wait, and E is then due again (F19).
+    con.execute("UPDATE fw_signals SET status='missed', note='keine Kurse am "
+                "Ausführungstag: nicht ausgeführt' WHERE book_id=? AND status='pending' "
+                "AND exec_session < ?", [bid, S])
     prices = {}
     for p in lg.open_positions(con, bid).to_dict("records"):
         eq = equivalent(market, p, px["close_adj"].get(p["ticker"]))
@@ -622,9 +702,22 @@ def _due(con, book: dict, L: dt.date) -> bool:
             n += 1
         return n >= 5
     if book["kind"] == "rule_e":
-        month_end = cal.next_session(L).month != L.month
-        return last is None or (month_end and last < L)
+        return last is None or last < month_anchor(L)
     return True
+
+
+def month_anchor(L: dt.date) -> dt.date:
+    """The month end E's next basket belongs to: L itself when L is the last session of
+    its month, else the last session of the month before.
+
+    E is due as long as no signal (pending or executed) exists from that session on. It
+    used to be due only when L itself was the month's last session, so a month end that
+    was incomplete or run too late moved the basket a whole month (audit 24.10.2026
+    F19); now the next complete session catches up. The first basket is built at the
+    start, mid-month (22.10.2026); the month ends follow from there."""
+    if cal.next_session(L).month != L.month:
+        return L
+    return cal.prev_session(dt.date(L.year, L.month, 1))
 
 
 def _rows(panel, i: int) -> tuple[pd.DataFrame, np.ndarray]:
@@ -687,6 +780,9 @@ def make_signals(con, market, live, L: dt.date, now, started: dt.datetime, log,
                 status[b["code"]] = f"{len(cands)} Signal(e)"
                 continue
             if b["kind"] == "model":
+                if "alfred" in md.NEEDS.get(b["id"], ()) and _alfred() is None:
+                    status[b["code"]] = "wartet auf die ALFRED-Vintages"
+                    continue
                 art = active_model(con, b["id"])
                 if art is None:
                     status[b["code"]] = "kein Modell"
@@ -699,9 +795,10 @@ def make_signals(con, market, live, L: dt.date, now, started: dt.datetime, log,
                 s, ok = stg.d_scores(panel, i, base_ok)
                 meta = {}
             else:
-                frame = live.pit_frame(L)
-                year_ago = live.pit_frame(L - dt.timedelta(days=365))
-                s, ok = stg.e_scores(panel, i, frame, year_ago, base_ok)
+                prev = L - dt.timedelta(days=365)
+                frame = stg.with_share_dates(live.pit_frame(L), market, L)
+                year_ago = stg.with_share_dates(live.pit_frame(prev), market, prev)
+                s, ok = stg.e_scores(panel, i, frame, year_ago, base_ok, L, prev)
                 meta = {}
             rank = stg.ranking(s, ok, panel.tickers)
             kind = "monthly" if b["kind"] == "rule_e" else "rebalance"
@@ -710,8 +807,7 @@ def make_signals(con, market, live, L: dt.date, now, started: dt.datetime, log,
                       f"{len(rank)} geeignete Aktien")
             status[b["code"]] = f"Korb für {nxt} geplant ({len(rank)} geeignet)"
         except Exception as exc:                                   # noqa: BLE001
-            notes.append(f"{b['code']}: Signal fehlgeschlagen ({type(exc).__name__}: "
-                         f"{str(exc)[:120]})")
+            notes.append(f"{b['code']}: Signal fehlgeschlagen ({ui.error_text(exc)})")
     return status
 
 
@@ -728,7 +824,7 @@ def run(path: Path, market, live=None, now: dt.datetime | None = None, log=print
         ensure_books(con, now)
         started = con.execute("SELECT MIN(started_at) FROM fw_books").fetchone()[0]
         first = con.execute("SELECT MIN(first_session) FROM fw_books").fetchone()[0]
-        refresh_inputs(con, market, live, today, notes)
+        refresh_inputs(con, market, live, today, notes, now)
         ensure_models(con, market, today, now, log, notes)
         complete = dd.complete_sessions(market, first - dt.timedelta(days=10))
         data_days = list(dd.coverage(market, first - dt.timedelta(days=10)).index)
@@ -783,4 +879,6 @@ def run(path: Path, market, live=None, now: dt.datetime | None = None, log=print
                     [now, json.dumps(summary, default=str)])
     finally:
         con.close()
+        if hasattr(live, "close"):
+            live.close()
     return summary

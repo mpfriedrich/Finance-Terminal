@@ -12,8 +12,12 @@ with the target centred, at most 256 training rows per signal date (seed 62025).
     the previous ten calendar years by `train_window`, the same recipe.
   * A (v29) is fitted at the start on the ten years before the implementation date and
     refitted every twelve months by the same function.
-Artifacts are copied into data/forward/models/ with their SHA-256 so a later change of
-the research copy cannot change a running book.
+The three research inputs (B's model, C's yearly models, the ALFRED vintages) are copied
+on first use into config.FORWARD_INPUTS (data/forward_inputs/) with their SHA-256 in
+manifest.json, and read from there afterwards: a later change or removal of the research
+folder cannot change or stop a running book, and a copy that no longer matches its hash
+is refused. Audit 24.10.2026 F11: every run read the research folder directly, and the
+docstring claimed a copy that did not exist.
 """
 
 from __future__ import annotations
@@ -21,6 +25,8 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -29,11 +35,62 @@ import pandas as pd
 from . import features as fx
 
 SEED = 62025
+# The research copy. Read only to make the first copy of INPUTS (and by the app for the
+# historical research curves, which are display only).
 RESEARCH = Path("/Users/moritzfriedrich/.codex/.chatgpt-projects/"
                 "g-p-6acf80a14d708191bee8657f87aa1ab2/portfolio-lab-research")
-B_ARTIFACT = RESEARCH / "results/price_ml_inputs/frozen_model.json"
-C_ARTIFACT = RESEARCH / "results/rolling_windows/10y/annual_models.json"
-ALFRED = RESEARCH / "results/macro_factors/alfred/macro_realtime_periods.parquet"
+INPUTS = {"b": "results/price_ml_inputs/frozen_model.json",
+          "c": "results/rolling_windows/10y/annual_models.json",
+          "alfred": "results/macro_factors/alfred/macro_realtime_periods.parquet"}
+# Which inputs each model book needs; D, E and F need none.
+NEEDS = {"fw-a": ("alfred",), "fw-b": ("b",), "fw-c": ("c", "alfred")}
+
+
+class MissingInput(FileNotFoundError):
+    """A research input is neither copied yet nor in the research folder."""
+
+
+def inputs_dir() -> Path:
+    from .. import config
+
+    return Path(config.FORWARD_INPUTS)
+
+
+def stored(name: str) -> Path:
+    """The local copy of research input `name`, made on first use.
+
+    The copy goes through a temporary name and a rename, so an interrupted copy never
+    looks complete; its SHA-256 is recorded then, and checked on every later use."""
+    rel = INPUTS[name]
+    d = inputs_dir()
+    dst = d / Path(rel).name
+    manifest = d / "manifest.json"
+    known = json.loads(manifest.read_text()) if manifest.exists() else {}
+    if dst.exists():
+        want = known.get(name, {}).get("sha256")
+        if want and sha256(dst) != want:
+            raise ValueError(f"{name}: the stored copy no longer matches its SHA-256")
+        return dst
+    src = RESEARCH / rel
+    if not src.exists():
+        raise MissingInput(f"{name}: research input {Path(rel).name} is missing "
+                           "(no stored copy, not in the research folder)")
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(dst.name + ".partial")
+    shutil.copyfile(src, tmp)
+    os.replace(tmp, dst)
+    known[name] = {"file": dst.name, "from": rel, "sha256": sha256(dst),
+                   "copied_utc": dt.datetime.now(dt.UTC).isoformat()}
+    manifest.write_text(json.dumps(known, indent=1))
+    return dst
+
+
+def available(name: str) -> bool:
+    try:
+        stored(name)
+        return True
+    except (MissingInput, ValueError):
+        return False
 
 
 # -- numeric core, unchanged from the research ------------------------------------------
@@ -74,24 +131,33 @@ def sample_training(ids: np.ndarray, dates: np.ndarray, max_per_date: int = 256
 
 # -- artifacts --------------------------------------------------------------------------
 
+def _check(condition: bool, message: str) -> None:
+    """An explicit raise, not `assert`: asserts vanish under `python -O`, and these guard
+    the books against a wrong artefact and against look-ahead (audit 24.10.2026 F21)."""
+    if not condition:
+        raise ValueError(message)
+
+
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def load_b(path: Path = B_ARTIFACT) -> dict:
-    a = json.loads(path.read_text())
-    assert a["features"] == fx.BASE23, "B: feature order differs from the 23 inputs"
-    assert a["model"]["kind"] == "ridge" and a["model"]["alpha"] == 1.0
-    assert a["latest_training_label"] < "2025-01-01" and not a["post2024_prices_loaded"]
+def load_b(path: Path | None = None) -> dict:
+    a = json.loads((path or stored("b")).read_text())
+    _check(a["features"] == fx.BASE23, "B: feature order differs from the 23 inputs")
+    _check(a["model"]["kind"] == "ridge" and a["model"]["alpha"] == 1.0,
+           "B: not the ridge model with alpha 1")
+    _check(a["latest_training_label"] < "2025-01-01" and not a["post2024_prices_loaded"],
+           "B: trained on data after 2024")
     return a
 
 
-def load_c_2026(path: Path = C_ARTIFACT) -> dict:
-    years = json.loads(path.read_text())
+def load_c_2026(path: Path | None = None) -> dict:
+    years = json.loads((path or stored("c")).read_text())
     y = years["2026"]
     v = y["models"]["v13"]
-    assert v["features"] == fx.V13, "C: v13 feature order differs from the research spec"
-    assert y["latest_outcome"] < "2026-01-01"
+    _check(v["features"] == fx.V13, "C: v13 feature order differs from the research spec")
+    _check(y["latest_outcome"] < "2026-01-01", "C: an outcome of 2026 or later is in it")
     return {"features": v["features"], "scaler": v["scaler"], "model": v["model"],
             "window_start": y["window_start"], "latest_outcome": y["latest_outcome"],
             "samples": y["samples"], "source_year": "2026", "variant": "v13"}
@@ -147,7 +213,10 @@ def training_rows(panel, columns: list[str], window_start: dt.date, cutoff: dt.d
 def train_window(panel, columns: list[str], window_start: dt.date, cutoff: dt.date,
                  variant: str, log=print) -> dict:
     X, y, dates, ends = training_rows(panel, columns, window_start, cutoff, log)
-    assert ends.max() < np.datetime64(cutoff), "a training outcome is not yet known"
+    # The look-ahead guard of the training: an explicit raise, not `assert`, which
+    # `python -O` drops (audit 24.10.2026 F21).
+    _check(bool(len(ends)) and ends.max() < np.datetime64(cutoff),
+           "a training outcome is not yet known at the cutoff")
     ids = sample_training(np.arange(len(y)), dates)
     sc = scaler_fit(X[ids])
     m = ridge_fit(transform(X[ids], sc), np.clip(y[ids], -.25, .25), 1.0)

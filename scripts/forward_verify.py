@@ -1,8 +1,11 @@
 """Reproduce stored research scores with the forward books' code (read-only check).
 
 B: results/price_ml_inputs/frozen_predictions.csv holds the frozen model's score of every
-eligible share on every 2025-26 signal date. This script rebuilds the same signal date
-from the market store with src/portfolio_lab/forward and compares share by share.
+eligible share on every 2025-26 signal date; this script rebuilds the same signal date
+from the market store with src/portfolio_lab/forward and compares share by share. D and
+F are compared with the research's stored trades the same way. The macro vintages are
+the books' stored copy (forward_inputs/), the reference files come from the research
+folder, read only.
 Run: uv run python scripts/forward_verify.py [signal-date]
 """
 
@@ -28,7 +31,7 @@ spy = market.execute("SELECT date, open, close, close_adj FROM prices WHERE tick
                      "ORDER BY date").fetch_df()
 spy.index = pd.to_datetime(spy.pop("date"))
 # The research simulation loaded prices from 2023-01-01 (observation counts start there).
-panel = dd.Panel(market, dt.date(2023, 1, 1), day, spy, pd.read_parquet(md.ALFRED))
+panel = dd.Panel(market, dt.date(2023, 1, 1), day, spy, pd.read_parquet(md.stored("alfred")))
 i = int(panel.calendar.get_loc(pd.Timestamp(day)))
 X_all, base_ok = en._rows(panel, i)
 b = md.load_b()
