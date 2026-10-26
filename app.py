@@ -43,51 +43,66 @@ if not st.runtime.exists():
 
 import plotly.graph_objects as go
 
-from portfolio_lab import charts, ui
+from portfolio_lab import (
+    ais,
+    alerts,
+    aviation,
+    charts,
+    command,
+    comps,
+    deals,
+    export,
+    fred,
+    fts,
+    holdout,
+    insiders,
+    layout,
+    paper,
+    risk,
+    sensitivity,
+    shipping,
+    ui,
+    world,
+)
 from portfolio_lab import appcache as ac
-from portfolio_lab import command, layout
+from portfolio_lab import backtest as bktest
+from portfolio_lab import briefing as bfg
+from portfolio_lab import business as bz
 from portfolio_lab import config as cfg
+from portfolio_lab import coverage as cov
+from portfolio_lab import filing_butterfly as fbt
+from portfolio_lab import macro as mc
+from portfolio_lab import metrics as mx
+from portfolio_lab import numeraire as nm
+from portfolio_lab import options as op
+from portfolio_lab import research as rs
+from portfolio_lab import stage_b as bstage
+from portfolio_lab import strategy as stg
+from portfolio_lab import summary as ai_summary
+from portfolio_lab import volforecast as vfc
+from portfolio_lab import wacc as W
 from portfolio_lab.config import CostModel, Settings, secret
-from portfolio_lab.data import history as data_history, industry
+from portfolio_lab.data import history as data_history
+from portfolio_lab.data import industry
 from portfolio_lab.data.listing import COUNTRIES as MARKET_NAMES
 from portfolio_lab.data.paid import MissingKey
 from portfolio_lab.data.schema import open_user
 from portfolio_lab.data.sources import SourceNotReady, open_selected, per_thread
 from portfolio_lab.data.wrds import WorldSource, is_compustat
-from portfolio_lab.screen import translate as T
-from portfolio_lab.screen.engine import derive_metrics, merge_selection, run_screen
-from portfolio_lab.screen.spec import Filter, spec_to_json
-from portfolio_lab.screen.valuation import Assumptions, add_valuation
-
-from portfolio_lab import backtest as bktest
-from portfolio_lab import holdout
-from portfolio_lab import sensitivity
-from portfolio_lab import stage_b as bstage
-from portfolio_lab.pit_cache import FrameCache
-from portfolio_lab import coverage as cov
-from portfolio_lab import briefing as bfg
-from portfolio_lab import business as bz
-from portfolio_lab import macro as mc
-from portfolio_lab import metrics as mx
-from portfolio_lab import numeraire as nm
+from portfolio_lab.forward import ledger as fwl
+from portfolio_lab.forward import report as fwr
+from portfolio_lab.forward import strategies as fws
 from portfolio_lab.lab import engine as lab_engine
 from portfolio_lab.lab import signals as lab_signals
 from portfolio_lab.lab import translate as LT
 from portfolio_lab.lab.spec import StrategySpec
-from portfolio_lab import options as op
-from portfolio_lab import filing_butterfly as fbt
-from portfolio_lab.forward import ledger as fwl
-from portfolio_lab.forward import report as fwr
-from portfolio_lab.forward import strategies as fws
-from portfolio_lab import strategy as stg
-from portfolio_lab import research as rs
+from portfolio_lab.pit_cache import FrameCache
+from portfolio_lab.screen import translate as T
+from portfolio_lab.screen.engine import derive_metrics, merge_selection, run_screen
+from portfolio_lab.screen.spec import Filter, spec_to_json
+from portfolio_lab.screen.valuation import Assumptions, add_valuation
 from portfolio_lab.store import Store
 from portfolio_lab.track import performance
-from portfolio_lab import alerts, comps, deals, export, fred, fts, insiders, paper, risk, world
-from portfolio_lab import ais, aviation, shipping
-from portfolio_lab import wacc as W
-from portfolio_lab import summary as ai_summary
-from portfolio_lab import volforecast as vfc
 
 # The sidebar starts closed: it holds the portfolio list, the watchlist and the unit,
 # and the screen's filters moved into SCREEN (02.10.2026). » at the top left opens it.
@@ -240,7 +255,7 @@ def _price_stats(ticker: str, asof: dt.date, key: str) -> dict:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _vol_model(asof: dt.date, key: str) -> "vfc.Model | None":
+def _vol_model(asof: dt.date, key: str) -> vfc.Model | None:
     """The pooled Log-HAR fit (volforecast.py) on data up to `asof`: ~1 s, once a day."""
     del key
     return vfc.fit_from_store(_market_source().con, asof)

@@ -2019,51 +2019,116 @@ Zeilen stehen (nicht auf Verdacht gelöscht) und behalten die alte Basis. Älter
 Pit-Cache-Frames mit diesen 8 Titeln sind nicht neu gerechnet; der Cache-Fingerprint ändert sich
 mit dem Neuaufbau ohnehin.
 
-## Audit 24.10.2026 — offene Befunde (vorgemerkt, nicht begonnen; Nutzer entscheidet)
+## Audit 24.10.2026 — alle Befunde behoben (26.10.2026, lokale Sitzung)
 
 Gesamtbericht: Obsidian `Portfolio Lab/Audits/2026-10-24-audit.md` (Claude, 4 Agenten, und
-Codex; Stand `claude/forward-books` @ 73ffe72). **Behoben:** F1, F2, F24 (Forward-Bücher
-buchen nur vollständige, geschlossene Sitzungen, eine Transaktion je Buch und Sitzung), F4
-(Delisting-Regel, Version A2–F2) — alle auf diesem Branch; F3 (Split-Basis im Tagesupdate,
-8 Reihen im Bestand repariert) auf `claude/split-refetch`. Merge-Reihenfolge:
-`claude/price-update-fix` → `claude/split-refetch` → dieser Branch (vorher `main` einmergen).
+Codex). F1, F2, F24 und F4 waren schon behoben (Forward-Bücher buchen nur vollständige,
+geschlossene Sitzungen, eine Transaktion je Buch und Sitzung; Delisting-Regel, Version
+A2–F2), F3 auf `claude/split-refetch`. Die übrigen Befunde wurden am 26.10. von vier
+parallelen Agenten in eigenen Worktrees behoben (getrennt nach Dateien) und hier
+zusammengeführt. Jeder Fix hat einen Test, der ohne ihn fehlschlägt (Quelldatei
+zurückgetauscht, Test rot). Ausnahmen sind genannt.
 
-**Hoch**
-* F5 — NaN-Eröffnungskurs schreibt NaN dauerhaft ins Ledger (`forward/engine.py`
-  `equivalent`, `_value_at`; Schranke in `ledger.book` gegen nicht-endliche Beträge). 30 min.
-* F6 — TTM-Werte ohne eigenes Altersfilter: eine frische Aktienzahl macht einen Gewinn von
-  2019 „aktuell“ (`data/pit.py` `ttm_values`, `data_age_days` = Minimum). Beide Builder,
-  `CACHE_VERSION` erhöhen, Cache neu wärmen. 2–4 h.
-* F7 — Frame-Builder ungleich: nur `free.py` liefert `median_share_volume_60d`, ohne sie
-  entfällt die Plausibilitätsprüfung der Aktienzahl (Regel 5). 2–3 h.
-* F8 — Stufe A: verschwinden alle gehaltenen Titel, endet der Kalender mit ihnen, kein −30 %
-  (`backtest.py` `window_end`). 1–2 h.
-* F9 — CRSP: fehlender Eröffnungskurs = Schlusskurs (`data/crsp.py` COALESCE). Vor dem ersten
-  CRSP-Build beheben. 1 h.
-* F10 — SEC: Berichtswährung über die ganze Historie gewählt, ein späterer Wechsel löscht
-  frühere Fakten (`data/sec.py`). Erst messen, wie viele Filer wechseln (30 min), dann
-  entscheiden (Lösung 1–2 Tage).
-* F11 — Forward-Bücher lesen B, C und ALFRED aus dem Codex-Ordner (`forward/models.py`
-  `RESEARCH`); fehlt er, scheitern alle sechs. Nach `data/forward_inputs/` kopieren, je Buch
-  abfangen, App-Test auf `tmp_path`. 1–2 h.
-* F12 — `scripts/e_backtest.py` nennt den Survivorship-Bias nicht (R12). 30 min.
+**Vorfälle beim Beheben (für spätere Sitzungen):**
+- `git stash` ist für alle Worktrees gemeinsam. Zwei Agenten haben einmal den Stash des
+  anderen gepoppt; repariert, nichts verloren. Für „scheitert ohne Fix“ die Quelldatei mit
+  `cp` beiseitelegen und zurückkopieren, **nie stash**.
+- Ein Test des Installationsskripts rief über einen Fehler in `--dry-run` das echte
+  `launchctl` auf und ersetzte den Butterfly-Job durch eine Plist aus einem pytest-Ordner.
+  Der Originaljob wurde am 26.10. wieder geladen; der Test setzt jetzt ein falsches
+  `launchctl` vorn in den PATH.
 
-**Mittel**
-* F13 Schreibsperre über Netzwerk/Training, App wartet bis 90 s (`tries` kurz in der App).
-* F14 Morgenjob verwirft stderr des Forward-Laufs.
-* F15 EDGAR 403 gilt als „keine Filings“ und wird nie wieder abgefragt.
-* F16 Butterfly-Lauf 01:30 Sydney liegt 01.11.–14.03. vor 09:45 New York → 02:00, neu
-  installieren. **Ab November relevant.**
-* F17 E: Split-Basis der Aktienausgabe zum falschen Datum (Regeländerung → E3).
-* F18 Butterfly: fehlender Long-Bid wird als 0 bewertet, Hinweis gelöscht.
-* F19 E: verpasstes Monatsende kostet einen Monat; Start mitten im Monat undokumentiert.
-* F20 Butterfly `pick_line` kann eine beendete Gattung wählen.
-* F21 Testlücken Engine (Dividende, FX, E/F, Lock) und Look-ahead-Grenze beim Training.
-* F22 `e_backtest.py`: fester Cache-Pfad, nach 7 Tagen stille flache Kurve.
-* F23 R23-Scanner: kaum deutsche Muster, `scripts/` nicht gescannt.
+### Kernmodule (F6–F10, CACHE_VERSION v10)
 
-**Niedrig** (gebündelt im Bericht): Doku veraltet (CLAUDE.md §10, Testzahlen, README ohne
-Forward-Bücher), EUR/USD eingefroren, Schemas ohne Migrationen, rohe Exception-Texte, „busy“
-für jeden Fehler, App-Tests ohne `app.error`, E long+short derselbe Titel, ewige „pending“,
-Kalender ohne verkürzte Tage, Verbindungsleck `pit_frame`, `connect(read_only)` legt Datei an,
-toter Zweig im Morgenbericht, Sprache/„WINNER“, 177 Ruff-Stilmeldungen.
+- **F9 – CRSP erfindet keine Eröffnungskurse mehr.** `crsp.py` ersetzte einen fehlenden
+  `openprc` durch den Schlusskurs (R16-Verstoß). Jetzt bleibt `open` NULL, und Stufe B
+  handelt den Titel an diesem Tag nicht. Getestet mit der CRSP-Fixture im alten und im
+  CIZ-Format. Ungetestet: echte CRSP-Daten. Wirkt erst mit dem nächsten `build_wrds.py`.
+- **F8 – Stufe A erkennt Delistings auch, wenn alle Positionen verschwinden.** Das Ende des
+  Zeitraums kommt jetzt aus dem Kalender des Benchmarks (wie `sessions` in Stufe B).
+  Getestet: nur DEAD gehalten → Endwert 70; mit CRSP-Fixture das echte −85 % → 15. Offen:
+  ohne Benchmark-Reihe bleibt die Lücke.
+- **F7 – Beide Frame-Builder liefern dieselben Spalten.** `base.build_screening_frame`
+  berechnet auch `median_share_volume_60d`; vorher übersprang der Referenzpfad die
+  Plausibilitätsprüfung der Aktienzahl. `tests/test_frame_parity.py` vergleicht alle
+  Spalten und Ausschlussgründe; der Live-Test ebenfalls (läuft nur mit echtem Bestand).
+- **F6 – TTM-Werte haben ein eigenes Höchstalter.** Ein TTM-Wert, der mehr als 400 Tage vor
+  dem Screen-Datum eingereicht wurde, wird nach der Auswahl NaN (`stale_ttm`), in beiden
+  Buildern. Ausgeschlossen wird mit eigenem Grund nur, wenn ein Filter oder das Ranking die
+  Kennzahl liest; die Abhängigkeit wird gemessen (`engine.ttm_inputs`). Nicht gemessen: wie
+  viele Firmen das im echten Bestand trifft.
+- **F10 – Währung je Meldung, Umrechnung je Fakt.** Gemessen am SEC-Archiv vom 21.09.2026:
+  154 von 16.978 Filern wechseln die Währung zwischen Meldungen; 17.466 monetäre Einträge
+  gingen verloren und kommen zurück. 31.450 Convenience-Übersetzungen innerhalb einer
+  Meldung werden weiter verworfen. `pit.to_usd` rechnet jeden Betrag zum Kurs des
+  Screen-Datums in seiner eigenen Währung um; vier Quartale in zwei Währungen ergeben keinen
+  TTM-Wert. **Wirkt erst nach `build_fundamentals.py`** und einem neuen Cache (v10).
+
+### Forward-Bücher (F5, F11, F12, F17, F19, F21, F22, niedrig 3/4/8–12)
+
+- **F5:** `equivalent`/`adj_open` prüfen auf endliche positive Kurse, `ledger.book` weist
+  nicht-endliche Beträge zurück, die Sitzungs-Transaktion rollt zurück.
+- **F11:** Die Research-Eingaben (B-Modell, C-Jahresmodelle, ALFRED) werden beim ersten Lauf
+  mit SHA-256 (`manifest.json`) nach `data/forward_inputs/` kopiert und nur dort gelesen;
+  eine veränderte Kopie wird abgelehnt. Fehlt eine Eingabe, warten nur die betroffenen
+  Bücher. Die Modellquelle wird ohne lokalen Pfad gespeichert. Ungetestet: der erste echte
+  Kopiervorgang.
+- **F12/F22:** `e_backtest.py` sagt „survivorship NOT corrected“ und zählt Abgänge (echt vs.
+  angenommen); Cache-Ordner nach Fingerprint, Abbruch bei < 5 Frames, Vorjahres-Frame nach
+  Datum. Logik in `forward/simulation.py`. Die E1-Ergebnisse sind damit überholt.
+- **F17 → E3 (Regeländerung):** Split-Basis der Aktienzahl an ihrem Meldedatum
+  (`stg.issuance`, eine Funktion für Live und Simulation). Dazu niedrig 8: bei < 40 Titeln
+  je Seite höchstens n/2, nie derselbe Titel long und short. Buch E wechselt auf E3.
+- **F19 + niedrig 9:** Ein verpasstes Monatsende wird an der nächsten vollständigen Sitzung
+  nachgeholt; ein Signal ohne Kurse wird „missed“, sobald eine spätere Sitzung gebucht ist.
+- **F21:** Von Hand gerechnete zweite Markt-Fixture (Dividende long/short, EUR/USD-Sprung,
+  Leihe übers Wochenende, Monatswechsel, D/E/F). **Dabei gefunden:** F brach an der Sitzung
+  nach jedem Einstieg mit TypeError ab (Timestamp gegen date), und alle Bücher blieben
+  stehen; behoben. Trainingsgrenze mit echtem Panel getestet, `assert` → `raise`.
+- **Niedrig 3/4/10/11/12:** EUR/USD mit `fetched_at` (ein vor Tagesende geholter Wert wird
+  ersetzt); benannte, nur angehängte Migrationen (`fw_migrations`); neues `nyse.py` mit
+  13:00-Schlüssen 2024–2027 (künftige Sonderschließungen dort nachtragen); `Live` öffnet
+  je Lauf eine Quelle; `connect(read_only=True)` legt keine Datei an.
+
+### Butterfly und Morgenjob (F13–F16, F18, F20, niedrig 4/5/13)
+
+- **F16:** Läufe Di–Sa 02:00 / 03:00 / 04:30 Sydney statt 01:30 (01:30 lag 01.11.–Mitte März
+  vor 09:45 New York). Ein Test prüft jeden Tag zweier Jahre. Das Skript installiert immer
+  für die Haupt-Arbeitskopie, auch aus einem Worktree; `--dry-run` ändert nichts.
+  **Einmal neu installieren:** `./scripts/install_butterfly_tracker.sh`.
+- **F15:** Nur ein 404 von EDGAR heißt „kein Index“; jede andere Antwort lässt den Tag offen
+  (Notiz ohne URL), spätere Tage werden trotzdem gelesen.
+- **F18:** Fehlt der Long-Bid, bleibt die letzte Bewertung (unsicher markiert); ein gestellter
+  Bid von 0 bleibt 0.
+- **F20:** `pick_line` wählt nur unter Gattungen mit Kurs höchstens 6 Tage vor der
+  Entscheidung.
+- **F14 + niedrig 5/13:** stderr des Forward-Laufs und eines gescheiterten Preis-Updates
+  (Ende, ohne URLs und key=value) gehen nach run.log; Fehlertexte über `ui.error_text`;
+  der nie erreichte Zweig „Nothing followed“ ist entfernt (Test ohne Rotphase).
+- **F13 Butterfly-Teil:** Der Tracker rechnet erst auf einer Wegwerf-Kopie mit Netz und
+  wiederholt den Lauf dann auf dem echten Bestand mit denselben Antworten ohne Netz; die
+  Schreibsperre gilt nur noch für die Datenbankarbeit. Nur in Tests gemessen.
+- **Niedrig 4:** benannte Migrationen im Butterfly-Bestand (`fb_migrations`).
+
+### App (F13 App-Teil, F23, niedrig 5/6/7/14)
+
+- **F13:** Die Papierbuch-Ansichten lesen mit zwei Versuchen statt bis zu 90 s und
+  unterscheiden eine Sperre (`ui.store_is_busy`) von einem echten Fehler.
+- **F23:** Der R23-Scanner kennt 14 deutsche Ratschlag-Muster und prüft auch `scripts/`.
+- **Niedrig 5/6/7/14:** `ui.error_text`/`ui.scrubbed` für Fehlertexte; App-Tests scheitern an
+  jedem `st.error`; Überschrift der Forward-Bücher auf Englisch.
+
+### Übrig und bewusst offen
+
+- Deutsche Texte in `forward/engine.py`, `forward/report.py`, `forward/strategies.py` und
+  `filing_butterfly.py` (Berichtsausgabe, keine Ratschläge). „C — RESEARCH WINNER“ bleibt.
+- `filing_butterfly.py` hat einen eigenen Kalender ohne verkürzte Tage; könnte `nyse.py`
+  nutzen.
+- Ruff: die sicheren automatischen Fixes (Importe sortiert) sind angewendet; ~130
+  Stilmeldungen ohne Auto-Fix bleiben.
+- Zum Teilen mit einem Mitarbeiter: `.env.example`, `proposals/`, Regel in `AGENTS.md`;
+  `install_schedule.sh` und `install_options_snapshot.sh` finden ihren Projektordner selbst.
+
+**Auf dem Mac nach dem Merge:** `install_butterfly_tracker.sh` neu ausführen;
+`build_fundamentals.py` (für F10, mehrere Stunden; nur nach Freigabe); danach
+`warm_pit_cache.py` (v10).

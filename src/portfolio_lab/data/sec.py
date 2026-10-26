@@ -19,8 +19,8 @@ import datetime as dt
 import json
 import zipfile
 from collections import defaultdict
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 import duckdb
 import pandas as pd

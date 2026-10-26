@@ -197,7 +197,7 @@ def test_the_fingerprint_survives_a_round_trip_and_separates_rules():
 
 # --- the translator: a closed vocabulary, and an honest gap where it ends -------------
 
-from portfolio_lab.lab import translate as LT  # noqa: E402
+from portfolio_lab.lab import translate as LT
 
 
 def test_the_schema_cannot_hold_a_company():

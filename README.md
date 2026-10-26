@@ -89,12 +89,20 @@ cd portfolio-lab
 uv sync
 ```
 
-Put an Anthropic API key in `.env.local` (the chat translator needs it; nothing else
-does):
+Create your settings file from the template and open it:
 
+```bash
+cp .env.example .env.local
+open -e .env.local
 ```
-ANTHROPIC_API_KEY=sk-ant-...
-```
+
+Every line in it says whether it is needed. The free data (SEC, Yahoo, FRED) needs no key
+at all. SEC asks every client for a contact address; the project sends a built-in one
+unless you set `SEC_USER_AGENT` yourself. An Anthropic key (`ANTHROPIC_API_KEY`) is only
+for the AI features: the chat translator, summaries and the morning briefing. WRDS
+(Compustat Global, CRSP) and Nasdaq Data Link are optional and need their own accounts;
+everything else runs on the free data. `.env.local` is gitignored, so nothing you put
+there reaches git. Never paste keys into a chat.
 
 Build the local data store. The first run takes a while and downloads several gigabytes:
 
@@ -255,13 +263,33 @@ it automatically three times a night (Tuesday to Saturday, Sydney time):
 The bookings are in `data/paper_options.duckdb`; the log in `data/cache/butterfly.log`.
 Remove the schedule with `./scripts/install_butterfly_tracker.sh --remove`.
 
+## Forward paper books A–F (optional)
+
+Six prospective paper books with 1,000 EUR each (PORTFOLIOS → BOOKS, command `PORT`): each follows one
+research rule from the day it started, so their results are out of sample by
+construction. Paper only — no order is ever sent. Update them after the US close:
+
+```bash
+uv run python scripts/forward_books.py
+uv run python scripts/forward_books.py --report
+```
+
+The morning job (`install_schedule.sh`) runs this too. Only complete, closed sessions are
+booked. On the first run the research inputs (book B's model, C's yearly models, ALFRED)
+are copied once into `data/forward_inputs/` with a SHA-256 manifest; a book whose input
+is missing waits with a note while the others go on.
+
+**Back up `data/paper_forward.duckdb` and `data/paper_options.duckdb`.** Unlike the
+market stores, they cannot be rebuilt: they record what was decided on each day, and a
+prospective record cannot be recreated afterwards.
+
 ## Tests
 
 ```bash
 uv run pytest -q
 ```
 
-Roughly 375 of them. The ones worth knowing about:
+Roughly 1,000 of them (about 6 minutes). The ones worth knowing about:
 
 * every metric formula is pinned to a series whose answer can be worked out with a
   pencil, to one basis point — constant growth, a single fall of known depth, returns

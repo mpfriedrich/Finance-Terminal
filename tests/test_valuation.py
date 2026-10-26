@@ -4,7 +4,10 @@ import pandas as pd
 import pytest
 
 from portfolio_lab.screen.valuation import (
-    Assumptions, add_valuation, discounted_cash_flow, graham_number,
+    Assumptions,
+    add_valuation,
+    discounted_cash_flow,
+    graham_number,
 )
 
 

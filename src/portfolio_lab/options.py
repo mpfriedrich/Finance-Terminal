@@ -698,7 +698,7 @@ def implied_distribution(otm: pd.DataFrame, spot: float, days: int, r: float = 0
         "ref_quantiles": {p: float(ref.ppf(p / 100)) for p in (5, 10, 25, 50, 75, 90, 95)},
         "beyond_quotes": float(1.0 - np.trapezoid(dens[inside], K[inside])),
         "negative_mass": negative / (negative + total),
-        "contracts": int(len(pts)),
+        "contracts": len(pts),
         # mostly quotes, not extrapolation: otherwise the shape is our assumption
         "usable": bool(len(pts) >= 6 and float(1.0 - np.trapezoid(dens[inside], K[inside])) < 0.25),
         "curve": pd.DataFrame({"price": K, "density": dens, "bell_curve": ref.pdf(K)}),
@@ -757,7 +757,7 @@ def put_call_spread(chain_df: pd.DataFrame, band: tuple[float, float] = ATM_BAND
                             f"{gap:+.1%} from the price on hand", "parity_gap": gap}
     w = 1.0 / (np.abs(strikes / spot - 1.0) + 0.01)
     spread = both.iv_put - both.iv_call
-    return {"spread": float(np.average(spread, weights=w)), "pairs": int(len(both)),
+    return {"spread": float(np.average(spread, weights=w)), "pairs": len(both),
             "put_iv": float(np.average(both.iv_put, weights=w)),
             "call_iv": float(np.average(both.iv_call, weights=w)), "parity_gap": gap}
 

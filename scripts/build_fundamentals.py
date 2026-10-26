@@ -1,8 +1,9 @@
 """Phase 1: load SEC company facts into the local store and measure what we got."""
 import time
-from portfolio_lab.config import MARKET_DB, CACHE_DIR
-from portfolio_lab.data.schema import open_market
+
+from portfolio_lab.config import CACHE_DIR, MARKET_DB
 from portfolio_lab.data import sec
+from portfolio_lab.data.schema import open_market
 
 t0 = time.time()
 con = open_market(MARKET_DB)

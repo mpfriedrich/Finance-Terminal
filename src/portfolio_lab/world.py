@@ -345,5 +345,5 @@ def compare(con: duckdb.DuckDBPyConnection, symbols: list[str],
         rows.append(row)
     return {"curves": curves, "stats": pd.DataFrame(rows),
             "correlation": shared.corr() if len(shared) > 20 else pd.DataFrame(),
-            "shared_days": int(len(shared)),
+            "shared_days": len(shared),
             "missing": [s for s in symbols if s not in curves.columns]}

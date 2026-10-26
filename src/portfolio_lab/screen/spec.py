@@ -154,7 +154,7 @@ class PortfolioSpec:
                 return f.metric, True
         return "market_cap", False
 
-    def with_filter(self, new: Filter) -> "PortfolioSpec":
+    def with_filter(self, new: Filter) -> PortfolioSpec:
         """Add or replace a filter on the same metric+direction, keeping the rest.
 
         This is what makes a follow-up message refine instead of restart: "cap not above

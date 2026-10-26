@@ -4,11 +4,15 @@ Circular checks are worthless: comparing SEC data against SEC data proves nothin
 whether we joined the right share count to the right price. Yahoo computes market cap
 from its own share data, so agreement is real evidence and disagreement is a real bug.
 """
-import warnings, random
-import pandas as pd, yfinance as yf
+import random
+import warnings
+
+import pandas as pd
+import yfinance as yf
+
 from portfolio_lab.config import MARKET_DB
-from portfolio_lab.data.schema import open_market
 from portfolio_lab.data.free import FreeSource
+from portfolio_lab.data.schema import open_market
 from portfolio_lab.screen.engine import derive_metrics
 
 warnings.simplefilter("ignore")

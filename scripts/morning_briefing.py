@@ -39,11 +39,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from portfolio_lab import briefing as bfg  # noqa: E402
-from portfolio_lab import ui  # noqa: E402
-from portfolio_lab.config import MARKET_DB, USER_DB, load_env  # noqa: E402
-from portfolio_lab.data.schema import open_market, open_user_snapshot  # noqa: E402
-from portfolio_lab.store import Store  # noqa: E402
+from portfolio_lab import briefing as bfg
+from portfolio_lab import ui
+from portfolio_lab.config import MARKET_DB, USER_DB, load_env
+from portfolio_lab.data.schema import open_market, open_user_snapshot
+from portfolio_lab.store import Store
 
 OUT_DIR = Path(__file__).resolve().parents[1] / "data" / "briefings"
 

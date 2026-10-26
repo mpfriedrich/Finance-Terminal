@@ -12,10 +12,11 @@ import datetime as dt
 import sys
 import time
 
-from portfolio_lab.config import MARKET_DB, WORLD_DB
-from portfolio_lab.data.schema import finish_rebuild, open_market_for_rebuild
 from portfolio_lab import aviation, fred, shipping, world
-from portfolio_lab.data import history, prices as px, universe, wrds
+from portfolio_lab.config import MARKET_DB, WORLD_DB
+from portfolio_lab.data import history, universe, wrds
+from portfolio_lab.data import prices as px
+from portfolio_lab.data.schema import finish_rebuild, open_market_for_rebuild
 
 FULL_WINDOW_DAYS = 460
 OVERLAP_DAYS = 5

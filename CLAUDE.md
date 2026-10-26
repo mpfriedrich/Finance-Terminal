@@ -45,7 +45,7 @@ Don't let two sessions edit the same branch at once. Before starting: `git pull`
 
 ```bash
 uv sync                                   # dependencies (incl. openpyxl, psycopg2-binary)
-uv run pytest -q                          # ~670 pass, ~15 skip without local data (~110 s)
+uv run pytest -q                          # ~1,000 pass, ~15 skip without local data (~6 min)
 uv run streamlit run app.py               # the app, http://localhost:8501
 uv run python scripts/build_prices.py     # daily: prices, FX, world series, FRED, windows,
                                           #   and the US half of the world store
@@ -293,7 +293,7 @@ ticker; ended lines use their last CRSP ticker, with `-permno` appended on a col
 - Don't `pkill -f` a pattern that also matches your own shell command. It kills the shell.
   Kill by PID.
 
-## 10. Status and open items (as of 02.10.2026)
+## 10. Status and open items (as of 26.10.2026)
 
 **Done and merged** (PRs #1–#7, last 02.10.2026): phases 1–10, the Stage B reviews,
 world stages 1–3 (Compustat Global, the CRSP US half, CIZ, the second WRDS account),
@@ -302,14 +302,19 @@ the gold toggle, memory-safe ingest, analyst tools 1–12, the pit-cache re-warm
 unemployment from Eurostat. Forecast models tested and rejected: PLAN.md → „Geprüft und
 verworfen“.
 
-**On branch `claude/bloomberg-ux`, not merged yet:** the UX/speed audit and the
-Bloomberg restructuring of 02.10.2026 (PLAN.md → „Audit Bloomberg-Annäherung
-02.10.2026“): 13 tabs → 6, command line, appcache, lazy tabs, error isolation, the
-store-swap fix. Not yet run against the real stores on the Mac.
+**Also merged since:** the Bloomberg restructuring (PR #12: 6 tabs, command line,
+appcache, lazy tabs), the whole-terminal audit of 02.10.2026 (PR #8), the SEC Filing
+Butterfly and the forward paper books A–F, the price-update fix of 22.10.2026, the split
+re-fetch (audit F3) and every finding of the audit of 24.10.2026 (PLAN.md → „Audit
+24.10.2026 — alle Befunde behoben“; `CACHE_VERSION` v10, book E now E3).
 
-**On branch `claude/audit-review`, not merged yet:** the whole-terminal audit of
-02.10.2026 (PLAN.md → „Audit 02.10.2026“): thread-safe DB access, last-year volatility,
-R8 for an unknown market cap, Streamlit `width=` migration, `price_stats` cached.
+**Collaborator:** a friend may get access as a GitHub collaborator. His agents
+(ChatGPT/Codex) only write proposals under `proposals/` (rule in `AGENTS.md`); a Claude
+session on this Mac reviews them against section 6 and the user decides.
+
+**Working in parallel worktrees:** `git stash` is shared by all worktrees. Never use it
+to check "fails without the fix"; copy the source file aside with `cp` instead. Tests of
+install scripts must never reach the real `launchctl`.
 
 **World store: fully built 26.09.2026** (local session). All 21 default countries
 since 2010: 22,139 Compustat companies, 58.9M price rows (0 without an FX rate),
@@ -335,7 +340,8 @@ would only last until the next morning. Check `data/briefings/run.log` for the l
    PAM authentication, no Duo push). Once CRSP shows **blue** on his WRDS page:
    `uv run python scripts/build_wrds.py --countries=none`. Check the `CRSP: {...}`
    line: ended listings should number in the thousands. Then re-warm the pit cache.
-2. Merging `claude/audit-review` once he's satisfied.
+2. Whether to rebuild the SEC facts (`build_fundamentals.py`, several hours) so audit
+   F10 (currency per filing) takes effect.
 
 **Known gaps:**
 - CRSP and the Sharadar paid source are untested against the real services.

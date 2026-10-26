@@ -17,7 +17,6 @@ from portfolio_lab.config import MARKET_DB, CostModel
 from portfolio_lab.data.schema import MARKET_MIGRATIONS, USER_MIGRATIONS, _apply
 from portfolio_lab.store import Store
 
-
 # --- a hand-computable world ---------------------------------------------------------
 
 def synthetic_market(rows: list[tuple]) -> duckdb.DuckDBPyConnection:

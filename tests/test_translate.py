@@ -1,8 +1,8 @@
 """Translator contract. No network: the model's answer is supplied directly, so these
 tests pin the CONTRACT (what a given answer must become) rather than the model's mood."""
 
-from portfolio_lab.screen.spec import PortfolioSpec
 from portfolio_lab.screen import translate as T
+from portfolio_lab.screen.spec import PortfolioSpec
 
 
 def _all_property_names(node) -> set[str]:

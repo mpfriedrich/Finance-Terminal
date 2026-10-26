@@ -252,7 +252,7 @@ def _apply_filter(frame: pd.DataFrame, f: Filter) -> pd.Series:
 def run_screen(
     frame: pd.DataFrame,
     spec: PortfolioSpec,
-    assumptions: "Assumptions | None" = None,
+    assumptions: Assumptions | None = None,
 ) -> ScreenResult:
     """frame: one row per security with raw inputs already joined.
 

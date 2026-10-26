@@ -5,10 +5,12 @@ deliberate. `securities` is the equity universe the screener runs over, and a to
 no revenue, equity or earnings to screen on. Keeping them out means a crypto pair can
 never drift into a price-to-book ranking, while every price-based tool still reaches it.
 """
-import datetime as dt, time
+import datetime as dt
+import time
+
 from portfolio_lab.config import MARKET_DB
-from portfolio_lab.data.schema import open_market
 from portfolio_lab.data import prices as px
+from portfolio_lab.data.schema import open_market
 
 CRYPTO = {
     "BTC-USD": "Bitcoin", "ETH-USD": "Ethereum", "SOL-USD": "Solana",

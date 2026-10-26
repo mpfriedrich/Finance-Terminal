@@ -162,7 +162,7 @@ def wide_from_long(facts: pd.DataFrame, asof: dt.date) -> pd.DataFrame:
 
 
 def build_screening_frame(
-    source: "DataSource",
+    source: DataSource,
     asof: dt.date,
     volume_sessions: int = 60,
     lookback_days: int = 1825,

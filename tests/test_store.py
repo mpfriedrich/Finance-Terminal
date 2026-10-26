@@ -2,8 +2,13 @@
 import duckdb
 import pytest
 
-from portfolio_lab.screen.spec import Filter, PortfolioSpec, spec_from_json, spec_to_json
 from portfolio_lab.data.schema import USER_MIGRATIONS, _apply
+from portfolio_lab.screen.spec import (
+    Filter,
+    PortfolioSpec,
+    spec_from_json,
+    spec_to_json,
+)
 from portfolio_lab.store import Store
 
 

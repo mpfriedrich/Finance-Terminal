@@ -13,7 +13,8 @@ import datetime as dt
 import duckdb
 import pandas as pd
 
-from . import history, industry, listing, pit, prices as px
+from . import history, industry, listing, pit
+from . import prices as px
 from .base import Snapshot
 
 TABLES = ("securities", "fundamentals", "prices", "ticker_history", "shares_outstanding")

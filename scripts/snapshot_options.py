@@ -81,7 +81,7 @@ def main() -> int:
     asof = src.latest_equity_date()
     rate, _ = mx.current_risk_free(src.con, Settings().risk_free_fallback)
     tickers = vfc.sample_tickers(src.con, asof, N)
-    started = dt.datetime.now(dt.timezone.utc)
+    started = dt.datetime.now(dt.UTC)
     rows, failed = [], 0
     for i, t in enumerate(tickers, 1):
         try:

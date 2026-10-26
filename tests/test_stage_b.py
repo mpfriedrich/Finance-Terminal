@@ -315,7 +315,7 @@ def test_the_delisting_assumption_moves_the_stage_b_result_too():
 # securities master instead — numerically the same on free data, but the criterion was
 # not met, and a source that did know vanished companies would have been ignored.
 
-from portfolio_lab.data import history  # noqa: E402
+from portfolio_lab.data import history
 
 
 def phase7_source(windows_to_newest_bar: bool = True) -> FreeSource:

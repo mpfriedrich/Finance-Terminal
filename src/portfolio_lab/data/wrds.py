@@ -201,7 +201,7 @@ def connect(user: str, password: str | None):
     import psycopg2
 
     # WRDS user names are lower case, and the database compares them exactly: typed as
-    # "MPFriedrich" the login fails with a bare "PAM authentication failed".
+    # "JDoe" the login fails with a bare "PAM authentication failed".
     user = user.strip().lower()
     try:
         return psycopg2.connect(host=HOST, port=PORT, dbname=DBNAME, user=user,

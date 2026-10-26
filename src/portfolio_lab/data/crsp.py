@@ -119,7 +119,7 @@ def readable(con, schema: str, table: str) -> bool:
             cur.execute(f"SELECT 1 FROM {schema}.{table} LIMIT 1")
             cur.fetchall()
         return True
-    except Exception as exc:                                        # noqa: BLE001
+    except Exception as exc:
         denied = (type(exc).__name__ == "InsufficientPrivilege"
                   or "permission denied" in str(exc).lower())
         if not denied:
