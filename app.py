@@ -731,7 +731,7 @@ def _paper_rows(book_frame: pd.DataFrame) -> list[dict]:
         try:
             v = _valued(row.to_dict(), DATA_KEY)
         except Exception as exc:                                  # noqa: BLE001
-            v = {"empty": True, "book": row.to_dict(), "error": str(exc)}
+            v = {"empty": True, "book": row.to_dict(), "error": ui.error_text(exc)}
         out.append(v)
     return out
 
@@ -3378,7 +3378,7 @@ def _view_books() -> None:
             valued.append(paper.value_book(src.con, store.con, legacy,
                                            held=store.holdings(prow.id)))
         except Exception as exc:                                   # noqa: BLE001
-            valued.append({"empty": True, "book": legacy, "error": str(exc)})
+            valued.append({"empty": True, "book": legacy, "error": ui.error_text(exc)})
 
     if not valued:
         st.info("No paper books yet.")
@@ -3487,12 +3487,26 @@ def _fb_money(value, currency: str) -> str:
     return f"{value:,.2f} {'€' if currency == 'EUR' else '$'}"
 
 
+def _paper_store_unreadable(exc: BaseException, writer: str) -> None:
+    """A paper-book store that could not be read. A lock means its writer is at work
+    and is said as such, at once; anything else is a fault and is shown as one, because
+    calling a schema error "busy" hid it behind "reload" (audit 24.10.2026, F13 and
+    low 6)."""
+    if ui.store_is_busy(exc):
+        st.info(f"{writer} is updating its books right now. Try again in a minute.")
+    else:
+        st.error(f"{writer}'s store could not be read: {ui.error_text(exc)}")
+
+
 def _fb_read() -> dict | None:
     """Everything the view shows, read in one short read-only visit: the tracker may need
     to write the same file a moment later."""
     if not cfg.PAPER_OPTIONS_DB.exists():
         return None
-    con = fbt.connect(cfg.PAPER_OPTIONS_DB, read_only=True)
+    # Two tries, not the tracker's thirty: the writer holds the file through its EDGAR
+    # and quote fetches, and waiting that out froze PORTFOLIOS for up to 30 s
+    # (audit 24.10.2026 F13). A lock is said at once instead.
+    con = fbt.connect(cfg.PAPER_OPTIONS_DB, read_only=True, tries=2)
     try:
         if not con.execute("SELECT COUNT(*) FROM fb_books").fetchone()[0]:
             return None
@@ -3536,8 +3550,7 @@ def _view_option_books() -> None:
     try:
         data = _fb_read()
     except Exception as exc:                                       # noqa: BLE001
-        st.info(f"The tracker store is busy or unreadable right now ({ui.error_text(exc)}). "
-                "Reload in a moment.")
+        _paper_store_unreadable(exc, "The options tracker")
         return
     if data is None:
         st.info("Not started yet. Run `uv run python scripts/butterfly_tracker.py` once in "
@@ -3552,7 +3565,7 @@ def _view_option_books() -> None:
     st.caption(f"Last update {when} (local time) · US session at that moment: "
                f"{'yes' if last.get('session_open') else 'no — nothing decided'} · "
                f"EUR/USD {data['fx'] or '—'}"
-               + "".join(f" · {n}" for n in last.get("notes", [])))
+               + "".join(f" · {ui.scrubbed(n)}" for n in last.get("notes", [])))
 
     # comparison, rebased to 100 (different money, different currencies)
     fig = go.Figure()
@@ -3719,7 +3732,9 @@ def _fw_read() -> dict | None:
     file from the morning job)."""
     if not cfg.FORWARD_DB.exists():
         return None
-    con = fwl.connect(cfg.FORWARD_DB, read_only=True)
+    # Two tries, not sixty: the morning job holds the file through Yahoo, FRED and the
+    # model training, which froze PORTFOLIOS for up to a minute (audit 24.10.2026 F13).
+    con = fwl.connect(cfg.FORWARD_DB, read_only=True, tries=2)
     try:
         if not con.execute("SELECT COUNT(*) FROM fw_books").fetchone()[0]:
             return None
@@ -3741,7 +3756,8 @@ def _fw_chart(fig, height, title):
 
 def _view_forward_books() -> None:
     """Six forward paper books A-F (forward/), each 1,000 EUR from the day it started."""
-    st.markdown("#### Paper-Portfolios A–F — forward, je 1.000 € seit dem Start")
+    # English like the rest of the interface (audit 24.10.2026, low 14).
+    st.markdown("#### Paper portfolios A–F — forward, 1,000 € each since the start")
     st.caption(
         "Paper only: no order reaches a broker. Hypothetical simulation with fractional "
         "shares; short positions without confirmed borrow. Costs are assumptions: 0.10 % "
@@ -3752,7 +3768,7 @@ def _view_forward_books() -> None:
     try:
         data = _fw_read()
     except Exception as exc:                                       # noqa: BLE001
-        st.info(f"The forward store is busy right now ({ui.error_text(exc)}). Reload.")
+        _paper_store_unreadable(exc, "The forward tracker")
         return
     if data is None:
         st.info("Not started yet. Run `uv run python scripts/forward_books.py` once; the "
@@ -3764,7 +3780,8 @@ def _view_forward_books() -> None:
         if data["at"] is not None else "—")
     st.caption(f"Last update {when} (local time) · newest complete session "
                f"{last.get('latest_complete')} · newest price data "
-               f"{last.get('latest_data')}" + "".join(f" · {n}" for n in last.get("notes", [])))
+               f"{last.get('latest_data')}"
+               + "".join(f" · {ui.scrubbed(n)}" for n in last.get("notes", [])))
 
     fig = go.Figure()
     spy_done = False

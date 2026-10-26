@@ -9,7 +9,7 @@ import shutil
 import pytest
 
 from portfolio_lab import layout
-from tests.app_fixture import build_data, run, texts
+from tests.app_fixture import build_data, errors, run, texts
 
 
 @pytest.fixture(scope="module")
@@ -35,15 +35,12 @@ def fresh(data, tmp_path):
     return copy
 
 
-def _errors(at):
-    return [str(e.value) for e in at.error if "could not be drawn" in str(e.value)]
-
-
 def test_every_tab_and_section_draws_on_the_fixture_store(monkeypatch, fresh):
     from portfolio_lab import command
 
     at = run(monkeypatch, fresh)
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     at.session_state[command.HISTORY_KEY] = ["AAA"]
     for tab in layout.TAB_LABELS:
         for section in layout.SECTIONS[tab] or [None]:
@@ -52,7 +49,8 @@ def test_every_tab_and_section_draws_on_the_fixture_store(monkeypatch, fresh):
                 at.session_state[layout.section_key(tab)] = section
             at.run()
             assert not at.exception, (tab, section, at.exception)
-            assert not _errors(at), (tab, section, _errors(at))
+            assert errors(at) == [], errors(at)
+            assert not errors(at), (tab, section, errors(at))
     assert "places no orders" in texts(at).lower()
 
 
@@ -69,6 +67,7 @@ def test_without_a_portfolio_the_market_views_still_draw(monkeypatch, data, tmp_
     shutil.copytree(data, empty, ignore=shutil.ignore_patterns("user.duckdb*"))
     at = run(monkeypatch, empty, state={layout.MAIN_KEY: layout.MARKETS})
     assert not at.exception
+    assert errors(at) == [], errors(at)
     assert "Americas" in texts(at)
 
 
@@ -81,6 +80,7 @@ def test_a_failing_view_does_not_take_the_page_down(monkeypatch, fresh):
     monkeypatch.setattr(world, "monitor", broken)
     at = run(monkeypatch, fresh, state={layout.MAIN_KEY: layout.MARKETS})
     assert not at.exception
+    assert errors(at, "BOARDS could not be drawn") == [], errors(at)   # only the provoked one
     shown = texts(at)
     assert "could not be drawn" in shown and "RuntimeError" in shown
     assert "example.invalid" not in shown and "abc" not in shown
@@ -95,6 +95,7 @@ def test_closed_tabs_do_not_run(monkeypatch, fresh):
     monkeypatch.setattr(aviation, "fetch", lambda *a, **k: calls.append(1))
     at = run(monkeypatch, fresh, state={layout.MAIN_KEY: layout.MARKETS})
     assert not at.exception and calls == []
+    assert errors(at) == [], errors(at)
 
 
 def test_workbooks_are_built_only_when_clicked(monkeypatch, fresh):
@@ -105,6 +106,7 @@ def test_workbooks_are_built_only_when_clicked(monkeypatch, fresh):
     monkeypatch.setattr(export, "workbook", lambda *a, **k: built.append(1) or real(*a, **k))
     at = run(monkeypatch, fresh, state={layout.MAIN_KEY: layout.SCREEN})
     assert not at.exception
+    assert errors(at) == [], errors(at)
     assert built == []
 
 
@@ -128,6 +130,7 @@ def test_the_option_position_is_valued_at_its_own_underlying(monkeypatch, fresh)
         layout.MAIN_KEY: layout.SECURITY,
         layout.section_key(layout.SECURITY): "OPTIONS"})
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     shown = texts(at)
     assert f"AAA at {aaa:,.2f}" in shown
     assert f"AAA at {bbb:,.2f}" not in shown
@@ -141,6 +144,7 @@ def test_the_watchlist_feeds_the_calendar(monkeypatch, fresh):
     at = run(monkeypatch, fresh, state={layout.MAIN_KEY: layout.EVENTS,
                                         layout.section_key(layout.EVENTS): "CALENDAR"})
     assert not at.exception
+    assert errors(at) == [], errors(at)
     values = [t.value for t in at.text_input]
     assert any("EEE" in v for v in values), values
     assert not any("AAPL" in v for v in values)
@@ -158,6 +162,7 @@ def test_the_dcf_grows_cash_flow_on_its_own_assumption(monkeypatch, fresh):
         layout.MAIN_KEY: layout.SECURITY,
         layout.section_key(layout.SECURITY): "VALUATION"})
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     growth = [n for n in at.number_input if n.key and n.key.startswith("g_")]
     forever = [n.value for n in at.number_input if n.key and n.key.startswith("tg_")]
     assert [n.value for n in growth] == [3.0] and forever == [1.5]
@@ -176,6 +181,7 @@ def test_deleting_a_portfolio_asks_first(monkeypatch, fresh):
     assert "delete_portfolio" in [b.key for b in at.button]     # inside the popover
     at.button(key="delete_portfolio").click().run()
     assert not at.exception
+    assert errors(at) == [], errors(at)
     assert not _store_has(fresh)
 
 
@@ -208,6 +214,7 @@ def test_a_replaced_store_is_read_afresh(monkeypatch, fresh):
 def test_a_deep_link_runs_its_command(monkeypatch, fresh):
     at = run(monkeypatch, fresh, query={"cmd": "EQS"})
     assert not at.exception
+    assert errors(at) == [], errors(at)
     assert at.session_state[layout.MAIN_KEY] == layout.SCREEN
     assert at.session_state[layout.section_key(layout.SCREEN)] == "SCREEN"
 
@@ -218,6 +225,7 @@ def test_the_command_line_loads_a_security_and_opens_its_section(monkeypatch, fr
     at = run(monkeypatch, fresh)
     at.text_input(key="cmd_input").input("AAA US FA").run()
     assert not at.exception, at.exception
+    assert errors(at) == [], errors(at)
     assert command.current(at.session_state) == "AAA"
     assert at.session_state[layout.MAIN_KEY] == layout.SECURITY
     assert at.session_state[layout.section_key(layout.SECURITY)] == "FINANCIALS"
