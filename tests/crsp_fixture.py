@@ -24,6 +24,9 @@ CRSP_END = dt.date(2024, 12, 31)
 DAYS = pd.bdate_range("2023-01-02", CRSP_END).date
 FREE_DAYS = pd.bdate_range("2024-12-02", "2025-03-31").date
 SPLIT_ON = dt.date(2024, 6, 3)
+# Merged Co has no opening price on this day: CRSP leaves `openprc` blank when no open
+# was recorded, and the store must keep it blank (audit 24.10.2026 F9).
+NO_OPEN = DAYS[40]
 
 LINES = {
     # permno: (ticker, name, sic, last day, delisting return, delisting code)
@@ -59,7 +62,8 @@ def dsf() -> pd.DataFrame:
             rows.append({"permno": permno, "date": d, "prc": prc if i % 7 else -prc,
                          "ret": 0.001 if (permno == 10001 and i) else (0.0 if i else None),
                          "vol": 100_000.0, "shrout": shrout, "cfacpr": fac,
-                         "openprc": abs(prc), "askhi": abs(prc) * 1.01,
+                         "openprc": None if (permno == 10004 and d == NO_OPEN)
+                                    else abs(prc), "askhi": abs(prc) * 1.01,
                          "bidlo": abs(prc) * 0.99})
     return pd.DataFrame(rows)
 

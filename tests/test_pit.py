@@ -295,3 +295,40 @@ def test_a_stale_rate_is_not_todays_rate(fx_store):
     wide = pit.fundamentals_wide(fx_store, D(2024, 7, 25)).set_index("cik")
     if 20 in wide.index:
         assert bool(wide.at[20, "fx_missing"])
+
+
+def test_each_amount_converts_in_its_own_currency():
+    """A filer switched to EUR for its balance sheet while its newest annual revenue is
+    still the USD figure of the previous year. The revenue used to be multiplied by the
+    euro rate because the filer's latest currency was applied to every amount (audit
+    24.10.2026 F10)."""
+    c = duckdb.connect(":memory:")
+    _apply(c, MARKET_MIGRATIONS)
+    c.executemany(
+        "INSERT INTO fundamentals (cik, metric, value, period_start, period_end, filed, "
+        "accession, xbrl_tag, tag_rank, currency) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        [(30, "revenue", 500.0, D(2023, 1, 1), D(2023, 12, 31), D(2024, 2, 15), "u",
+          "Revenues", 0, "USD"),
+         (30, "book_value", 1_000.0, None, D(2024, 3, 31), D(2024, 5, 10), "e", "Equity",
+          0, "EUR")])
+    c.executemany("INSERT INTO prices (ticker, date, open, close, close_adj, volume) "
+                  "VALUES ('EURUSD=X', ?, 2.0, 2.0, 2.0, 0)",
+                  [(d,) for d in pd.bdate_range("2024-06-03", "2024-06-28").date])
+    wide = pit.fundamentals_wide(c, D(2024, 6, 28)).set_index("cik")
+    assert wide.at[30, "revenue_ttm"] == pytest.approx(500.0)
+    assert wide.at[30, "book_value"] == pytest.approx(2_000.0)
+    assert wide.at[30, "reporting_currency"] == "EUR"
+    assert not bool(wide.at[30, "fx_missing"])
+
+
+def test_four_quarters_in_two_currencies_are_not_one_ttm_figure():
+    c = duckdb.connect(":memory:")
+    _apply(c, MARKET_MIGRATIONS)
+    quarters = [(D(2023, 1, 1), D(2023, 3, 31), "USD"), (D(2023, 4, 1), D(2023, 6, 30), "USD"),
+                (D(2023, 7, 1), D(2023, 9, 30), "EUR"), (D(2023, 10, 1), D(2023, 12, 31), "EUR")]
+    c.executemany(
+        "INSERT INTO fundamentals (cik, metric, value, period_start, period_end, filed, "
+        "accession, xbrl_tag, tag_rank, currency) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        [(31, "revenue", 100.0, s, e, e + dt.timedelta(days=40), "q", "Revenues", 0, cur)
+         for s, e, cur in quarters])
+    assert pit.ttm_values(c, D(2024, 3, 1)).empty

@@ -306,6 +306,19 @@ def test_the_disappearance_is_counted_and_named(delisted=None):
     assert any("-30%" in n or "−30%" in n for n in r.notes)
 
 
+def test_a_basket_that_vanishes_entirely_still_takes_the_loss():
+    """Only DEAD is held; its bars stop halfway while the benchmark runs to the end.
+    The window used to end with DEAD's last bar, so it never looked delisted and the
+    run ended at 100 (audit 24.10.2026 F8). Flat price, −30%: 100 × 0.7 = 70."""
+    con, dates = delisting_market()
+    h = pd.DataFrame({"ticker": ["DEAD"], "weight": [1.0], "market_cap": [5e9]})
+    free = CostModel(commission=0.0, spread_tiers=((float("inf"), 0.0),))
+    r = bt.buy_and_hold(con, h, dates[0], dates[-1], costs=free, delisting_return=-0.30)
+    assert r.portfolio[-1] == pytest.approx(70.0, rel=1e-9)
+    assert r.dates[-1] == dates[-1]
+    assert any("DEAD" in n and "stopped trading" in n for n in r.notes)
+
+
 def test_a_name_that_trades_to_the_end_is_not_treated_as_delisted():
     con, dates = delisting_market()
     h = pd.DataFrame({"ticker": ["AAA"], "weight": [1.0], "market_cap": [5e9]})

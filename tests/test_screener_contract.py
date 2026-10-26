@@ -197,11 +197,20 @@ def test_the_fast_frame_equals_the_reference_frame():
     fast, reference = src.screening_frame(asof), build_screening_frame(src, asof)
     assert len(fast) == len(reference)
 
+    # Every column, not four of them: comparing a hand-picked few missed that the
+    # reference frame had no share volume at all (audit 24.10.2026 F7).
+    assert set(fast.columns) == set(reference.columns), \
+        set(fast.columns) ^ set(reference.columns)
     merged = fast.merge(reference, on="ticker", suffixes=("_fast", "_ref"))
-    for column in ("price", "median_dollar_volume_60d", "trading_days_60",
-                   "data_age_days"):
+    for column in sorted(set(fast.columns) - {"ticker"}):
         a, b = merged[f"{column}_fast"], merged[f"{column}_ref"]
         assert (a.isna() == b.isna()).all(), f"{column}: the two disagree about missing"
         both = a.notna() & b.notna()
-        worst = ((a[both] - b[both]).abs() / b[both].abs().clip(lower=1e-9)).max()
-        assert worst < 1e-9, f"{column}: builders drifted apart by {worst:.2%}"
+        if not pd.api.types.is_numeric_dtype(a) or not pd.api.types.is_numeric_dtype(b):
+            assert (a[both].astype(str) == b[both].astype(str)).all(), column
+            continue
+        a, b = a[both].astype(float), b[both].astype(float)
+        worst = ((a - b).abs() / b.abs().clip(lower=1e-9)).max()
+        assert not worst >= 1e-9, f"{column}: builders drifted apart by {worst:.2%}"
+    spec = PortfolioSpec(size=20)
+    assert run_screen(fast, spec).exclusions == run_screen(reference, spec).exclusions

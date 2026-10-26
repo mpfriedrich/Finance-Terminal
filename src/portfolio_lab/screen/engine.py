@@ -8,12 +8,14 @@ is "your data is missing".
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 
 from ..data import industry
+from ..data.pit import DURATION_METRICS, INSTANT_METRICS, MAX_FACT_AGE_DAYS
 from .spec import FILTERABLE, Filter, PortfolioSpec
 from .valuation import Assumptions, add_valuation
 
@@ -317,6 +319,13 @@ def run_screen(
     drop(data["data_age_days"].fillna(10**6) <= max_age,
          f"filing older than {spec.max_filing_age_months} months")
     drop(~share_count_is_implausible(data), "share count fails the volume sanity check")
+    # A trailing-twelve-month figure too old to describe the company (audit 24.10.2026
+    # F6, R14) leaves its ratios NaN. Such a name would fail the filter anyway; the
+    # point of this line is that the reason is counted, not left as "did not pass".
+    stale = needs_stale_ttm(data, spec)
+    if stale is not None:
+        drop(~stale, f"earnings or other twelve-month figure older than "
+                     f"{MAX_FACT_AGE_DAYS} days")
     drop(data["price"] >= spec.min_price, f"price below {spec.min_price:g}")
     drop(data["median_dollar_volume_60d"].fillna(0) >= spec.min_dollar_volume,
          "below minimum turnover")
@@ -414,6 +423,56 @@ def run_screen(
         per_filter_survivors=per_filter,
         notes=notes,
     )
+
+
+@functools.cache
+def ttm_inputs() -> dict[str, frozenset[str]]:
+    """metric -> the `*_ttm` fields its value depends on.
+
+    Measured, not written down: one plausible company is run through derive_metrics and
+    add_valuation once whole and once per field with that field blanked, and every
+    column that changes depends on the field. A hand-kept table would drift the first
+    time someone adds a ratio.
+    """
+    ttm = [f"{m}_ttm" for m in DURATION_METRICS]
+    base = {"price": 20.0, "shares_outstanding": 1e8, "revenue_ttm_prior": 9e8,
+            "book_value": 5e8, "total_assets": 2e9, "total_liabilities": 1.5e9,
+            "long_term_debt": 4e8, "current_debt": 1e8, "cash": 1e8,
+            "current_assets": 6e8, "current_liabilities": 3e8,
+            "revenue_ttm": 1e9, "net_income_ttm": 1e8, "operating_cash_flow_ttm": 1.5e8,
+            "capex_ttm": 5e7, "operating_income_ttm": 1.4e8,
+            "depreciation_amortization_ttm": 3e7, "interest_expense_ttm": 1e7,
+            "income_tax_ttm": 2.5e7, "pretax_income_ttm": 1.2e8, "gross_profit_ttm": 4e8}
+    if not (set(INSTANT_METRICS) | set(ttm)) <= set(base):
+        raise RuntimeError("ttm_inputs: the probe company lacks a field pit.py defines")
+
+    def run(row: dict) -> pd.Series:
+        return add_valuation(derive_metrics(pd.DataFrame([row])), Assumptions()).iloc[0]
+
+    whole = run(base)
+    deps: dict[str, set[str]] = {}
+    for blank in ttm:
+        probe = run({**base, blank: np.nan})
+        for column in whole.index:
+            a, b = whole[column], probe.get(column)
+            if (pd.isna(a) != pd.isna(b)) or (not pd.isna(a) and a != b):
+                deps.setdefault(column, set()).add(blank)
+    return {k: frozenset(v) for k, v in deps.items()}
+
+
+def needs_stale_ttm(data: pd.DataFrame, spec: PortfolioSpec) -> pd.Series | None:
+    """Rows whose stale TTM figure (`stale_ttm`, from the frame builders) feeds a
+    metric this spec filters or ranks on; None when nothing can be affected."""
+    if "stale_ttm" not in data.columns or data["stale_ttm"].isna().all():
+        return None
+    deps = ttm_inputs()
+    needed: set[str] = set()
+    for metric in [f.metric for f in spec.filters] + [spec.effective_rank()[0]]:
+        needed |= deps.get(metric, frozenset())
+    if not needed:
+        return None
+    return data["stale_ttm"].map(
+        lambda s: isinstance(s, str) and bool(needed & set(s.split(","))))
 
 
 # A company cannot trade a large fraction of its entire share count every single day.

@@ -42,7 +42,9 @@ import pandas as pd
 # v7: foreign filers — amounts converted to USD, shares on the listed-share basis.
 # v8: EBIT, D&A, interest, tax, gross profit and prior-year revenue in the frame.
 # v9: `country`, the market a line trades in (world store).
-CACHE_VERSION = "v9"
+# v10 (audit 24.10.2026): a TTM figure older than MAX_FACT_AGE_DAYS is NaN and named in
+#     `stale_ttm` (F6); amounts convert in their own currency, fact by fact (F10).
+CACHE_VERSION = "v10"
 
 
 def prune(root: Path, keep: Path, older_than_days: int = 7,

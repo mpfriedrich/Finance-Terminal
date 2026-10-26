@@ -1,10 +1,11 @@
 """The US half from CRSP (data/crsp.py): every listing, its end, and what holders got."""
 import datetime as dt
 
+import pandas as pd
 import pytest
 
 from portfolio_lab.data import crsp, history, wrds
-from tests.crsp_fixture import CRSP_END, DAYS, SPLIT_ON, build
+from tests.crsp_fixture import CRSP_END, DAYS, NO_OPEN, SPLIT_ON, build
 
 
 @pytest.fixture(scope="module")
@@ -49,6 +50,23 @@ def test_negative_prices_are_crsps_midpoint_and_splits_are_adjusted(con):
     assert _px(con, "ALPH", before) == pytest.approx(_px(con, "ALPH", after), rel=0.01)
     assert all(v > 0 for (v,) in con.execute(
         "SELECT close_raw FROM prices WHERE ticker = 'BST'").fetchall())
+
+
+@pytest.mark.parametrize("ciz", [False, True])
+def test_a_missing_open_stays_missing_and_the_fill_waits(tmp_path, ciz):
+    """CRSP leaves `openprc` blank on a day without a recorded open. The build used to
+    fill it with the close, so a fill "at the open" ran at the close (audit 24.10.2026
+    F9, R16). The bar keeps its close, the open stays NULL, and Stage B's fill price for
+    that session is missing, so it cannot trade the name then."""
+    from portfolio_lab.stage_b import bars_for
+
+    src, *_ = build(tmp_path, ciz=ciz)
+    assert _px(src.con, "MRG", NO_OPEN, "open") is None
+    assert _px(src.con, "MRG", NO_OPEN, "close") == pytest.approx(20.0)
+    assert _px(src.con, "MRG", DAYS[41], "open") == pytest.approx(20.0)
+    bars = bars_for(src, ["MRG"], DAYS[38], DAYS[42]).set_index("date")
+    assert pd.isna(bars.at[NO_OPEN, "open_adj"])
+    assert bars.at[DAYS[41], "open_adj"] == pytest.approx(20.0)
 
 
 def test_the_total_return_series_compounds_crsps_return(con):
@@ -113,6 +131,24 @@ def test_buy_and_hold_takes_the_real_exit(world):
     result = buy_and_hold(src.con, held, dt.date(2023, 1, 3), dt.date(2024, 6, 28))
     assert any("CRSP records the actual delisting return" in n and "-85%" in n
                for n in result.notes)
+
+
+def test_a_basket_of_one_vanished_name_takes_crsps_exit(world):
+    """Only BST held: its bars stop on 2023-06-30, the benchmark runs on. The run
+    ends on the market's last day and BST's real −85% applies: 100 × 0.15 = 15
+    (audit 24.10.2026 F8; flat price, no costs)."""
+    import pandas as pd
+
+    from portfolio_lab.backtest import buy_and_hold
+    from portfolio_lab.config import CostModel
+
+    src, *_ = world
+    held = pd.DataFrame({"ticker": ["BST"], "weight": [1.0], "market_cap": [2e8]})
+    free = CostModel(commission=0.0, spread_tiers=((float("inf"), 0.0),))
+    result = buy_and_hold(src.con, held, dt.date(2023, 1, 3), dt.date(2023, 12, 29),
+                          costs=free)
+    assert result.portfolio[-1] == pytest.approx(15.0, rel=1e-9)
+    assert result.dates[-1] == dt.date(2023, 12, 29)
 
 
 def test_copying_the_free_store_again_changes_nothing(world):
