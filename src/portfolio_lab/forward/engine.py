@@ -625,7 +625,12 @@ def _book_session(con, market, b: dict, S: dt.date, px, fx_open, fx_close, now) 
                        "AND status='pending'", [bid, S]).fetch_df().to_dict("records")
     if b["kind"] == "rare":
         for p in lg.open_positions(con, bid).to_dict("records"):
-            if p["planned_exit"] is not None and S >= p["planned_exit"]:
+            # The store hands planned_exit back as a pandas Timestamp, which cannot be
+            # compared with a date: every F position raised a TypeError on the session
+            # after its entry, and the run stopped there for all six books (found by the
+            # hand-made market test of audit 24.10.2026 F21).
+            if pd.notna(p["planned_exit"]) and \
+                    S >= pd.Timestamp(p["planned_exit"]).date():
                 _close_at_open(con, market, bid, p, S, px, fx_open, now,
                                "fünf Sitzungen gehalten", None)
     for sig in sigs:

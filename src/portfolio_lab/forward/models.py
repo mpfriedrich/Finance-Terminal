@@ -213,7 +213,10 @@ def training_rows(panel, columns: list[str], window_start: dt.date, cutoff: dt.d
 def train_window(panel, columns: list[str], window_start: dt.date, cutoff: dt.date,
                  variant: str, log=print) -> dict:
     X, y, dates, ends = training_rows(panel, columns, window_start, cutoff, log)
-    assert ends.max() < np.datetime64(cutoff), "a training outcome is not yet known"
+    # The look-ahead guard of the training: an explicit raise, not `assert`, which
+    # `python -O` drops (audit 24.10.2026 F21).
+    _check(bool(len(ends)) and ends.max() < np.datetime64(cutoff),
+           "a training outcome is not yet known at the cutoff")
     ids = sample_training(np.arange(len(y)), dates)
     sc = scaler_fit(X[ids])
     m = ridge_fit(transform(X[ids], sc), np.clip(y[ids], -.25, .25), 1.0)
