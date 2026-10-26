@@ -1974,6 +1974,51 @@ ihn. In einem zweiten Lauf meldeten unter Yahoos Drosselung 49 Symbole „keine 
 (darunter LMT, M); ihre gespeicherten Kurse blieben unberührt, wie gewollt.
 Ungeprüft: der echte Morgenlauf mit dem neuen Code.
 
+## Befund 24.10.2026: Splits zerrissen die Kursreihe beim Tagesupdate (Audit F3, lokale Sitzung)
+
+**Was:** Das inkrementelle Update ersetzt nur sein Fenster (letzte vollständige Sitzung − 5
+Tage bis heute). Yahoo rechnet aber bei einem Split die *ganze* Historie um (alle Schlusskurse
+davor geteilt), bei einer Dividende alle bereinigten Schlusskurse davor. Die älteren Zeilen
+blieben auf der alten Basis: Die Reihe sprang am Split-Tag um den Split-Faktor, und
+`rebuild_raw_closes` multiplizierte die alten, nicht umgerechneten Kurse noch einmal mit dem
+Split — `close_raw` und damit die Marktkapitalisierung (Regel 7) waren um den Faktor falsch.
+Bei Dividenden fehlte die Dividende in der Gesamtrendite (Sprung von etwa der Rendite am
+Fensteranfang). PLAN.md sagte „Yahoo bereinigt rückwirkend“ — für Yahoo stimmt das, für den
+Bestand nicht.
+
+**Gemessen 24.10.2026 in `market.duckdb`:** 8 Reihen mit einem Sprung in Höhe des
+Split-Faktors am Split-Tag: AIXI (08.09., 1:7), GMEX (28.09., 1:9), DLXY (28.09., 1:5), VIVK
+(05.10., 1:15), VTAK (05.10., 1:10), KNDI (16.10., 1:10), FRGT (19.10., 1:10), JL (10.12.2024,
+1:10) — alles Reverse-Splits kleiner Werte.
+
+**Behoben (`data/prices.py`, `scripts/build_prices.py`):**
+* `_restated`: Vor dem Ersetzen wird jede Antwort mit den gespeicherten Kursen derselben Tage
+  verglichen. Weicht Schlusskurs oder Verhältnis bereinigt/Schluss ab (> 1e-6) und liegen ältere
+  Kurse vor dem Fenster, wird die ganze Historie dieses Tickers neu geladen (`refetch_history`,
+  ab seinem ersten gespeicherten Tag). Kosten: ein Download je Ticker mit Split/Dividende im
+  Fenster, bei Quartalsdividenden geschätzt einige Dutzend am Tag (nicht gemessen).
+* `split_breaks` findet alte Brüche (Sprung = Faktor am Split-Tag); `repair_split_breaks` lädt
+  sie neu und bereinigt, was danach noch bricht, selbst (Kurse vor dem Split ÷ Faktor, Volumen
+  × Faktor). Das Tagesupdate ruft es bei jedem Lauf; 0,3 s auf dem vollen Bestand.
+* **Ausgeführt 24.10.2026 auf dem echten Bestand** (mit Zustimmung): Neuladen heilte KNDI,
+  VIVK, VTAK. AIXI, DLXY, FRGT, GMEX, JL kamen von Yahoo selbst unbereinigt zurück (AIXI 0,47 $
+  vor dem 1:7 vom 08.09.2026, 3,26 $ am Tag) und wurden hier bereinigt; JL danach 3,17 $
+  bereinigt / 0,317 $ gehandelt am 09.12.2024, 3,13 $ am 10.12. `split_breaks` danach leer;
+  US-Hälfte des Welt-Bestands neu kopiert.
+  Nur Splits ab 3:2 bzw. 1:1,45: darunter flaggte der Test BEP (1,251, echte 8-%-Bewegung) und
+  FWONA (1,424, 2016, der Sprung steht so in Yahoos eigener Historie und käme bei jedem Download
+  wieder).
+* Tests: `test_a_split_in_the_window_refetches_the_whole_history`,
+  `test_a_dividend_in_the_window_refetches_the_whole_history`,
+  `test_an_unchanged_history_is_not_refetched`, `test_a_split_broken_earlier_is_found_and_repaired`,
+  `test_a_split_yahoo_never_restated_is_adjusted_here` — alle rot ohne den Fix in `prices.py`.
+
+**Ungetestet / offen:** gegen echtes Yahoo nicht gelaufen (die Tests nutzen ein nachgebautes
+Yahoo). Liefert Yahoo für einen Ticker kürzere Historie als gespeichert, bleiben die älteren
+Zeilen stehen (nicht auf Verdacht gelöscht) und behalten die alte Basis. Ältere Backtests und
+Pit-Cache-Frames mit diesen 8 Titeln sind nicht neu gerechnet; der Cache-Fingerprint ändert sich
+mit dem Neuaufbau ohnehin.
+
 ## Audit 24.10.2026 — offene Befunde (vorgemerkt, nicht begonnen; Nutzer entscheidet)
 
 Gesamtbericht: Obsidian `Portfolio Lab/Audits/2026-10-24-audit.md` (Claude, 4 Agenten, und

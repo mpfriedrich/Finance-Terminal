@@ -172,13 +172,15 @@ def fetch_into_store(
     """
     download = download or _download
     stats: dict = {"requested": len(tickers), "rows": 0, "tickers_with_data": 0,
-                   "no_data": [], "failed": []}
+                   "no_data": [], "failed": [], "refetched": []}
     for i in range(0, len(tickers), chunk):
         batch = tickers[i : i + chunk]
+        restated: list[str] = []
         try:
             frame = download(batch, start, end)
             if not frame.empty:
                 frame = frame.drop_duplicates(["ticker", "date"], keep="last")
+                restated = _restated(con, frame, start)
                 _upsert(con, frame, start, end)
         except Exception as exc:                                    # noqa: BLE001
             stats["failed"].append(
@@ -186,6 +188,10 @@ def fetch_into_store(
             print(f"  prices {i + len(batch):>6}/{len(tickers)} · chunk "
                   f"{batch[0]}..{batch[-1]} failed: {type(exc).__name__}", flush=True)
             continue
+        if restated:
+            again = refetch_history(con, restated, end, download=download)
+            stats["refetched"] += again["refetched"]
+            stats["failed"] += again["failed"]
         got = set(frame.ticker) if not frame.empty else set()
         stats["no_data"] += [t for t in batch if t not in got]
         stats["rows"] += len(frame)
@@ -194,6 +200,135 @@ def fetch_into_store(
             f"  prices {i + len(batch):>6}/{len(tickers)} · {stats['rows']:>9} rows",
             flush=True,
         )
+    return stats
+
+
+# Two answers for the same bar that differ by more than this are two bases, not noise.
+RESTATED_TOLERANCE = 1e-6
+
+
+def _restated(con: duckdb.DuckDBPyConnection, frame: pd.DataFrame,
+              start: dt.date) -> list[str]:
+    """Tickers whose answer for a day differs from the bar stored for that same day,
+    while older bars lie before the window: Yahoo has restated the whole history.
+
+    Yahoo divides every close before a split by it, and scales every adjusted close
+    before an ex-dividend day. The increment replaced only its window, so the bars
+    before it kept the old basis: VTAK's 1-for-10 of 05.10.2026 left the series falling
+    to a tenth overnight, and rebuild_raw_closes then multiplied the old, unadjusted
+    closes by the split once more. Seven such breaks were in market.duckdb on 24.10.2026
+    (AIXI, GMEX, DLXY, VIVK, VTAK, KNDI, FRGT; audit F3). A dividend did the same on a
+    smaller scale and dropped out of total return. A late correction of one bar also
+    counts as a restatement; the cost is one needless download."""
+    con.register("_chk", frame)
+    try:
+        rows = con.execute(
+            """
+            SELECT DISTINCT x.ticker FROM _chk x JOIN prices p USING (ticker, date)
+            WHERE x.date >= ? AND x.close > 0 AND p.close > 0
+              AND (abs(x.close / p.close - 1) > ?
+                   OR abs((x.close_adj / x.close) / (p.close_adj / p.close) - 1) > ?)
+              AND EXISTS (SELECT 1 FROM prices q WHERE q.ticker = x.ticker
+                          AND q.date < ?)
+            ORDER BY 1
+            """,
+            [start, RESTATED_TOLERANCE, RESTATED_TOLERANCE, start],
+        ).fetchall()
+    finally:
+        con.unregister("_chk")
+    return [r[0] for r in rows]
+
+
+def refetch_history(con: duckdb.DuckDBPyConnection, tickers: list[str], end: dt.date,
+                    chunk: int = 50, download=None) -> dict:
+    """Download each ticker's whole stored history again and replace it, one ticker at
+    a time. A ticker whose answer starts later than its stored bars keeps those older
+    bars (they are not deleted on a guess); a failing chunk is noted and skipped."""
+    download = download or _download
+    stats: dict = {"refetched": [], "failed": []}
+    if not tickers:
+        return stats
+    first = dict(con.execute(
+        "SELECT ticker, MIN(date) FROM prices WHERE ticker IN (SELECT UNNEST(?)) "
+        "GROUP BY 1", [list(tickers)]).fetchall())
+    for i in range(0, len(tickers), chunk):
+        batch = [t for t in tickers[i : i + chunk] if t in first]
+        if not batch:
+            continue
+        try:
+            frame = download(batch, min(first[t] for t in batch), end)
+            for t, sub in frame.groupby("ticker", sort=True):
+                sub = sub.drop_duplicates(["ticker", "date"], keep="last")
+                _upsert(con, sub, min(sub["date"]), end)
+                stats["refetched"].append(t)
+        except Exception as exc:                                    # noqa: BLE001
+            stats["failed"].append(
+                f"history {batch[0]}..{batch[-1]}: {type(exc).__name__}")
+    print(f"  history fetched again (split or dividend restated it): "
+          f"{' '.join(stats['refetched']) or '-'}", flush=True)
+    return stats
+
+
+def _split_break_rows(con: duckdb.DuckDBPyConnection) -> list[tuple]:
+    """(ticker, split day, factor) where the stored close jumps by the factor."""
+    return con.execute(
+        """
+        WITH s AS (SELECT ticker, date, split FROM prices
+                   WHERE split IS NOT NULL AND abs(ln(split)) > ln(1.45)),
+        p AS (SELECT ticker, date, close,
+                     LAG(close) OVER (PARTITION BY ticker ORDER BY date) AS before
+              FROM prices WHERE ticker IN (SELECT ticker FROM s))
+        SELECT ticker, date, split FROM s JOIN p USING (ticker, date)
+        WHERE before > 0 AND close > 0 AND abs(before / close / split - 1) < 0.15
+        ORDER BY 1, 2
+        """).fetchall()
+
+
+def split_breaks(con: duckdb.DuckDBPyConnection) -> list[str]:
+    """Tickers whose stored close jumps by the split factor on a split day: the bars
+    before it were never restated (stored before _restated existed, a refetch that
+    failed, or Yahoo's own history). A properly adjusted series barely moves at a split.
+
+    Only splits of at least 3-for-2 (or 1-for-1.45) count: below that a real day's move
+    and the factor cannot be told apart. Measured on market.duckdb, 24.10.2026: with a
+    25 % floor BEP (1.251, 30.07.2020, an 8 % move) and FWONA (1.424, 18.04.2016) were
+    flagged too."""
+    return sorted({r[0] for r in _split_break_rows(con)})
+
+
+def repair_split_breaks(con: duckdb.DuckDBPyConnection, end: dt.date,
+                        download=None) -> dict:
+    """Fetch every broken history again; where the break survives that, Yahoo itself
+    never restated it, and the bars before the split are put on today's basis here
+    (prices divided by the factor, volume multiplied by it), so close_raw comes out as
+    traded.
+
+    Measured 24.10.2026: of the eight breaks the refetch healed KNDI, VIVK and VTAK;
+    AIXI, DLXY, FRGT, GMEX and JL came back from Yahoo unadjusted (AIXI 0.47 before its
+    1-for-7 of 08.09.2026, 3.26 on the day). Should Yahoo restate one later, its
+    answer then agrees with ours and nothing changes."""
+    broken = split_breaks(con)
+    stats = refetch_history(con, broken, end, download=download) if broken else \
+        {"refetched": [], "failed": []}
+    stats["adjusted"] = []
+    rows = _split_break_rows(con)
+    if rows:
+        con.begin()
+        try:
+            for ticker, day, factor in rows:
+                con.execute(
+                    "UPDATE prices SET open = open / ?, high = high / ?, low = low / ?, "
+                    "close = close / ?, close_adj = close_adj / ?, "
+                    "volume = CAST(round(volume * ?) AS BIGINT) "
+                    "WHERE ticker = ? AND date < ?",
+                    [factor] * 6 + [ticker, day])
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+        stats["adjusted"] = sorted({r[0] for r in rows})
+        print(f"  split adjusted here (Yahoo's history was not): "
+              f"{' '.join(stats['adjusted'])}", flush=True)
     return stats
 
 
