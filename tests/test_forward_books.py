@@ -821,3 +821,33 @@ def test_an_intraday_eurusd_value_is_replaced_until_its_day_is_over(con):
     lg.store_fx(con, day, 1.19, "yahoo", dt.datetime(2026, 10, 25, 9))     # final stays
     lg.store_fx(con, day, 1.20, "store", None)
     assert en.fx_on(con, day) == pytest.approx(1.18)
+
+
+def test_live_opens_one_source_per_run_and_closes_it(tmp_path, monkeypatch):
+    # Audit 24.10.2026, low item 11: each pit_frame call opened a new source.
+    from portfolio_lab.data import sources
+
+    opened, closed = [], []
+
+    class Src:
+        def __init__(self):
+            self.con = SimpleNamespace(close=lambda: closed.append(1))
+
+        def snapshot(self):
+            return SimpleNamespace(fingerprint=lambda: "fp")
+
+        def screening_frame(self, day):
+            return pd.DataFrame({"ticker": ["AAA"], "day": [str(day)]})
+
+    def open_selected(settings):
+        opened.append(settings.data_source)
+        return Src(), None
+
+    monkeypatch.setattr(sources, "open_selected", open_selected)
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+    live = en.Live()
+    live.pit_frame(dt.date(2026, 10, 30))
+    live.pit_frame(dt.date(2025, 10, 30))
+    assert opened == ["free"] and closed == []
+    live.close()
+    assert closed == [1]

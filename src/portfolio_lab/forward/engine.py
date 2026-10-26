@@ -72,14 +72,26 @@ class Live:
     def fred(self) -> pd.DataFrame:
         return dd.fred_snapshot()
 
-    def pit_frame(self, day: dt.date) -> pd.DataFrame:
-        from ..config import CACHE_DIR, Settings
-        from ..data.sources import open_selected
-        from ..pit_cache import FrameCache
+    _cache = None
 
-        src, _ = open_selected(Settings(data_source="free"))
-        cache = FrameCache(src, CACHE_DIR / "pit", src.snapshot().fingerprint())
-        return cache.frame_for(day)
+    def pit_frame(self, day: dt.date) -> pd.DataFrame:
+        """The free store's screening frame of `day` from the pit cache. One source and
+        one cache per run: every call used to open a new connection to the market store
+        and never close it (audit 24.10.2026, low item 11); `close` ends it."""
+        if self._cache is None:
+            from .. import config
+            from ..data.sources import open_selected
+            from ..pit_cache import FrameCache
+
+            src, _ = open_selected(config.Settings(data_source="free"))
+            self._cache = FrameCache(src, config.CACHE_DIR / "pit",
+                                     src.snapshot().fingerprint())
+        return self._cache.frame_for(day)
+
+    def close(self) -> None:
+        if self._cache is not None:
+            self._cache.source.con.close()
+            self._cache = None
 
 
 # -- setup ------------------------------------------------------------------------------
@@ -862,4 +874,6 @@ def run(path: Path, market, live=None, now: dt.datetime | None = None, log=print
                     [now, json.dumps(summary, default=str)])
     finally:
         con.close()
+        if hasattr(live, "close"):
+            live.close()
     return summary
