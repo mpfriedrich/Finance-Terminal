@@ -568,6 +568,66 @@ def test_research_inputs_are_copied_once_with_their_hash(world):
         md.stored("b")
 
 
+def test_a_missed_month_end_is_caught_up_on_the_next_complete_session(world):
+    # Audit 24.10.2026 F19: E was due only when L itself was the month's last session,
+    # so a month end run too late moved the next basket a whole month.
+    live = FakeLive()
+    oct29, oct30, nov2, nov3 = (dt.date(2026, 10, 29), dt.date(2026, 10, 30),
+                                dt.date(2026, 11, 2), dt.date(2026, 11, 3))
+    m1 = _market(world["dir"] / "m1.duckdb", WED)
+    en.run(world["path"], m1, live, now=at(WED, 20), log=lambda *_: None)
+    m1.close()
+    m2 = _market(world["dir"] / "m2.duckdb", nov2)
+    en.run(world["path"], m2, live, now=at(oct29, 20), log=lambda *_: None)
+    en.run(world["path"], m2, live, now=at(nov2, 12), log=lambda *_: None)  # too late
+    e = _read(world["path"], "SELECT signal_session, status FROM fw_signals WHERE "
+                             "book_id='fw-e' ORDER BY 1")
+    assert e.set_index(e.signal_session.astype(str)).loc[str(oct30), "status"] == "missed"
+    en.run(world["path"], m2, live, now=at(nov2, 20), log=lambda *_: None)
+    m2.close()
+    e = _read(world["path"], "SELECT signal_session, exec_session, status FROM fw_signals "
+                             f"WHERE book_id='fw-e' AND signal_session='{nov2}'")
+    assert list(e.status) == ["pending"] and e.exec_session.iloc[0].date() == nov3
+    assert en.month_anchor(nov3) == oct30 and en.month_anchor(oct30) == oct30
+
+
+def test_a_signal_whose_session_never_gets_bars_is_marked_missed(world):
+    # Audit 24.10.2026, low item 9: a session without any bar is passed over as a
+    # closure the calendar does not know, and its signals stayed "pending" for good.
+    live = FakeLive()
+    m1 = _market(world["dir"] / "m1.duckdb", WED)
+    en.run(world["path"], m1, live, now=at(WED, 20), log=lambda *_: None)
+    m1.close()
+    m2 = _market(world["dir"] / "m2.duckdb", FRI, holes=(THU,))
+    en.run(world["path"], m2, live, now=at(FRI, 20), log=lambda *_: None)
+    m2.close()
+    left = _read(world["path"], f"SELECT book_id, status FROM fw_signals WHERE "
+                                f"exec_session='{THU}' AND book_id <> 'fw-f'")
+    assert set(left.status) == {"missed"} and len(left) == 5, left
+    assert _read(world["path"], "SELECT COUNT(*) n FROM fw_orders")["n"][0] == 0
+    # E is due again at once (F19): its start basket is built after Friday's close
+    e = _read(world["path"], f"SELECT status FROM fw_signals WHERE book_id='fw-e' AND "
+                             f"signal_session='{FRI}'")
+    assert list(e.status) == ["pending"]
+
+
+def test_an_error_note_carries_no_address_or_key(world, monkeypatch):
+    # R24: notes reach the brief, the mail and the app; ui.error_text cuts URLs and
+    # key=value pairs out of the exception's message.
+    live = FakeLive()
+
+    def broken(day):
+        raise RuntimeError("GET https://example.invalid/x?api_key=SECRET123 failed")
+
+    monkeypatch.setattr(live, "pit_frame", broken)
+    m1 = _market(world["dir"] / "m1.duckdb", WED)
+    s = en.run(world["path"], m1, live, now=at(WED, 20), log=lambda *_: None)
+    m1.close()
+    notes = "\n".join(s["notes"])
+    assert "E: Signal fehlgeschlagen (RuntimeError" in notes
+    assert "SECRET123" not in notes and "example.invalid" not in notes
+
+
 def test_a_book_opened_under_an_older_version_moves_to_the_new_one(con, monkeypatch):
     # The six real books opened on 22.10.2026 as A1-F1; the delisting rule is version 2.
     old = [{**b, "version": b["code"] + "1"} for b in stg.BOOKS]

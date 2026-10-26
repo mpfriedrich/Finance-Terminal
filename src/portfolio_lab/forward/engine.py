@@ -621,6 +621,13 @@ def _book_session(con, market, b: dict, S: dt.date, px, fx_open, fx_close, now) 
             result = fill_rare(con, market, bid, sig, S, px, fx_open, now, prev_eq)
         con.execute("UPDATE fw_signals SET status='executed', note=? WHERE id=?",
                     [result, sig["id"]])
+    # A signal for a session before S that is still pending was never filled: its
+    # session had no bars at all and was passed over (a closure the calendar does not
+    # know). It used to stay "pending" for good (audit 24.10.2026, low item 9); a
+    # later session being booked bounds the wait, and E is then due again (F19).
+    con.execute("UPDATE fw_signals SET status='missed', note='keine Kurse am "
+                "Ausführungstag: nicht ausgeführt' WHERE book_id=? AND status='pending' "
+                "AND exec_session < ?", [bid, S])
     prices = {}
     for p in lg.open_positions(con, bid).to_dict("records"):
         eq = equivalent(market, p, px["close_adj"].get(p["ticker"]))
@@ -670,9 +677,22 @@ def _due(con, book: dict, L: dt.date) -> bool:
             n += 1
         return n >= 5
     if book["kind"] == "rule_e":
-        month_end = cal.next_session(L).month != L.month
-        return last is None or (month_end and last < L)
+        return last is None or last < month_anchor(L)
     return True
+
+
+def month_anchor(L: dt.date) -> dt.date:
+    """The month end E's next basket belongs to: L itself when L is the last session of
+    its month, else the last session of the month before.
+
+    E is due as long as no signal (pending or executed) exists from that session on. It
+    used to be due only when L itself was the month's last session, so a month end that
+    was incomplete or run too late moved the basket a whole month (audit 24.10.2026
+    F19); now the next complete session catches up. The first basket is built at the
+    start, mid-month (22.10.2026); the month ends follow from there."""
+    if cal.next_session(L).month != L.month:
+        return L
+    return cal.prev_session(dt.date(L.year, L.month, 1))
 
 
 def _rows(panel, i: int) -> tuple[pd.DataFrame, np.ndarray]:
