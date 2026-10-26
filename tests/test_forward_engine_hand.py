@@ -161,8 +161,8 @@ def test_training_targets_end_before_the_cutoff(tmp_path):
     spy = pd.DataFrame({"open": px * 0.999, "close": px, "close_adj": px}, index=days)
     panel = dd.Panel(market, days[0].date(), days[-1].date(), spy)
     cutoff = dt.date(2023, 7, 3)
-    X, y, dates, ends = md.training_rows(panel, fx.BASE23, dt.date(2022, 1, 3), cutoff,
-                                         log=lambda *_: None)
+    _x, y, dates, ends = md.training_rows(panel, fx.BASE23, dt.date(2022, 1, 3), cutoff,
+                                          log=lambda *_: None)
     assert len(y) > 0
     assert ends.max() < np.datetime64(cutoff)
     # each outcome ends six sessions after its signal, on the panel's calendar
