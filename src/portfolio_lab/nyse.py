@@ -15,8 +15,16 @@ import datetime as dt
 
 from .filing_butterfly import ET, nyse_holidays
 
-__all__ = ["ET", "EARLY_CLOSES", "SPECIAL_CLOSURES", "close_hour", "is_session",
-           "next_session", "prev_session", "sessions_from"]
+__all__ = [
+    "EARLY_CLOSES",
+    "ET",
+    "SPECIAL_CLOSURES",
+    "close_hour",
+    "is_session",
+    "next_session",
+    "prev_session",
+    "sessions_from",
+]
 
 # Closed for the whole day outside the regular holiday rules.
 SPECIAL_CLOSURES = {
