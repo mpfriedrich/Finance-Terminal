@@ -2,6 +2,7 @@
 no research files (artifacts and vintages are fixtures)."""
 
 import datetime as dt
+import json
 from types import SimpleNamespace
 
 import duckdb
@@ -9,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from portfolio_lab import config
 from portfolio_lab import filing_butterfly as cal
 from portfolio_lab.forward import engine as en
 from portfolio_lab.forward import features as fx
@@ -227,6 +229,26 @@ def _artifact(cols, impute=False):
     return a
 
 
+def _research(root, vint):
+    """B's frozen model, C's yearly models and ALFRED's vintages, written where the
+    research copy keeps them, in its layout."""
+    b = {**_artifact(fx.BASE23, impute=True), "post2024_prices_loaded": False}
+    c = _artifact(fx.V13)
+    years = {"2026": {"models": {"v13": {k: c[k] for k in ("features", "scaler", "model")}},
+                      "window_start": "2016-01-01", "latest_outcome": "2025-12-30",
+                      "samples": 1}}
+    for name, rel in md.INPUTS.items():
+        f = root / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        if name == "b":
+            f.write_text(json.dumps(b))
+        elif name == "c":
+            f.write_text(json.dumps(years))
+        else:
+            vint.to_parquet(f, index=False)
+    return root
+
+
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     months = pd.date_range("2021-01-01", "2026-09-01", freq="MS")
@@ -235,10 +257,12 @@ def world(tmp_path, monkeypatch):
         "available_through": en.FAR, "observation_date": months.strftime("%Y-%m-%d"),
         "value": np.linspace(100, 110, len(months)) + k, "series_id": sid})
         for k, sid in enumerate(fx.MACRO_SERIES)], ignore_index=True)
-    monkeypatch.setattr(en, "_ALFRED", vint)
-    monkeypatch.setattr(md, "load_b", lambda *a: _artifact(fx.BASE23, impute=True))
-    monkeypatch.setattr(md, "load_c_2026", lambda *a: _artifact(fx.V13))
-    monkeypatch.setattr(md, "sha256", lambda p: "fixture")
+    # The three research inputs in the research layout, in a research folder of their
+    # own; the books copy them into their inputs folder on first use (audit F11).
+    research = _research(tmp_path / "research", vint)
+    monkeypatch.setattr(md, "RESEARCH", research)
+    monkeypatch.setattr(config, "FORWARD_INPUTS", tmp_path / "forward_inputs")
+    monkeypatch.setattr(en, "_ALFRED", None)
     trained = []
 
     def train(panel, cols, start, cutoff, variant, log=print):
@@ -499,6 +523,49 @@ def test_a_held_share_with_a_null_open_stays_open_and_the_cash_finite(world):
     assert np.isfinite(marks[["cash", "equity", "positions"]].to_numpy()).all()
     led = _read(world["path"], "SELECT amount FROM fw_ledger")
     assert np.isfinite(led.amount.to_numpy()).all()
+
+
+def test_missing_research_inputs_stop_only_the_books_that_need_them(world, monkeypatch):
+    # Audit 24.10.2026 F11: without the research folder every book failed, D, E and F
+    # too, because the vintages were read on every run.
+    import shutil
+
+    shutil.rmtree(md.RESEARCH)
+    live = FakeLive()
+    m1 = _market(world["dir"] / "m1.duckdb", WED)
+    s = en.run(world["path"], m1, live, now=at(WED, 20), log=lambda *_: None)
+    m1.close()
+    by = _read(world["path"], "SELECT book_id, status FROM fw_signals").set_index("book_id")
+    assert by.loc["fw-d", "status"] == by.loc["fw-e", "status"] == "pending"
+    assert by.loc["fw-f", "status"] == "observed"
+    assert not {"fw-a", "fw-b", "fw-c"} & set(by.index)
+    notes = "\n".join(s["notes"])
+    assert "fw-b: Modell nicht geladen" in notes and "fw-c: Modell nicht geladen" in notes
+    assert "ALFRED" in notes
+    assert str(world["dir"]) not in notes                # no local path in the notes
+
+
+def test_research_inputs_are_copied_once_with_their_hash(world):
+    live = FakeLive()
+    m1 = _market(world["dir"] / "m1.duckdb", WED)
+    en.run(world["path"], m1, live, now=at(WED, 20), log=lambda *_: None)
+    m1.close()
+    inputs = config.FORWARD_INPUTS
+    manifest = json.loads((inputs / "manifest.json").read_text())
+    assert set(manifest) == {"b", "c", "alfred"}
+    for name, m in manifest.items():
+        assert m["sha256"] == md.sha256(inputs / m["file"]), name
+    src = _read(world["path"], "SELECT book_id, source, sha256 FROM fw_models").set_index(
+        "book_id")
+    assert src.loc["fw-b", "source"] == "forward_inputs/frozen_model.json"
+    assert src.loc["fw-b", "sha256"] == manifest["b"]["sha256"]
+    # the research folder may change or vanish: the books read their copy
+    (md.RESEARCH / md.INPUTS["b"]).write_text("{}")
+    assert md.load_b()["features"] == fx.BASE23
+    # a copy that no longer matches its hash is refused
+    (inputs / "frozen_model.json").write_text("{}")
+    with pytest.raises(ValueError):
+        md.stored("b")
 
 
 def test_a_book_opened_under_an_older_version_moves_to_the_new_one(con, monkeypatch):

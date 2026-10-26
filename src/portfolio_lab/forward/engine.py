@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from .. import filing_butterfly as cal
+from .. import ui
 from ..data import history
 from . import data as dd
 from . import features as fx
@@ -137,6 +138,8 @@ def refresh_inputs(con, market, live, today: dt.date, notes: list) -> None:
     try:
         snap = live.fred()
         alfred = _alfred()
+        if alfred is None:
+            alfred = pd.DataFrame(columns=VINTAGE_COLUMNS)
         for r in snap.itertuples():
             obs = pd.Timestamp(r.observation_date).date()
             cur = con.execute("SELECT value FROM fw_macro WHERE series_id=? AND "
@@ -159,19 +162,35 @@ def refresh_inputs(con, market, live, today: dt.date, notes: list) -> None:
         notes.append(f"FRED nicht geladen: {type(exc).__name__}")
 
 
-_ALFRED = None
+_ALFRED = None          # tests set a frame here; otherwise read from the stored copy
+_ALFRED_READ: dict = {}
+VINTAGE_COLUMNS = ["available_from", "available_through", "observation_date", "value",
+                   "series_id"]
 
 
-def _alfred() -> pd.DataFrame:
-    global _ALFRED
-    if _ALFRED is None:
-        _ALFRED = pd.read_parquet(md.ALFRED)
-    return _ALFRED
+def _alfred() -> pd.DataFrame | None:
+    """ALFRED's vintages from the stored copy, or None when there is none (audit
+    24.10.2026 F11: a missing research folder used to stop all six books, although
+    only A and C use macro inputs)."""
+    if _ALFRED is not None:
+        return _ALFRED
+    try:
+        path = md.stored("alfred")
+    except (md.MissingInput, ValueError):
+        return None
+    key = (str(path), path.stat().st_mtime_ns)
+    if key not in _ALFRED_READ:
+        _ALFRED_READ.clear()
+        _ALFRED_READ[key] = pd.read_parquet(path)
+    return _ALFRED_READ[key]
 
 
 def vintages(con) -> pd.DataFrame:
-    """ALFRED's vintages, cut where one of our own FRED snapshots begins, plus ours."""
-    a = _alfred().copy()
+    """ALFRED's vintages, cut where one of our own FRED snapshots begins, plus ours.
+    Without ALFRED only ours; the books that need macro inputs (A, C) are then not
+    scored at all (make_signals), so this never feeds them a shortened history."""
+    a = _alfred()
+    a = pd.DataFrame(columns=VINTAGE_COLUMNS) if a is None else a.copy()
     for col in ("available_from", "available_through", "observation_date"):
         a[col] = a[col].astype(str).str[:10]
     ours = con.execute("SELECT series_id, observation_date, value, available_from, "
@@ -188,8 +207,10 @@ def vintages(con) -> pd.DataFrame:
             a.loc[has, "available_through"].to_numpy(),
             day_before.dt.strftime("%Y-%m-%d").to_numpy())
         a = a[a.available_from <= a.available_through]
-    return pd.concat([a[["available_from", "available_through", "observation_date",
-                         "value", "series_id"]], ours], ignore_index=True)
+    parts = [x for x in (a[VINTAGE_COLUMNS], ours[VINTAGE_COLUMNS]) if len(x)]
+    if not parts:
+        return pd.DataFrame(columns=VINTAGE_COLUMNS)
+    return pd.concat(parts, ignore_index=True)
 
 
 def spy_frame(con) -> pd.DataFrame:
@@ -229,16 +250,31 @@ def _store_model(con, book_id, now, artifact, source, sha, next_retrain) -> None
 
 
 def ensure_models(con, market, today: dt.date, now, log, notes) -> None:
-    """B and C from the research files, A trained at the start; retraining when due."""
+    """B and C from the stored research inputs, A trained at the start; retraining
+    when due. Each book on its own: a missing or changed input only stops that book and
+    leaves a note (audit 24.10.2026 F11). The source is recorded without the local
+    folder, so no full path reaches the app or the brief."""
     if active_model(con, "fw-b") is None:
-        b = md.load_b()
-        _store_model(con, "fw-b", now, b, str(md.B_ARTIFACT), md.sha256(md.B_ARTIFACT),
-                     None)
+        try:
+            path = md.stored("b")
+            b = md.load_b(path)
+            _store_model(con, "fw-b", now, b, f"forward_inputs/{path.name}",
+                         md.sha256(path), None)
+        except Exception as exc:                                   # noqa: BLE001
+            notes.append(f"fw-b: Modell nicht geladen ({ui.error_text(exc)})")
     if active_model(con, "fw-c") is None:
-        c = md.load_c_2026()
-        c["outcomes_before"] = "2026-01-01"
-        _store_model(con, "fw-c", now, c, f"{md.C_ARTIFACT} [2026][v13]",
-                     md.sha256(md.C_ARTIFACT), cal.sessions_from(dt.date(2027, 1, 1), 1)[0])
+        try:
+            path = md.stored("c")
+            c = md.load_c_2026(path)
+            c["outcomes_before"] = "2026-01-01"
+            _store_model(con, "fw-c", now, c, f"forward_inputs/{path.name} [2026][v13]",
+                         md.sha256(path), cal.sessions_from(dt.date(2027, 1, 1), 1)[0])
+        except Exception as exc:                                   # noqa: BLE001
+            notes.append(f"fw-c: Modell nicht geladen ({ui.error_text(exc)})")
+    if _alfred() is None:
+        notes.append("ALFRED-Vintages fehlen: A und C werden weder trainiert noch "
+                     "bewertet, D, E und F laufen weiter")
+        return
     due = []
     a = active_model(con, "fw-a")
     if a is None or (a["_next"] and today >= a["_next"]):
@@ -258,8 +294,7 @@ def ensure_models(con, market, today: dt.date, now, log, notes) -> None:
             art = md.train_window(panel, cols, start, cutoff, variant, log)
             _store_model(con, book_id, now, art, "trained in the tracker", None, nxt)
         except Exception as exc:                                   # noqa: BLE001
-            notes.append(f"{book_id}: Training fehlgeschlagen ({type(exc).__name__}: "
-                         f"{str(exc)[:120]})")
+            notes.append(f"{book_id}: Training fehlgeschlagen ({ui.error_text(exc)})")
 
 
 # -- prices of one session ---------------------------------------------------------------
@@ -700,6 +735,9 @@ def make_signals(con, market, live, L: dt.date, now, started: dt.datetime, log,
                 status[b["code"]] = f"{len(cands)} Signal(e)"
                 continue
             if b["kind"] == "model":
+                if "alfred" in md.NEEDS.get(b["id"], ()) and _alfred() is None:
+                    status[b["code"]] = "wartet auf die ALFRED-Vintages"
+                    continue
                 art = active_model(con, b["id"])
                 if art is None:
                     status[b["code"]] = "kein Modell"
@@ -723,8 +761,7 @@ def make_signals(con, market, live, L: dt.date, now, started: dt.datetime, log,
                       f"{len(rank)} geeignete Aktien")
             status[b["code"]] = f"Korb für {nxt} geplant ({len(rank)} geeignet)"
         except Exception as exc:                                   # noqa: BLE001
-            notes.append(f"{b['code']}: Signal fehlgeschlagen ({type(exc).__name__}: "
-                         f"{str(exc)[:120]})")
+            notes.append(f"{b['code']}: Signal fehlgeschlagen ({ui.error_text(exc)})")
     return status
 
 
