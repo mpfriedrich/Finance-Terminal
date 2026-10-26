@@ -22,7 +22,7 @@ from portfolio_lab.config import MARKET_DB
 from portfolio_lab.data.schema import finish_rebuild, open_market_for_rebuild
 from portfolio_lab.data import prices as px
 
-SYMBOLS = ("^SP500TR", "^GSPC", "SPY")
+SYMBOLS = px.BENCHMARK_SERIES
 
 con, work = open_market_for_rebuild(MARKET_DB)
 if work is not None:

@@ -1915,6 +1915,65 @@ Jetzt `enableCORS = true` und `allowedHosts = ["localhost", "127.0.0.1", "*.loca
 - Handy-Fall `moritzs-macbook-pro.local` → 101; nackte LAN-IP → 403 (gewollt, sie wechselt).
 - Ungeprüft: echter Aufruf vom iPhone über den `.local`-Namen.
 
+## Befund 22.10.2026: Tagesupdate brach ab, 90 % der Aktien ohne neue Kurse (lokale Sitzung)
+
+**Symptom.** `run.log` meldet seit 21.10. „prices failed: $BLFS: possibly delisted …“ (dann
+BRNS). In `market.duckdb` fiel die Abdeckung der 5.364 Aktien von ~5.100–5.400 Zeilen pro
+Sitzung auf 617 (20.10.) und 594 (21.10.). SPY und ^SP500TR standen seit 23.09.
+
+**Ursache 1 — ein alter Kurs vor dem Fenster.** BLFS und BRNS waren nur Rauschen: yfinance
+schreibt für jedes Symbol ohne Daten eine Zeile auf stderr, und der Morgen-Job zeigte die
+ersten 200 Zeichen von stderr. Der echte Fehler (nachgestellt am 22.10.) war
+`ConstraintException: Duplicate key "ticker: BRR, date: 2026-10-14"`: Yahoo antwortet für
+ein ausgesetztes Symbol mit seinem **letzten** Kurs, auch wenn der vor `start` liegt (BRR
+und SVA, je 14.10., Fenster ab 15.10.). `fetch_into_store` löschte nur das Fenster, der
+Insert stieß auf den gespeicherten 14.10., das Skript starb nach Paket 3 von 27. Die
+Pakete 1–3 (A … BESS, 600 Aktien) waren schon geschrieben, der Rest nicht.
+
+**Ursache 2 — MAX(date) als Startpunkt.** Der nächste Lauf begann bei `MAX(date) − 5`, und
+MAX(date) war die neue Sitzung jener 600 Aktien. Was den anderen fehlte, wäre ab dem
+sechsten Tag nie mehr nachgeholt worden.
+
+**Ursache 3 — SPY/^SP500TR.** Beide schreibt nur `scripts/add_benchmark.py` (zuletzt
+23.09.). Sie stehen nicht in `securities` und nicht in `world.stored_symbols()`, also holte
+das Tagesupdate sie nie. ^SP500TR ist der Benchmark von Backtest, Stufe B, Papierdepots
+und Risiko — er stand einen Monat still. (^GSPC steht im Monitor und lief mit.)
+
+**Behoben:**
+- `prices.fetch_into_store`: ersetzt Zeilen über ihren eigenen Schlüssel **und** das
+  Fenster, doppelte Schlüssel in einer Antwort werden verworfen, jedes Paket ist eine
+  Transaktion (vorher: Delete committet, Insert gescheitert → Fenster gelöscht). Ein
+  Symbol ohne Daten landet in `no_data` (Hinweis), ein gescheitertes Paket in `failed`
+  (mit Fehler), und das nächste Paket läuft weiter. Downloader ist injizierbar (`download=`).
+- `prices.last_complete_session`: jüngste Sitzung, an der ≥ 90 % der üblichen Zahl an
+  Aktien einen Kurs haben (üblich = Maximum der letzten 20 Sitzungen). `build_prices.py`
+  startet dort statt bei MAX(date). Nicht abgedeckt: ein einzelnes Paket (≈ 4 %), das Tag
+  für Tag scheitert — das zeigt `failed`.
+- `build_prices.py`: holt `prices.BENCHMARK_SERIES` (^SP500TR, ^GSPC, SPY) täglich mit,
+  druckt die Symbole ohne Daten als Hinweis, und meldet gescheiterte Pakete **am Ende**
+  auf stderr mit Exit 1 (erst nachdem alles andere gespeichert ist).
+- `morning_briefing.refresh_prices`: zeigt das **Ende** von stderr (300 Zeichen).
+- Fenster endet pro Symbol beim neuesten gelieferten Kurs: am 22.10. gegen 06:30 New
+  Yorker Zeit ließ Yahoos Paket-Antwort den 21.10. für die meisten Symbole weg (einzeln
+  noch da, eine Stunde später auch einzeln nicht mehr). Das alte Löschen über das ganze
+  Fenster hätte gespeicherte 21.10.-Kurse dabei verworfen (bei SPY gesehen).
+- Tests: `tests/test_prices_update.py` (Fake-Downloader, kein Netz): Symbol ohne Daten,
+  alter Kurs vor dem Fenster (scheitert ohne den Fix, geprüft), scheiterndes Paket mit
+  Rollback, letzte vollständige Sitzung, Ende von stderr.
+
+**Wichtig:** Der Morgen-Job läuft aus `~/portfolio-lab` auf dem dort ausgecheckten Branch.
+Solange der Fix dort nicht ist, stirbt jeder Lauf wieder an BRR.
+
+**Nachgeladen 22.10.2026** (neuer Code gegen `~/portfolio-lab/data`, Exit 0):
+Aktien mit Kurs je Sitzung danach 15.10.: 5.334 · 16.10.: 5.335 · 19.10.: 5.322 ·
+20.10.: 5.324 (vorher 617). 5.346 von 5.364 Symbolen mit Daten, 18 nur als Hinweis
+(u. a. BLFS, BRNS, DOMO, WBD). SPY, ^SP500TR, ^GSPC per `add_benchmark.py` ohne Lücke bis
+20.10. Der **21.10. fehlt noch** (772 Aktien): Yahoo lieferte ihn zum Zeitpunkt des Laufs
+nicht. Der nächste Lauf startet bei der letzten vollständigen Sitzung (20.10.) und holt
+ihn. In einem zweiten Lauf meldeten unter Yahoos Drosselung 49 Symbole „keine Daten“
+(darunter LMT, M); ihre gespeicherten Kurse blieben unberührt, wie gewollt.
+Ungeprüft: der echte Morgenlauf mit dem neuen Code.
+
 ## Audit 24.10.2026 — offene Befunde (vorgemerkt, nicht begonnen; Nutzer entscheidet)
 
 Gesamtbericht: Obsidian `Portfolio Lab/Audits/2026-10-24-audit.md` (Claude, 4 Agenten, und

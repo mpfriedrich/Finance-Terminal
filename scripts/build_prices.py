@@ -36,7 +36,9 @@ if work is not None:
 
 tickers = [r[0] for r in con.execute(
     "SELECT ticker FROM securities ORDER BY ticker").fetchall()]
-last = con.execute("SELECT MAX(date) FROM prices").fetchone()[0]
+# Not MAX(date): one aborted run that reached a few chunks sets MAX(date) for all, and
+# the sessions the others missed then never come back (21.10.2026, PLAN.md).
+last = px.last_complete_session(con)
 end = dt.date.today()
 
 if full or last is None:
@@ -45,7 +47,7 @@ if full or last is None:
 else:
     start = last - dt.timedelta(days=OVERLAP_DAYS)
     print(f"incremental: {len(tickers)} tickers, {start} .. {end} "
-          f"(last stored {last})", flush=True)
+          f"(last complete session {last})", flush=True)
     if start >= end:
         # Prices are current, but the windows may not be: a run that failed after the
         # download (the ticker_history key clash, 24.09.2026) left them behind.
@@ -73,11 +75,12 @@ stats = px.fetch_into_store(con, tickers, start, end)
 # Exchange rates for the foreign filers (scripts/build_fx.py) and the market monitor's
 # series (scripts/build_world.py) are stored once and kept current here — or every
 # screen after ten days would lose its rates as stale, and the monitor would freeze.
+# The benchmarks (scripts/add_benchmark.py) the same way.
 extra = sorted({r[0] for r in con.execute(
     "SELECT DISTINCT ticker FROM prices WHERE ticker LIKE '%USD=X' "
-    "OR ticker IN (SELECT UNNEST(?))", [world.stored_symbols()]).fetchall()})
-if extra:
-    px.fetch_into_store(con, extra, start, end)
+    "OR ticker IN (SELECT UNNEST(?))",
+    [world.stored_symbols() + list(px.BENCHMARK_SERIES)]).fetchall()})
+extra_stats = px.fetch_into_store(con, extra, start, end) if extra else {"failed": []}
 # Macro series (scripts/build_fred.py), refreshed only if they were stored once. A FRED
 # outage must not fail the price build, so each series is tried on its own.
 if con.execute("SELECT COUNT(*) FROM macro_series").fetchone()[0]:
@@ -103,11 +106,15 @@ except Exception:                                                    # noqa: BLE
 universe.observed_ranges(con)
 # ticker_history's price windows are what the universe is read from; keep them current.
 history.refresh_price_windows(con)
-new_last = con.execute("SELECT MAX(date) FROM prices").fetchone()[0]
+new_last = px.last_complete_session(con)
 rows = con.execute("SELECT COUNT(*) FROM prices").fetchone()[0]
 
+no_data, failed = stats.pop("no_data"), stats.pop("failed") + extra_stats["failed"]
 print(f"\nstats: {stats}", flush=True)
-print(f"latest bar: {last} -> {new_last}", flush=True)
+# A ticker without bars is a note, not a failure: halted, delisted or renamed.
+print(f"no bars in the window for {len(no_data)} tickers: {' '.join(no_data[:40])}"
+      f"{' …' if len(no_data) > 40 else ''}", flush=True)
+print(f"last complete session: {last} -> {new_last}", flush=True)
 print(f"rows in store: {rows:,}", flush=True)
 filled = px.rebuild_raw_closes(con)
 print(f"traded prices rebuilt from splits: {filled:,} rows", flush=True)
@@ -129,3 +136,10 @@ if finish_rebuild(con, work, MARKET_DB):
     print("swapped the rebuilt store into place; restart the app to see it",
           flush=True)
 refresh_world_store()
+
+# A failed chunk is a real failure. It is reported last and on stderr, because the
+# morning job shows the end of stderr — the start is yfinance's per-ticker noise.
+if failed:
+    print(f"prices: {len(failed)} chunk(s) failed, all others stored: "
+          + " | ".join(failed), file=sys.stderr, flush=True)
+    raise SystemExit(1)
