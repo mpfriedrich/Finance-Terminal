@@ -94,7 +94,8 @@ def ensure_books(con, now: dt.datetime) -> None:
                             [b["version"], json.dumps(config), b["id"]])
                 con.execute("INSERT INTO fw_versions VALUES (?,?,?,?,?)",
                             [b["id"], b["version"], now, json.dumps(config),
-                             stg.VERSION_NOTES.get(b["version"][1:], "neue Version")])
+                             stg.VERSION_NOTES.get(b["version"], stg.VERSION_NOTES.get(
+                                b["version"][1:], "neue Version"))])
             continue
         first = first_session_after(now)
         # One transaction: a book without its deposit would start with no cash.
@@ -482,22 +483,28 @@ def fill_monthly(con, market, book_id, sig, S, px, fx_open, now) -> str:
     equity = cash + value
     each = equity * 0.5 / stg.TOP_N
     new = []
+    # Each side at most half the ranking, and a name taken once is taken: with fewer
+    # than 40 ranked names the top 20 and the bottom 20 overlap, and the same share
+    # used to be opened long and short at once (audit 24.10.2026, low item 8; E3).
+    per_side = min(stg.TOP_N, n // 2)
+    taken = set(held["ticker"])
     for side, order in (("long", ranking), ("short", ranking[::-1])):
         have = set(held.loc[held["side"] == side, "ticker"])
-        need = stg.TOP_N - len(have)
+        need = per_side - len(have)
         for t in order:
             if need <= 0:
                 break
-            if t in set(held["ticker"]) or not _valid_open(px, t):
+            if t in taken or not _valid_open(px, t):
                 continue
             new.append((t, side, pos_of[t]))
+            taken.add(t)
             need -= 1
     if not new:
         return "keine Änderungen"
     scale = min(1.0, cash / (len(new) * each * (1 + lg.COST))) if each > 0 else 0.0
     for t, side, k in new:
         _open_at(con, book_id, sig["id"], now, S, t, side, "monthly", px, fx_open,
-                 each * scale, f"E1 {side}", score=payload["ranking"][k]["score"],
+                 each * scale, f"E3 {side}", score=payload["ranking"][k]["score"],
                  rank=k + 1, status="filled" if scale >= 1 else "resized")
     return f"{len(new)} neue Positionen" + (" (verkleinert)" if scale < 1 else "")
 
@@ -770,9 +777,10 @@ def make_signals(con, market, live, L: dt.date, now, started: dt.datetime, log,
                 s, ok = stg.d_scores(panel, i, base_ok)
                 meta = {}
             else:
-                frame = live.pit_frame(L)
-                year_ago = live.pit_frame(L - dt.timedelta(days=365))
-                s, ok = stg.e_scores(panel, i, frame, year_ago, base_ok)
+                prev = L - dt.timedelta(days=365)
+                frame = stg.with_share_dates(live.pit_frame(L), market, L)
+                year_ago = stg.with_share_dates(live.pit_frame(prev), market, prev)
+                s, ok = stg.e_scores(panel, i, frame, year_ago, base_ok, L, prev)
                 meta = {}
             rank = stg.ranking(s, ok, panel.tickers)
             kind = "monthly" if b["kind"] == "rule_e" else "rebalance"

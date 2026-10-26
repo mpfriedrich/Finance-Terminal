@@ -118,9 +118,53 @@ def test_e_counts_shares_on_todays_split_basis():
                           "gross_profit_ttm": [1e9], "total_assets": [5e9],
                           "median_dollar_volume_60d": [50e6]})
     year_ago = frame.assign(shares_outstanding=1000e6)
-    s, ok = stg.e_scores(P, len(days) - 1, frame, year_ago, np.array([True]))
+    s, ok = stg.e_scores(P, len(days) - 1, frame, year_ago, np.array([True]),
+                         days[-1], days[-1] - pd.Timedelta(days=365))
     # growth = 2100 / (1000 x 2) - 1 = 5 %; one share: percentile ranks are 1.0
     assert ok[0] and s[0] == pytest.approx(1.0)
+
+
+def test_e_reads_the_split_basis_on_the_filing_date():
+    # Audit 24.10.2026 F17: the basis was read on the signal day and 252 sessions
+    # before, the counts are from filings. AAA: 1,050 shares filed before a 2:1 split
+    # are 2,100 today, a year earlier 1,000 (2,000 today): +5 %, an issuer. BBB has no
+    # split and bought back 10 %. Measured on the signal day, AAA looked like a 47.5 %
+    # buyback and ranked above BBB.
+    days = pd.bdate_range("2024-01-01", periods=300)
+    close = pd.Series(np.linspace(50, 60, 300), index=days)
+    raw_a = close.copy()
+    raw_a.iloc[:250] = close.iloc[:250] * 2           # 2:1 split on session 250
+    P = SimpleNamespace(tickers=["AAA", "BBB"], exclude=set(), calendar=days,
+                        close=pd.DataFrame({"AAA": close, "BBB": close}),
+                        raw=pd.DataFrame({"AAA": raw_a, "BBB": close}))
+    now, prev = days[-1], days[-1] - pd.Timedelta(days=365)
+    frame = pd.DataFrame({"ticker": ["AAA", "BBB"], "cik": [1, 2],
+                          "shares_outstanding": [1050e6, 900e6],
+                          "shares_filed": [days[240], days[240]],
+                          "gross_profit_ttm": [1e9, 1e9], "total_assets": [5e9, 5e9],
+                          "median_dollar_volume_60d": [50e6, 50e6]})
+    year_ago = frame.assign(shares_outstanding=[1000e6, 1000e6],
+                            shares_filed=[days[0], days[0]])
+    iss = stg.issuance(P, frame, year_ago, now, prev)
+    assert iss["AAA"] == pytest.approx(-0.05) and iss["BBB"] == pytest.approx(0.10)
+    s, ok = stg.e_scores(P, len(days) - 1, frame, year_ago, np.array([True, True]),
+                         now, prev)
+    assert ok.all() and s[1] > s[0]
+
+
+def test_e_never_holds_one_name_long_and_short(con):
+    # Audit 24.10.2026, low item 8: with fewer than 40 ranked names the top and the
+    # bottom 20 overlap; the same share was opened on both sides.
+    names = [f"T{j:02d}" for j in range(30)]
+    lg.book(con, "fw-e", dt.datetime(2026, 10, 22), None, "deposit", 1000.0)
+    px = pd.DataFrame({"open": 10.0, "open_adj": 10.0, "open_raw": 10.0}, index=names)
+    sig = {"id": "s1", "payload_json": json.dumps(
+        {"ranking": [{"ticker": t, "score": 1 - k / 30} for k, t in enumerate(names)]})}
+    en.fill_monthly(con, None, "fw-e", sig, THU, px, 1.1, dt.datetime(2026, 10, 22))
+    pos = lg.open_positions(con, "fw-e")
+    assert not pos.ticker.duplicated().any()
+    assert (pos.side == "long").sum() == (pos.side == "short").sum() == 15
+    assert set(pos[pos.side == "long"].ticker) == set(names[:15])
 
 
 def test_vintages_are_cut_where_our_own_snapshot_begins(con, monkeypatch):
@@ -640,11 +684,25 @@ def test_a_book_opened_under_an_older_version_moves_to_the_new_one(con, monkeypa
     v = con.execute("SELECT book_id, version, note FROM fw_versions ORDER BY 1, 2"
                     ).fetch_df()
     assert list(v[v.book_id == "fw-a"].version) == ["A1", "A2"]
-    assert "Delisting" in v[v.version == "E2"].note.iloc[0]
+    assert "Delisting" in v[v.version == "A2"].note.iloc[0]
+    assert "F17" in v[v.version == "E3"].note.iloc[0]
     assert set(con.execute("SELECT version FROM fw_books").fetch_df().version) == \
         {b["version"] for b in new}
     assert con.execute("SELECT COUNT(*) FROM fw_ledger WHERE kind='deposit'"
                        ).fetchone()[0] == 6                # no second deposit
+
+
+def test_the_running_e2_book_moves_to_e3_alone(con, monkeypatch):
+    # The real books run as A2-F2 since 24.10.2026; F17/F19 change E's rules only.
+    old = [{**b, "version": "E2"} if b["code"] == "E" else b for b in stg.BOOKS]
+    new = list(stg.BOOKS)
+    monkeypatch.setattr(stg, "BOOKS", old)
+    en.ensure_books(con, at(WED, 20).replace(tzinfo=None))
+    monkeypatch.setattr(stg, "BOOKS", new)
+    en.ensure_books(con, at(THU, 20).replace(tzinfo=None))
+    v = con.execute("SELECT book_id, version FROM fw_versions ORDER BY 1, 2").fetch_df()
+    assert list(v[v.book_id == "fw-e"].version) == ["E2", "E3"]
+    assert (v.groupby("book_id").size().drop("fw-e") == 1).all()
 
 
 def test_the_brief_names_every_book_and_says_it_is_paper(world):
