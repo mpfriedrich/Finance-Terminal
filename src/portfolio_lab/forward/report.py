@@ -13,7 +13,7 @@ import json
 
 import pandas as pd
 
-from .. import filing_butterfly as cal
+from .. import nyse as cal
 from . import strategies as stg
 
 

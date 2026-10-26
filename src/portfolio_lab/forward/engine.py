@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .. import filing_butterfly as cal
+from .. import nyse as cal
 from .. import ui
 from ..data import history
 from . import data as dd
@@ -42,7 +42,8 @@ def open_time(day: dt.date) -> dt.datetime:
 
 
 def close_time(day: dt.date) -> dt.datetime:
-    t = dt.datetime(day.year, day.month, day.day, 16, 0, tzinfo=cal.ET)
+    """The end of `day`'s regular session (13:00 on an early close), as naive UTC."""
+    t = dt.datetime(day.year, day.month, day.day, cal.close_hour(day), 0, tzinfo=cal.ET)
     return t.astimezone(dt.UTC).replace(tzinfo=None)
 
 
