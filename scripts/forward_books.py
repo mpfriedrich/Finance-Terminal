@@ -30,6 +30,8 @@ if "--report" not in sys.argv:
         market.close()
     for code, status in s["status"].items():
         print(f"  {code}: {status}")
+if not FORWARD_DB.exists():
+    sys.exit("Noch keine Forward-Bücher: zuerst ohne --report laufen lassen.")
 con = lg.connect(FORWARD_DB, read_only=True)
 try:
     print(rp.brief_section(con))

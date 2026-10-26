@@ -749,3 +749,75 @@ def test_the_portfolios_view_shows_all_six_books(world, tmp_path, monkeypatch):
         assert b["name"] in labels
     frames = "\n".join(str(d.value) for d in app.dataframe)
     assert "unbestätigt" in frames                   # short borrow is never claimed
+
+
+# -- the store itself ---------------------------------------------------------------------
+
+OLD_SCHEMA = [                      # the store as the first books made it, 22.10.2026
+    "CREATE TABLE fw_fx (day DATE PRIMARY KEY, eurusd DOUBLE, source VARCHAR)",
+    "CREATE TABLE fw_runs (run_at TIMESTAMP PRIMARY KEY, summary_json VARCHAR)",
+]
+
+
+def test_a_store_of_the_old_schema_opens_and_migrates(tmp_path):
+    # Audit 24.10.2026, low item 4: CREATE TABLE IF NOT EXISTS never adds a column.
+    path = tmp_path / "old.duckdb"
+    c = duckdb.connect(str(path))
+    for sql in OLD_SCHEMA:
+        c.execute(sql)
+    c.execute("INSERT INTO fw_fx VALUES ('2026-10-21', 1.16, 'store')")
+    c.close()
+    con = lg.connect(path)
+    cols = [r[0] for r in con.execute("DESCRIBE fw_fx").fetchall()]
+    assert "fetched_at" in cols
+    assert con.execute("SELECT eurusd FROM fw_fx").fetchone()[0] == 1.16
+    names = {r[0] for r in con.execute("SELECT name FROM fw_migrations").fetchall()}
+    assert names == {n for n, _ in lg.MIGRATIONS}
+    con.close()
+    con = lg.connect(path)                                 # applied once only
+    assert con.execute("SELECT COUNT(*) FROM fw_migrations").fetchone()[0] == \
+        len(lg.MIGRATIONS)
+    con.close()
+    ro = lg.connect(path, read_only=True)
+    assert ro.execute("SELECT COUNT(*) FROM fw_books").fetchone()[0] == 0
+    ro.close()
+
+
+def test_a_read_only_visit_does_not_create_the_store(tmp_path):
+    # Audit 24.10.2026, low item 12.
+    path = tmp_path / "sub" / "fw.duckdb"
+    with pytest.raises(FileNotFoundError):
+        lg.connect(path, read_only=True)
+    assert not path.exists() and not path.parent.exists()
+
+
+def test_a_locked_store_is_retried(tmp_path, monkeypatch):
+    real, calls = duckdb.connect, []
+
+    def flaky(*a, **k):
+        calls.append(1)
+        if len(calls) < 3:
+            raise duckdb.IOException("Could not set lock on file")
+        return real(*a, **k)
+
+    monkeypatch.setattr(lg.duckdb, "connect", flaky)
+    monkeypatch.setattr(lg.time, "sleep", lambda s: None)
+    con = lg.connect(tmp_path / "fw.duckdb")
+    assert len(calls) == 3
+    con.close()
+    calls.clear()
+    with pytest.raises(duckdb.IOException):
+        lg.connect(tmp_path / "fw.duckdb", tries=2)
+
+
+def test_an_intraday_eurusd_value_is_replaced_until_its_day_is_over(con):
+    # Audit 24.10.2026, low item 3: INSERT OR IGNORE kept the first value of a day.
+    day = dt.date(2026, 10, 23)
+    lg.store_fx(con, day, 1.16, "store", None)              # the market store's value
+    lg.store_fx(con, day, 1.17, "yahoo", dt.datetime(2026, 10, 23, 15))   # intraday
+    assert en.fx_on(con, day) == pytest.approx(1.17)
+    lg.store_fx(con, day, 1.18, "yahoo", dt.datetime(2026, 10, 24, 0, 30))  # day over
+    assert en.fx_on(con, day) == pytest.approx(1.18)
+    lg.store_fx(con, day, 1.19, "yahoo", dt.datetime(2026, 10, 25, 9))     # final stays
+    lg.store_fx(con, day, 1.20, "store", None)
+    assert en.fx_on(con, day) == pytest.approx(1.18)

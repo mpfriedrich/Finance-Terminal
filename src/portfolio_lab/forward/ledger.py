@@ -72,27 +72,83 @@ SCHEMA = [
     """CREATE TABLE IF NOT EXISTS fw_runs (run_at TIMESTAMP PRIMARY KEY, summary_json VARCHAR)""",
 ]
 
+# Append-only, named by what they create or change, applied once each (the scheme of
+# data/schema.py). Audit 24.10.2026, low item 4: the store used CREATE TABLE IF NOT
+# EXISTS only, so a new column would never have reached a store made earlier. The first
+# entries are the tables above, unchanged: on a store made by the old scheme they are
+# no-ops and are only recorded. Never edit or reorder an entry; add a new one.
+MIGRATIONS: list[tuple[str, str]] = [
+    (sql.split("EXISTS ")[1].split(" ")[0], sql) for sql in SCHEMA
+] + [
+    # When a EUR/USD value was fetched: a value fetched before its day was over may be
+    # replaced by a later fetch (low item 3). NULL for the store's values and old rows.
+    ("fw_fx.fetched_at", "ALTER TABLE fw_fx ADD COLUMN IF NOT EXISTS fetched_at TIMESTAMP"),
+]
+
+
+def migrate(con) -> None:
+    con.execute("CREATE TABLE IF NOT EXISTS fw_migrations (name VARCHAR PRIMARY KEY, "
+                "applied_at TIMESTAMP)")
+    done = {r[0] for r in con.execute("SELECT name FROM fw_migrations").fetchall()}
+    for name, sql in MIGRATIONS:
+        if name in done:
+            continue
+        con.execute(sql)
+        con.execute("INSERT INTO fw_migrations VALUES (?, ?)",
+                    [name, dt.datetime.now(dt.UTC).replace(tzinfo=None)])
+
 
 def connect(path: Path, read_only: bool = False, tries: int = 60):
-    """Short visits only: the app, the brief and the tracker take turns."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Short visits only: the app, the brief and the tracker take turns; a locked file
+    is retried once a second for `tries` seconds.
+
+    A read-only visit never creates the store (audit 24.10.2026, low item 12: it used to
+    write an empty one, so a reader made a file only the tracker should make): a missing
+    file is a FileNotFoundError. Only a writing visit migrates."""
     if read_only and not path.exists():
-        c = duckdb.connect(str(path))
-        for sql in SCHEMA:
-            c.execute(sql)
-        c.close()
+        raise FileNotFoundError(f"forward store {path.name} does not exist yet")
+    if not read_only:
+        path.parent.mkdir(parents=True, exist_ok=True)
     for attempt in range(tries):
         try:
             con = duckdb.connect(str(path), read_only=read_only)
             if not read_only:
-                for sql in SCHEMA:
-                    con.execute(sql)
+                migrate(con)
             return con
         except duckdb.IOException as exc:
             if "lock" not in str(exc).lower() or attempt == tries - 1:
                 raise
             time.sleep(1.0)
     raise RuntimeError("unreachable")
+
+
+def fx_settled(day: dt.date, fetched_at) -> bool:
+    """A EUR/USD daily value is final once it was fetched after its day ended in UTC
+    (London's day ends at or before UTC midnight all year). Earlier it may be an
+    intraday value."""
+    if fetched_at is None or pd.isna(fetched_at):
+        return False
+    end = dt.datetime(day.year, day.month, day.day) + dt.timedelta(days=1)
+    return pd.Timestamp(fetched_at).to_pydatetime() >= end
+
+
+def store_fx(con, day: dt.date, value: float, source: str, fetched_at) -> None:
+    """Keep a fetched EUR/USD value, replacing one that was not yet final.
+
+    Audit 24.10.2026, low item 3: INSERT OR IGNORE kept the first value of a day, which
+    can be a value taken while the day was still trading. A live fetch now replaces any
+    row whose own fetch was before its day ended, or whose fetch time is unknown (the
+    market store's rows, rows from before this column); a final row stays. The market
+    store only fills days nothing else has (`source='store'`, fetched_at NULL)."""
+    if source == "store":
+        con.execute("INSERT OR IGNORE INTO fw_fx (day, eurusd, source, fetched_at) "
+                    "VALUES (?,?,?,NULL)", [day, float(value), source])
+        return
+    row = con.execute("SELECT fetched_at FROM fw_fx WHERE day=?", [day]).fetchone()
+    if row is not None and fx_settled(day, row[0]):
+        return
+    con.execute("INSERT OR REPLACE INTO fw_fx (day, eurusd, source, fetched_at) "
+                "VALUES (?,?,?,?)", [day, float(value), source, fetched_at])
 
 
 def uid() -> str:

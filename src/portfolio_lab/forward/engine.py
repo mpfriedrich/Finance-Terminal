@@ -114,7 +114,7 @@ def ensure_books(con, now: dt.datetime) -> None:
             raise
 
 
-def refresh_inputs(con, market, live, today: dt.date, notes: list) -> None:
+def refresh_inputs(con, market, live, today: dt.date, notes: list, now=None) -> None:
     """SPY and EUR/USD from Yahoo, today's FRED vintage. A failure is a note, not a stop:
     the books then wait for the data instead of using made-up values."""
     try:
@@ -127,15 +127,15 @@ def refresh_inputs(con, market, live, today: dt.date, notes: list) -> None:
         notes.append(f"SPY nicht geladen: {type(exc).__name__}")
     store = market.execute("SELECT date, close FROM prices WHERE ticker='EURUSD=X' AND "
                            "date >= '2026-01-01'").fetchall()
-    for d, v in store:
-        con.execute("INSERT OR IGNORE INTO fw_fx VALUES (?,?,'store')", [d, float(v)])
     try:
         for d, v in live.fx(today - dt.timedelta(days=30)).items():
             if v and not math.isnan(v):
-                con.execute("INSERT OR IGNORE INTO fw_fx VALUES (?,?,'yahoo')",
-                            [d, float(v)])
+                lg.store_fx(con, pd.Timestamp(d).date(), float(v), "yahoo", now)
     except Exception as exc:                                       # noqa: BLE001
         notes.append(f"EUR/USD live nicht geladen: {type(exc).__name__}")
+    for d, v in store:             # only where Yahoo gave nothing (lg.store_fx)
+        if v and not math.isnan(v):
+            lg.store_fx(con, pd.Timestamp(d).date(), float(v), "store", None)
     try:
         snap = live.fred()
         alfred = _alfred()
@@ -806,7 +806,7 @@ def run(path: Path, market, live=None, now: dt.datetime | None = None, log=print
         ensure_books(con, now)
         started = con.execute("SELECT MIN(started_at) FROM fw_books").fetchone()[0]
         first = con.execute("SELECT MIN(first_session) FROM fw_books").fetchone()[0]
-        refresh_inputs(con, market, live, today, notes)
+        refresh_inputs(con, market, live, today, notes, now)
         ensure_models(con, market, today, now, log, notes)
         complete = dd.complete_sessions(market, first - dt.timedelta(days=10))
         data_days = list(dd.coverage(market, first - dt.timedelta(days=10)).index)
