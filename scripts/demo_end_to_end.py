@@ -1,11 +1,11 @@
 """Chat message -> filters -> real stocks. The whole chain, once."""
 import warnings; warnings.simplefilter("ignore")
 from portfolio_lab.config import MARKET_DB
-from portfolio_lab.data.schema import open_market
 from portfolio_lab.data.free import FreeSource
-from portfolio_lab.screen.spec import PortfolioSpec
+from portfolio_lab.data.schema import open_market
 from portfolio_lab.screen import translate as T
 from portfolio_lab.screen.engine import run_screen
+from portfolio_lab.screen.spec import PortfolioSpec
 
 # Read-only: this script never writes, so it can run while the app is open.
 con = open_market(MARKET_DB, read_only=True); src = FreeSource(con)

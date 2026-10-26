@@ -88,7 +88,9 @@ def run(monkeypatch, data: Path, query: dict | None = None,
                        ("PAID_DB", data / "paid.duckdb"),
                        ("WORLD_DB", data / "world.duckdb"),
                        ("USER_DB", data / "user.duckdb"), ("CACHE_DIR", data / "cache"),
-                       ("ALERTS_STATE", data / "alerts_state.json")):
+                       ("ALERTS_STATE", data / "alerts_state.json"),
+                       ("PAPER_OPTIONS_DB", data / "paper_options.duckdb"),
+                       ("FORWARD_DB", data / "paper_forward.duckdb")):
         monkeypatch.setattr(config, name, path)
     monkeypatch.setattr(socket.socket, "connect", _no_network)
     monkeypatch.setattr(socket, "create_connection", _no_network)
@@ -119,6 +121,17 @@ def run(monkeypatch, data: Path, query: dict | None = None,
     for k, v in (state or {}).items():
         at.session_state[k] = v
     return at.run()
+
+
+def errors(at: AppTest, *allowed: str) -> list[str]:
+    """Every st.error the run drew, except those containing one of `allowed`.
+
+    Audit 24.10.2026 (low 7): the app tests asserted only `not at.exception`, but
+    `_guarded` turns a failing view into an st.error, so a broken view passed. A test
+    asserts `errors(at) == []`, naming the errors it means to provoke.
+    """
+    return [str(e.value) for e in at.error
+            if not any(a in str(e.value) for a in allowed)]
 
 
 def texts(at: AppTest) -> str:

@@ -119,7 +119,7 @@ def readable(con, schema: str, table: str) -> bool:
             cur.execute(f"SELECT 1 FROM {schema}.{table} LIMIT 1")
             cur.fetchall()
         return True
-    except Exception as exc:                                        # noqa: BLE001
+    except Exception as exc:
         denied = (type(exc).__name__ == "InsufficientPrivilege"
                   or "permission denied" in str(exc).lower())
         if not denied:
@@ -393,9 +393,12 @@ def ingest(con: duckdb.DuckDBPyConnection, source: Path,
                 SELECT CAST(d.permno AS BIGINT) AS permno, CAST(d.date AS DATE) AS date,
                        abs(CAST(d.prc AS DOUBLE)) AS px,
                        COALESCE(NULLIF(CAST(d.cfacpr AS DOUBLE), 0), 1) AS fac,
-                       -- A missing open is the close: the fill logic needs a price.
-                       COALESCE({'abs(CAST(d.openprc AS DOUBLE))' if has_open else 'NULL'},
-                                abs(CAST(d.prc AS DOUBLE))) AS op,
+                       -- A missing open stays missing (audit 24.10.2026 F9). It used
+                       -- to be the close, so a fill "at the open" ran at that day's
+                       -- close without a word (R16). NULL is what the fill logic reads
+                       -- as "not tradeable at the open": Stage B keeps the holding or
+                       -- leaves the money in cash for that session.
+                       {'abs(CAST(d.openprc AS DOUBLE))' if has_open else 'NULL'} AS op,
                        {'abs(CAST(d.askhi AS DOUBLE))' if has_hl else 'NULL'} AS hi,
                        {'abs(CAST(d.bidlo AS DOUBLE))' if has_hl else 'NULL'} AS lo,
                        CAST(d.ret AS DOUBLE) AS ret, CAST(d.vol AS DOUBLE) AS vol,

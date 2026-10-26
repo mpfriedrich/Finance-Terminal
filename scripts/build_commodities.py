@@ -1,8 +1,10 @@
 """Load commodity futures and macro series so sensitivities can be measured."""
-import datetime as dt, time
+import datetime as dt
+import time
+
 from portfolio_lab.config import MARKET_DB
-from portfolio_lab.data.schema import open_market
 from portfolio_lab.data import prices as px
+from portfolio_lab.data.schema import open_market
 from portfolio_lab.research import COMMODITIES
 
 t0 = time.time()

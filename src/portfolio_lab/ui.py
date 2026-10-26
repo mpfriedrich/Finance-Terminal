@@ -316,10 +316,29 @@ def error_text(exc: BaseException, limit: int = 160) -> str:
     anything shaped like `key=value` for a credential cut out (R24). A connection error
     from requests or yfinance carries the full URL, query string included, and the
     message is the first thing a person copies into a chat."""
-    message = _SECRETISH.sub(r"\1=…", _URL.sub("<address>", str(exc))).strip()
+    message = scrubbed(str(exc), limit)
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+
+
+def scrubbed(text, limit: int = 160) -> str:
+    """Stored text that may hold an exception message, cut like error_text. The forward
+    tracker writes `str(exc)[:120]` into its run notes, and the app showed those notes
+    as they came (audit 24.10.2026, low 5): nothing leaked so far, but a connection error
+    there would have put its URL and query string on screen (R24)."""
+    message = _SECRETISH.sub(r"\1=…", _URL.sub("<address>", str(text or ""))).strip()
     if len(message) > limit:
         message = message[: limit - 1] + "…"
-    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+    return message
+
+
+def store_is_busy(exc: BaseException) -> bool:
+    """True when a DuckDB file could not be opened because another process holds its
+    write lock — the tracker or the morning job writing right now. Anything else (a
+    schema error, a damaged file) is a fault and is shown as one: until audit 24.10.2026
+    (low 6) every read error in the paper-book views was called "busy"."""
+    import duckdb
+
+    return isinstance(exc, duckdb.IOException) and "lock" in str(exc).lower()
 
 
 def num(value, digits: int = 2) -> str:

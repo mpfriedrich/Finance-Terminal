@@ -1,8 +1,9 @@
 """Classify the universe by the SEC's own industry code, and drop what is not a company."""
 import time
-from portfolio_lab.config import MARKET_DB, CACHE_DIR
-from portfolio_lab.data.schema import open_market
+
+from portfolio_lab.config import CACHE_DIR, MARKET_DB
 from portfolio_lab.data import sic
+from portfolio_lab.data.schema import open_market
 
 t0 = time.time()
 con = open_market(MARKET_DB)

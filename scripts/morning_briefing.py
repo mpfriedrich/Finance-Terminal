@@ -29,6 +29,7 @@ from __future__ import annotations
 import datetime as dt
 import html
 import os
+import re
 import smtplib
 import subprocess
 import sys
@@ -38,11 +39,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from portfolio_lab import briefing as bfg  # noqa: E402
-from portfolio_lab import ui  # noqa: E402
-from portfolio_lab.config import MARKET_DB, USER_DB, load_env  # noqa: E402
-from portfolio_lab.data.schema import open_market, open_user_snapshot  # noqa: E402
-from portfolio_lab.store import Store  # noqa: E402
+from portfolio_lab import briefing as bfg
+from portfolio_lab import ui
+from portfolio_lab.config import MARKET_DB, USER_DB, load_env
+from portfolio_lab.data.schema import open_market, open_user_snapshot
+from portfolio_lab.store import Store
 
 OUT_DIR = Path(__file__).resolve().parents[1] / "data" / "briefings"
 
@@ -55,9 +56,16 @@ def refresh_prices() -> str:
         res = subprocess.run(
             [sys.executable, str(script)], capture_output=True, text=True, timeout=900
         )
-        return "ok" if res.returncode == 0 else f"failed: {res.stderr.strip()[:200]}"
+        # The END of stderr: the traceback or the build's own summary sits there. The
+        # start is yfinance's "possibly delisted" lines, which hid the real error for
+        # two days (21.10.2026, PLAN.md). The note goes into the mail's header line: no
+        # URL, no key=value (R24).
+        if res.returncode == 0:
+            return "ok"
+        log_child("build_prices.py", "", res.stderr)
+        return f"failed: {scrub(res.stderr.strip()[-300:])}"
     except Exception as exc:
-        return f"failed: {exc}"
+        return f"failed: {ui.error_text(exc)}"
 
 
 def warm_command(price_note: str) -> list[str] | None:
@@ -90,7 +98,7 @@ def warm_cache(price_note: str) -> None:
         last = (res.stdout.strip().splitlines() or [""])[-2:]
         print(f"pit cache warmed (exit {res.returncode}): {' / '.join(last)}")
     except Exception as exc:                                        # noqa: BLE001
-        print(f"pit cache not warmed: {exc}")
+        print(f"pit cache not warmed: {ui.error_text(exc)}")
 
 
 def render_html(text: str, evidence: str, as_of: dt.date, price_note: str) -> str:
@@ -181,7 +189,7 @@ def send(subject: str, html_body: str, text_body: str) -> str:
             server.send_message(msg)
         return f"sent to {to}"
     except Exception as exc:
-        return f"failed: {type(exc).__name__}: {exc}"
+        return f"failed: {ui.error_text(exc)}"
 
 
 def main() -> int:
@@ -195,14 +203,70 @@ def main() -> int:
         warm_cache(price_note)
 
 
+STDERR_TAIL = 4_000      # characters of a child's stderr kept in run.log
+
+# The same patterns ui.error_text cuts from an exception (R24): a child's stderr is
+# text, not an exception, and a requests traceback carries the full URL, query string
+# included. Kept here because ui.py offers no text-level helper.
+_URL = re.compile(r"\b(?:https?|wss?|postgres(?:ql)?)://\S+", re.IGNORECASE)
+_SECRETISH = re.compile(r"(?i)\b(api[_-]?key|token|password|passwd|secret|apikey)=\S+")
+
+
+def scrub(text: str) -> str:
+    """Text from a child process as it may go into run.log or the brief: URLs and
+    anything shaped like a credential `key=value` cut out (R24)."""
+    return _SECRETISH.sub(r"\1=…", _URL.sub("<address>", text))
+
+
+def log_child(name: str, stdout: str, stderr: str) -> None:
+    """Write what a child printed to run.log (this job's own stdout under launchd).
+
+    With capture_output the child's stderr went nowhere: the brief pointed at run.log,
+    but the traceback of a failed forward run was not in it (audit 24.10.2026 F14).
+    stdout is logged only up to the brief's section (the section itself goes into the
+    brief); stderr as its last STDERR_TAIL characters, where a traceback ends."""
+    if stdout.strip():
+        print(f"--- {name}: output ---\n{scrub(stdout).rstrip()}")
+    if stderr.strip():
+        tail = stderr[-STDERR_TAIL:]
+        cut = "…" if len(stderr) > STDERR_TAIL else ""
+        print(f"--- {name}: error output (last {STDERR_TAIL:,} characters) ---\n"
+              f"{cut}{scrub(tail).rstrip()}")
+    sys.stdout.flush()
+
+
+def forward_books() -> str:
+    """Book the six forward paper books on the fresh prices and return their section of
+    the brief. A failure is reported in the brief, never fatal to it; its details go to
+    run.log."""
+    try:
+        res = subprocess.run([sys.executable, str(Path(__file__).resolve().parent /
+                                                  "forward_books.py")],
+                             capture_output=True, text=True, timeout=3600, check=False)
+        out = res.stdout
+        start = out.find("# Paper-Portfolios")
+        log_child("forward_books.py", out if start < 0 else out[:start], res.stderr)
+        if start >= 0:
+            return out[start:].strip()
+        return ("# Paper-Portfolios A–F\n\nAktualisierung fehlgeschlagen (Exit "
+                f"{res.returncode}). Log: data/briefings/run.log")
+    except Exception as exc:                                        # noqa: BLE001
+        # ui.error_text, not str(exc): this text goes into the mail (R24, audit
+        # 24.10.2026 low item 5). A TimeoutExpired carries the child's output.
+        print(f"forward_books.py: {ui.error_text(exc)}")
+        return ("# Paper-Portfolios A–F\n\nAktualisierung fehlgeschlagen: "
+                f"{ui.error_text(exc)}. Log: data/briefings/run.log")
+
+
 def deliver(today: dt.date, price_note: str) -> int:
     # Alerts on the fresh closes, before the briefing: they notify on their own.
     try:
         subprocess.run([sys.executable, str(Path(__file__).resolve().parent /
                                             "check_alerts.py")], timeout=600)
     except Exception as exc:                                        # noqa: BLE001
-        print(f"alerts not checked: {exc}")
+        print(f"alerts not checked: {ui.error_text(exc)}")
 
+    forward = forward_books()
     market = open_market(MARKET_DB, read_only=True)
     # Read a COPY of the portfolio store. DuckDB's write lock excludes readers as well,
     # so opening the live file would fail whenever the app was left running overnight.
@@ -210,15 +274,22 @@ def deliver(today: dt.date, price_note: str) -> int:
         store = Store(open_user_snapshot(USER_DB))
         followed = store.everything_followed()
     except Exception as exc:
-        print(f"could not read the portfolio store: {exc}")
+        print(f"could not read the portfolio store: {ui.error_text(exc)}")
         notify("Portfolio Lab", "Could not read your portfolios — no briefing written.")
         return 1
-    if not followed:
-        notify("Portfolio Lab", "Nothing followed — no briefing written.")
-        return 0
-
-    bundle = bfg.gather(market, followed)
-    result = bfg.write(bundle)
+    # No "nothing followed, no briefing" exit here any more: forward_books() always
+    # returns a section, its failure included, so that branch could never run (audit
+    # 24.10.2026 low item 13). A brief with only the paper books is still a brief.
+    if followed:
+        bundle = bfg.gather(market, followed)
+        result = bfg.write(bundle)
+    else:
+        bundle = {"notable": []}
+        result = {"text": "", "evidence": ""}
+    # The paper books' numbers come straight from their ledger, not from the model
+    # that writes the rest of the brief.
+    result["text"] = (result["text"] + "\n\n" + forward).strip()
+    result["evidence"] += "\n\nForward-Paper-Bücher: data/paper_forward.duckdb"
 
     stamp = today.isoformat()
     (OUT_DIR / f"{stamp}.md").write_text(result["text"], encoding="utf-8")

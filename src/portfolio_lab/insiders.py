@@ -138,7 +138,7 @@ def summary(frame: pd.DataFrame, asof: dt.date, months: int = 12) -> dict:
     out = {"months": months}
     for code, key in (("P", "bought"), ("S", "sold")):
         part = recent[recent.code == code]
-        out[f"{key}_trades"] = int(len(part))
+        out[f"{key}_trades"] = len(part)
         out[f"{key}_insiders"] = int(part.insider.nunique())
         out[f"{key}_value"] = float(part["value"].fillna(0).sum())
     return out

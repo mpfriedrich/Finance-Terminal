@@ -4,8 +4,16 @@ import datetime as dt
 import pytest
 
 from portfolio_lab.data import pit, wrds
-from tests.wrds_fixture import (DIVIDEND_ON, END, EURUSD, GBPUSD, GONE_ON, JPYUSD,
-                                SPLIT_ON, build_store)
+from tests.wrds_fixture import (
+    DIVIDEND_ON,
+    END,
+    EURUSD,
+    GBPUSD,
+    GONE_ON,
+    JPYUSD,
+    SPLIT_ON,
+    build_store,
+)
 
 
 @pytest.fixture(scope="module")
@@ -251,6 +259,7 @@ def test_global_names_are_used_when_the_north_american_ones_are_absent(tmp_path)
     funda.to_parquet(directory / "g_funda" / "g_funda_000.parquet", index=False)
 
     import duckdb
+
     from portfolio_lab.data.schema import MARKET_MIGRATIONS, _apply
 
     con = duckdb.connect(":memory:")
@@ -271,8 +280,8 @@ def test_the_user_name_is_sent_in_lower_case(monkeypatch):
 
     seen = {}
     monkeypatch.setattr(psycopg2, "connect", lambda **kw: seen.update(kw) or "conn")
-    assert wrds.connect(" MPFriedrich ", "x") == "conn"
-    assert seen["user"] == "mpfriedrich"
+    assert wrds.connect(" JDoe ", "x") == "conn"
+    assert seen["user"] == "jdoe"
 
 
 def test_a_column_wrds_returns_entirely_empty_does_not_break_the_build(tmp_path):

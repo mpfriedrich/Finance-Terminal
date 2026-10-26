@@ -61,8 +61,8 @@ def test_a_us_gaap_filer_reporting_in_yen_is_no_longer_dropped():
 
 def test_a_convenience_translation_does_not_sit_beside_the_real_figure():
     """Some filers tag a figure in their currency AND a USD translation of it. One
-    currency per filer — the one most of its figures use — or the same period would
-    carry two values in two units."""
+    currency per filing — the one most of its figures use — or the same period would
+    carry two values in two units (per filing since audit 24.10.2026 F10)."""
     rows = sec.extract_rows(doc({"ifrs-full": {
         "Equity": {"units": {
             "EUR": [fact(100.0, "2022-12-31", "2023-03-01", form="20-F"),
@@ -98,3 +98,51 @@ def test_the_reporting_currency_is_the_one_most_figures_use():
                              "USD": [fact(1, "2023-12-31", "2024-03-01")]}},
     }}
     assert sec.reporting_currency(facts) == "GBP"
+
+
+# --- the currency is chosen per filing (audit 24.10.2026 F10) --------------------------
+
+def _switcher():
+    """Book value in USD in the 2020 10-K; from 2023 the filer reports in EUR, and its
+    two later 20-Fs also restate the 2020 balance in euros as a comparative."""
+    return doc({"us-gaap": {"StockholdersEquity": {"units": {"USD": [
+        fact(1_000.0, "2019-12-31", "2020-02-20", form="10-K", accn="k2020")]}}},
+        "ifrs-full": {"Equity": {"units": {"EUR": [
+            fact(950.0, "2019-12-31", "2023-03-01", form="20-F", accn="f2023"),
+            fact(1_200.0, "2022-12-31", "2023-03-01", form="20-F", accn="f2023"),
+            fact(1_300.0, "2023-12-31", "2024-03-01", form="20-F", accn="f2024"),
+        ]}}}})
+
+
+def test_a_later_currency_does_not_delete_the_earlier_filings_facts():
+    """The whole-history majority (EUR) used to drop the 2020 USD figure."""
+    rows = sec.extract_rows(_switcher())
+    by_accn = {(r[6], r[4].isoformat()): (r[2], r[9]) for r in rows}
+    assert by_accn[("k2020", "2019-12-31")] == (1_000.0, "USD")
+    assert by_accn[("f2024", "2023-12-31")] == (1_300.0, "EUR")
+    assert len(rows) == 4
+
+
+def test_the_2020_value_stays_visible_as_of_2020_and_euros_convert_later():
+    import datetime as dt
+
+    import duckdb
+
+    from portfolio_lab.data import pit
+    from portfolio_lab.data.schema import MARKET_MIGRATIONS, _apply
+
+    c = duckdb.connect(":memory:")
+    _apply(c, MARKET_MIGRATIONS)
+    c.executemany(
+        "INSERT INTO fundamentals (cik, metric, value, period_start, period_end, filed, "
+        "accession, xbrl_tag, tag_rank, currency, form) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        sec.extract_rows(_switcher()))
+    c.executemany("INSERT INTO prices (ticker, date, open, close, close_adj, volume) "
+                  "VALUES ('EURUSD=X', ?, 1.1, 1.1, 1.1, 0)",
+                  [(d,) for d in (dt.date(2020, 6, 30), dt.date(2024, 6, 28))])
+    early = pit.fundamentals_wide(c, dt.date(2020, 6, 30)).set_index("cik")
+    assert early.at[1, "book_value"] == 1_000.0
+    assert early.at[1, "reporting_currency"] == "USD"
+    late = pit.fundamentals_wide(c, dt.date(2024, 6, 28)).set_index("cik")
+    assert late.at[1, "book_value"] == 1_300.0 * 1.1
+    assert late.at[1, "reporting_currency"] == "EUR"

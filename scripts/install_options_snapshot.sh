@@ -12,7 +12,8 @@
 set -euo pipefail
 LABEL="com.moritzfriedrich.portfoliolab.options"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-PROJECT="/Users/moritzfriedrich/portfolio-lab"
+# The checkout this script lives in, so it works on any Mac and under any user name.
+PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
 
 if [ "${1:-}" = "--remove" ]; then
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true

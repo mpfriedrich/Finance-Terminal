@@ -141,7 +141,7 @@ GROUPS: tuple[str, ...] = (
 )
 
 
-def group_for(sic: str | int | float | None) -> str:
+def group_for(sic: str | float | None) -> str:
     """Map one SIC code to its group.
 
     A missing or unparseable code is `Unclassified` — a fact about the data, not a

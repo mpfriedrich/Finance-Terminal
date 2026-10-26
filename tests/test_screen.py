@@ -2,8 +2,8 @@
 import pandas as pd
 import pytest
 
+from portfolio_lab.screen.engine import derive_metrics, merge_selection, run_screen
 from portfolio_lab.screen.spec import Filter, PortfolioSpec
-from portfolio_lab.screen.engine import merge_selection, run_screen, derive_metrics
 
 
 def frame():

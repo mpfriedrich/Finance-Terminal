@@ -7,7 +7,10 @@ import pytest
 
 from portfolio_lab import options as op
 from portfolio_lab.options import (
-    black_scholes, expected_move, implied_volatility, implied_vs_realised,
+    black_scholes,
+    expected_move,
+    implied_volatility,
+    implied_vs_realised,
 )
 
 
@@ -68,8 +71,14 @@ def test_implied_against_realised_reports_the_gap():
 
 
 # ------------------------------------------------------------------ greeks & positions
-from portfolio_lab.options import (  # noqa: E402
-    Leg, PRESETS, greeks, payoff_at_expiry, position_metrics, probability_above, value_now,
+from portfolio_lab.options import (
+    PRESETS,
+    Leg,
+    greeks,
+    payoff_at_expiry,
+    position_metrics,
+    probability_above,
+    value_now,
 )
 
 
@@ -299,14 +308,14 @@ def test_a_flat_smile_gives_back_the_bell_curve():
 
 
 def test_a_smirk_puts_more_weight_on_a_fall_than_the_bell_curve():
-    smile = lambda m: 0.30 + 0.6 * max(1.0 - m, 0.0)        # noqa: E731
+    smile = lambda m: 0.30 + 0.6 * max(1.0 - m, 0.0)
     d = op.implied_distribution(_otm(smile=smile), 100.0, 30, r=0.04)
     assert d["p_down_10"] > d["ref_p_down_10"]
     assert d["quantiles"][5] < d["ref_quantiles"][5]
     # Independent check: P(S_T < K) = e^{rT} dPut/dK, straight from Black-Scholes put
     # prices with the smile's own volatility at each strike (no density involved).
     T, h, K = 30 / 365, 0.5, 90.0
-    put = lambda k: op.black_scholes(100.0, k, T, 0.04, smile(k / 100.0), 0.0, "put")  # noqa: E731
+    put = lambda k: op.black_scholes(100.0, k, T, 0.04, smile(k / 100.0), 0.0, "put")
     digital = math.exp(0.04 * T) * (put(K + h) - put(K - h)) / (2 * h)
     assert d["p_down_10"] == pytest.approx(digital, abs=0.006)
 

@@ -1561,6 +1561,191 @@ korrigiert werden (jetzt in `layout.LABELS` überschrieben). Nichts davon gegen 
 Daten geprüft; Ketten von SPY und Indizes über den Baukasten nur mit gefälschter Kette
 im Test.
 
+## SEC Filing Butterfly: prospektive Papierdepots (18.10.2026, lokale Sitzung)
+
+**Auftrag des Nutzers:** die Strategie der Modellstudie (Forschungskopie,
+`results/filing_options/REPORT.md`: Long Call Butterfly ±10 % nach 10-K/10-Q, im Modell
++46,8 % p. a., aber mit Black-Scholes statt echter Quotes und bei 5 % Kosten −19,6 %)
+ab jetzt mit echten Quotes auf Papier mitlaufen lassen, zwei getrennte Konten.
+
+**Gebaut:** `filing_butterfly.py`, `scripts/butterfly_tracker.py`,
+`scripts/install_butterfly_tracker.sh` (launchd Di–Sa 01:30/03:00/04:30 Sydney = US-Sitzung),
+Ansicht in PORTFOLIOS → BOOKS unter den bestehenden Papierdepots (die bleiben unverändert).
+Eigene Datei `data/paper_options.duckdb`, weil die App `user.duckdb` exklusiv offen hält;
+App und Tracker öffnen sie nur kurz (Lock wird abgewartet). Jeder Geldbetrag ist eine
+Zeile in `fb_ledger`, Cash = Summe; Tracker und App lesen dieselben Buchungen.
+
+**Regeln (vorab festgelegt, in `fb_books.rules_json` mitgespeichert):**
+* Ereignis = Accession-Nummer eines regulären 10-K/10-Q aus dem EDGAR-Tagesindex
+  (`form.YYYYMMDD.idx`); /A und NT ausgeschlossen; gleiches Formular derselben CIK binnen
+  20 Tagen = Duplikat. Gescannt wird erst ab dem Eröffnungstag der Bücher. Einreichungstag
+  ≠ Earnings-Termin (wird so angezeigt, Earnings-Termine werden nicht verwendet).
+* Kandidat ab der ersten US-Sitzung NACH dem Einreichungstag, Fenster 3 Sitzungen;
+  entschieden wird einmal, nur 9:45–15:45 New York. Läuft der Tracker im Fenster nie in
+  der Handelszeit: „Einstiegsfenster verpasst“, kein späterer Fill.
+* Universum: ≥ 252 Tageskurse, Kurs ≥ 5 $, Ø 20-Tage-Umsatz vor dem Entscheidungstag
+  ≥ 10 Mio. $; bei mehreren Aktienklassen die vorher liquideste.
+* Dividendenzahler: bekannter Ex-Tag (oder letzter Ex-Tag + 80 Tage) bis Verfall →
+  abgelehnt (vorzeitige Zuteilung der Short-Calls); Ex-Tag unbekannt → abgelehnt.
+* Verfall gelistet, 25–40 Tage, nächst 30 (Modell: 30 Kalendertage); Mitte = gelisteter
+  Strike am Kurs, Flügel symmetrisch gelistet, Breite nächst 10 % (7–13 %).
+* Je Leg: Standardkontrakt (OCC-Wurzel = Ticker, REGULAR → Multiplikator 100), Bid und
+  Ask > 0, Spanne ≤ 35 %, OI ≥ 100, Volumen ≥ 1, letzter Handel ≤ 3 Tage. Kauf zum Ask,
+  Verkauf zum Bid. Quotes, Gründe, Zeitpunkt werden einmal gespeichert.
+* Je Buch: Maximalverlust (Debit + Gebühren auf und zu + beobachtete Spanne als
+  Schließungsreserve, beim EUR-Buch inkl. 0,25 % FX je Umtausch) ≤ 1 % des Kontowerts;
+  ganze Einheiten (+1/−2/+1 = 4 Kontrakte), ≤ 10, ≤ 5 % des OI je Leg, 10 % des freien
+  Geldes bleibt Reserve, eine offene Position je Unternehmen. Reihenfolge bei mehreren
+  Kandidaten: Einreichungstag, dann höherer Vorab-Umsatz, dann Ticker.
+* Bewertung: Schließungserlös (Longs zum Bid, Shorts zum Ask, Gebühren ab); ohne
+  aktuelle Quote gilt die letzte, als „unsicher“ markiert. Schließung am letzten
+  Handelstag vor Verfall; sonst Andienung wie bei amerikanischen Calls (Gebühr je
+  ausgeübtem Kontrakt, 0,05 % Aktienspanne), kein kostenloser Barausgleich.
+* Kosten (Annahmen): 0,65 USD je Kontrakt und Leg, 0,25 % FX, 0,05 % Aktienspanne.
+* Benchmark: SPY mit Dividenden (Yahoo, adjustiert) ab dem Eröffnungstag, beim EUR-Buch
+  in Euro umgerechnet; nur bis zum letzten Bewertungstag.
+
+**Gemessen/geprüft:** 29 Tests (`test_filing_butterfly*.py`): Kalender 2026, Index-Parser,
+Verfall/Strikes, vier Kontrakte, Ask/Bid-Fills, fehlende/schlechte Quotes je Grund,
+Einreichungstag ohne Entscheidung, gleicher Kandidat im 100.000-$-Buch eröffnet und im
+1.000-€-Buch „Budget reicht nicht“ (Maximalverlust 505,20 $ = 460,42 € > 10 €), getrennte
+Kassen, Wiederholung ohne Doppelbuchung, Neustart, Duplikate, Aktienklassen, verpasstes
+Fenster, Markt zu, Ex-Dividende, kein EUR-Kurs, eine Position je Unternehmen, planmäßige
+Schließung, Andienung, Monatszählung, Benchmark in Euro. Volle Suite 882 bestanden.
+Zwei Fehler beim Bau gefunden und mit Test abgesichert: der Benchmark las SPY-Kurse nach
+dem letzten Bewertungstag; yfinance 1.7 liefert `fast_info.get("last_price")` = None
+(nur `fast_info["lastPrice"]` geht) — jeder Kandidat wäre mangels Kurs abgelehnt worden.
+Live geprüft (Sonntag, Quotes vom Freitag): AAPL 310/345/380 zum 20.11., BRK-B als
+Standardkontrakt erkannt. **Erster echter Lauf 17.10.2026 21:34 UTC:** beide Bücher eröffnet
+(1.000 € / 100.000 $), noch keine Entscheidung (Wochenende).
+
+**Erwartung:** Die Modellstudie fand für ein 1.000-€-Konto mit 1 %-Grenze keine ganzen
+Positionen; ein Butterfly auf eine 100-$-Aktie riskiert typisch 300–600 $. Null Trades im
+kleinen Buch sind daher das erwartete Ergebnis. Ungetestet: echte Quote-Zeitstempel
+(Yahoo liefert keine), ob die Ex-Tag-Schätzung (+80 Tage) bei Monatszahlern reicht,
+Verhalten bei Splits während der Laufzeit (Kontrakte werden angepasst, die Wurzel ändert sich).
+Die SPY- und ^SP500TR-Reihe im Markt-Bestand endet am 23.09.2026 (separat zu klären);
+der Tracker holt SPY deshalb selbst.
+
+## Paper-Portfolios A–F: prospektive Bücher mit je 1.000 € (22.10.2026, lokale Sitzung)
+
+**Auftrag des Nutzers:** sechs getrennte Paper-Portfolios (A–F) mit je 1.000 € ab dem
+tatsächlichen Start, im Tracker (PORTFOLIOS → BOOKS) und im Morgen-Brief. Nur Papier.
+Code: `src/portfolio_lab/forward/` (features, models, data, ledger, strategies, engine,
+report), `scripts/forward_books.py`, `scripts/forward_verify.py`; Buchungen in
+`data/paper_forward.duckdb` (eigene Datei, weil die App `user.duckdb` sperrt).
+
+**Gemeinsam A–D:** Long/Short, Signal nach Handelsschluss, Ausführung zur nächsten
+regulären Eröffnung, alle 5 US-Sitzungen vollständige Umschichtung, 20 Long / 20 Short,
+50/50, 100 % brutto, gleich gewichtet; Eignung und SSM-Ausschluss wie im Research.
+Kosten (Annahme) 0,10 % je Ein-/Ausstiegsnominal, 3 % p. a. Leihe auf das ursprüngliche
+Short-Nominal je Kalendertag. Konten in EUR; Fills zum EUR/USD-Schluss der Vorsitzung,
+Bewertung zum Schluss des Tages. Dividenden: Rendite jeweils aus Einstieg und Bewertung
+auf derselben `close_adj`-Basis (Yahoo bereinigt rückwirkend), Long erhält, Short zahlt.
+
+**Reproduktion gegen das Research (alle bestanden, `scripts/forward_verify.py`):**
+* B: Signal 28.05.2025, 3.231/3.231 gleiche geeignete Aktien, max. Score-Abweichung
+  1,2e-10, Top/Bottom 20 identisch.
+* v13 (C) und v29 (A) mit Peers und ALFRED-Makro: Top/Bottom 20 identisch, 1,6e-10.
+* D: erster Korb 31.12.2024 identisch (Long und Short).
+* F: Schwellenereignisse 28.08., 01.09., 10.09.2026 identisch.
+
+**A (A1):** v29 (23 Merkmale + Peers + Beschäftigung + Inflation + Fed-Zinsen, ohne
+Gold), Ridge α 1, Ziel 5-Tage-Überrendite zu SPY, Training auf den zehn Jahren vor dem
+Start (nur Ziele, die vor dem Stichtag vollständig bekannt waren), max. 256 Zeilen je
+Signaltag (Seed 62025), Skalierung/Clipping nur auf Trainingsdaten; jährlich neu.
+**B (B1):** `price_ml_inputs/frozen_model.json` unverändert (SHA-256 gespeichert).
+**C (C1):** Jahresversion 2026 v13 aus `rolling_windows/10y/annual_models.json`
+(Training 2016–2025); Neufit jeden Januar auf die vorherigen zehn Kalenderjahre.
+Rückblickend ausgewählt, nicht unabhängig bestätigt.
+**D (D1):** 0,5 / 0,3 / −0,2, unverändert; frühere Prüfung schwach.
+**F (F1):** Schwellen exakt aus `rare_signals_2011/specification.json`; nur der Übergang
+„aus → an“ zählt, Episoden vor dem Start werden nur beobachtet; 75 % des Kontowerts der
+Vorsitzung je Trade, bei zu wenig Cash proportional verkleinert, ohne Cash ausgelassen;
+Ausstieg nach fünf Sitzungen zur Eröffnung; ein offener Trade je Regel und Aktie. Extreme
+Bewegung mit wechselndem Verhältnis Kurs/Split-Kurs → „ungeklärt“, kein Trade.
+
+**E (E1) — eigene Hypothese, vor dem Start festgelegt:**
+* *Wirtschaftliche Begründung:* drei gut dokumentierte, unterschiedlich begründete
+  Prämien. Momentum (verzögerte Informationsverarbeitung, Jegadeesh/Titman 1993),
+  Bruttoprofitabilität (Märkte unterschätzen dauerhafte operative Ertragskraft,
+  Novy-Marx 2013) und Kapitaldisziplin (Firmen geben Aktien aus, wenn sie teuer sind, und
+  kaufen zurück, wenn sie billig sind; Pontiff/Woodgate 2008). Kombiniert, weil
+  Momentum-Einbrüche und Qualitäts-Prämie wenig gemeinsam haben.
+* *Warum diese Form:* In der Signalsuche dieses Projekts (14.10.2026) waren genau diese
+  drei international brutto die stabilsten (t 2,7 / 2,3 / 2,1), bestanden aber netto nicht,
+  weil monatlicher Vollumschlag im breiten 300-Mio.-Universum zu teuer war. E zielt auf
+  diesen gemessenen Fehler (Kosten), nicht auf eine höhere Rückblick-Rendite: große Werte
+  (niedrige Spreads, leihbarer) und ein Puffer gegen Umschlag. Erwartung ehrlich gering
+  (Sharpe-Größenordnung 0,3); kurze Beobachtungszeiträume bestätigen oder widerlegen das
+  nicht.
+* *Faktoren:* 12–1-Momentum `P[t−21]/P[t−252] − 1`; Bruttogewinn TTM / Bilanzsumme aus
+  dem Point-in-time-Frame; Aktienausgabe = −(Aktienzahl heute / vor einem Jahr − 1),
+  beide auf heutige Split-Basis (Anzahl × Kurs_roh / Kurs).
+* *Regel:* Score = Mittel der drei Perzentilränge über das geeignete Universum; alle
+  drei Werte müssen vorliegen. Kein Training, kein Retraining.
+* *Universum:* Research-Universum (NYSE/NASDAQ/CBOE, Eignung wie A–D, ohne SSM),
+  Börsenwert ≥ 2 Mrd. $, Median-Umsatz 60 Tage ≥ 10 Mio. $.
+* *Haltedauer:* Signal nach Schluss des letzten Handelstags im Monat, Ausführung zur
+  ersten Eröffnung des neuen Monats. Long bleibt, solange er unter den besten 40 ist,
+  Short unter den schwächsten 40; Lücken je Seite auf 20 aufgefüllt.
+* *Größe und Grenzen:* neue Position 2,5 % des Kontowerts (20 je Seite → 50/50,
+  100 % brutto); bei zu wenig Cash proportional kleiner; kein Hebel, keine Nachschüsse.
+* *Kosten:* wie A–D (0,10 % je Seite, 3 % p. a. Leihe).
+* Änderungen nur als E2 mit eigenem Beobachtungsabschnitt.
+
+**Datenlage beim Bau (22.10.2026):** Kurse vom 20. und 21.10. nur zu ~11 % geladen (595 von
+5.364 Aktien) — die Bücher warten, bis eine Sitzung ≥ 90 % des üblichen Umfangs hat. SPY im
+Markt-Bestand endet am 23.09.2026; der Tracker lädt SPY selbst (Yahoo). Kein FRED-API-
+Schlüssel: Makro aus den gespeicherten ALFRED-Vintages (bis 14.10.2026) plus eigenen
+täglichen FRED-Abrufen, jeweils ab dem Abruftag als bekannt.
+
+**Ungetestet / Grenzen:** keine Brokerdaten (Leihbarkeit nie bestätigt, keine
+Mindestgebühren, keine echten Spreads); Bruchstücke — mit 1.000 € und 40 Positionen
+(~12,50 € je Position) passt bei den meisten Aktien keine ganze Aktie; der Tracker zeigt
+das je Auftrag. Aktuelles Universum (Survivorship). ADS-Ratio-Wechsel werden nicht eigens
+geprüft (nur Split-Verhältnis).
+
+**Audit 24.10.2026, F1 + F2 behoben (bevor die erste Sitzung gebucht war, `fw_marks` leer):**
+* *F1 — Teil-Tage wurden gebucht.* Nur die Signale warteten auf eine vollständige Sitzung;
+  Fills und Bewertungen liefen an jedem Tag mit irgendeinem Kurs und waren danach eingefroren
+  (eine gebuchte Sitzung wird nie neu gerechnet). Jetzt bucht `run()` der Reihe nach und hält
+  an der ersten Sitzung, die < 90 % Abdeckung hat oder deren Schluss (16:00 New York) noch
+  nicht vorbei ist; diese und alle späteren warten auf den nächsten Lauf, offene Signale
+  bleiben „pending“ und füllen dann zur echten Eröffnung jener Sitzung. Neue Signale nur aus
+  Sitzungen vor dem Halt. Eine Sitzung ganz ohne Kurse, während spätere welche haben, gilt
+  weiter als Sonderschließung und wird übersprungen.
+* *F2 — keine Transaktion.* Jede Sitzung je Buch ist jetzt eine Transaktion (Leihe, Fills,
+  Signalstatus, Bewertung zusammen); ein Fehler rollt das Buch zurück, der Lauf hält an der
+  Sitzung, und der nächste Lauf bucht sie neu. Auch das Anlegen eines Buchs (Buch, Version,
+  Einzahlung) ist eine Transaktion. Ein Abbruch durch Timeout/Strg+C lässt die offene
+  Transaktion ungeschrieben (DuckDB).
+* Tests: `test_an_incomplete_session_is_not_booked_until_its_prices_are_complete`,
+  `test_a_session_is_not_booked_before_its_close`,
+  `test_a_run_that_breaks_mid_session_leaves_nothing_half_booked` — alle drei rot ohne Fix
+  (14 Orders am Teil-Tag, 6 Bewertungen mittags, halbe Buchung nach Absturz), grün mit; der
+  Endzustand nach jedem Umweg ist gleich dem eines ungestörten Laufs.
+* Keine Regeländerung an A–F (Ausführung zur Eröffnung, Kosten, Körbe unverändert), daher
+  keine neue Version.
+
+**Version 2 aller Bücher (A2–F2, 24.10.2026): Delisting-Regel (Audit F4, Regel 3 / R18).**
+Vorher blieb eine Position, deren Aktie nicht mehr handelt, für immer offen zum letzten Kurs
+(nur als „stale“ gezählt, Kapital gebunden). Jetzt: keine Kurse an **5 Sitzungen in Folge**
+(alle vollständig, s. F1) → Abgang zur Sitzung, an der die fünfte fehlt, zum letzten Kurs ×
+(1 + echte Delisting-Rendite aus `delisting_returns`, wo vorhanden), sonst **Long −30 %,
+Short 0 %** (für den Short wird kein Gewinn angenommen — die vorsichtige Seite); Ausstiegsgebühr
+wie immer. Eigene Order mit Status „delisted“, Hinweis in der Tagesbewertung. Ein Handelsstopp
+> 5 Sitzungen wird damit ebenfalls geschlossen; kommt die Aktie zurück, wäre sie eine neue
+Position. `e_backtest.py` rechnete schon so (Long × 0,7, Short ohne Abschlag).
+Warum eine neue Version: Es ist eine Regeländerung, also nach den eigenen Regeln mit eigenem
+Beobachtungsabschnitt. Da noch keine Sitzung gebucht ist, ist der Abschnitt von Version 1
+leer; die bestehenden Bücher wechseln beim nächsten Lauf (`fw_versions` bekommt A2 … F2 mit
+Begründung, keine zweite Einzahlung). Tests:
+`test_a_share_without_bars_for_five_sessions_is_realised_as_delisted` (nach 4 Sitzungen noch
+offen, nach 5 geschlossen; Long 0,7 × letzter Kurs, Short = letzter Kurs),
+`test_a_book_opened_under_an_older_version_moves_to_the_new_one` — beide rot ohne den Fix.
+Ungetestet: der freie Bestand hat keine `delisting_returns`, dort greift immer die Annahme.
+
 ## Geplant: Hebel und Derivate (vorgemerkt am 25.09.2026, noch nicht begonnen)
 
 Auf Frage des Nutzers („gibt es die Option für Derivate und Leverage?“) nur in den Plan
@@ -1729,3 +1914,221 @@ Jetzt `enableCORS = true` und `allowedHosts = ["localhost", "127.0.0.1", "*.loca
 - DNS-Rebinding (Host und Origin `evil.example.com`) → 403.
 - Handy-Fall `moritzs-macbook-pro.local` → 101; nackte LAN-IP → 403 (gewollt, sie wechselt).
 - Ungeprüft: echter Aufruf vom iPhone über den `.local`-Namen.
+
+## Befund 22.10.2026: Tagesupdate brach ab, 90 % der Aktien ohne neue Kurse (lokale Sitzung)
+
+**Symptom.** `run.log` meldet seit 21.10. „prices failed: $BLFS: possibly delisted …“ (dann
+BRNS). In `market.duckdb` fiel die Abdeckung der 5.364 Aktien von ~5.100–5.400 Zeilen pro
+Sitzung auf 617 (20.10.) und 594 (21.10.). SPY und ^SP500TR standen seit 23.09.
+
+**Ursache 1 — ein alter Kurs vor dem Fenster.** BLFS und BRNS waren nur Rauschen: yfinance
+schreibt für jedes Symbol ohne Daten eine Zeile auf stderr, und der Morgen-Job zeigte die
+ersten 200 Zeichen von stderr. Der echte Fehler (nachgestellt am 22.10.) war
+`ConstraintException: Duplicate key "ticker: BRR, date: 2026-10-14"`: Yahoo antwortet für
+ein ausgesetztes Symbol mit seinem **letzten** Kurs, auch wenn der vor `start` liegt (BRR
+und SVA, je 14.10., Fenster ab 15.10.). `fetch_into_store` löschte nur das Fenster, der
+Insert stieß auf den gespeicherten 14.10., das Skript starb nach Paket 3 von 27. Die
+Pakete 1–3 (A … BESS, 600 Aktien) waren schon geschrieben, der Rest nicht.
+
+**Ursache 2 — MAX(date) als Startpunkt.** Der nächste Lauf begann bei `MAX(date) − 5`, und
+MAX(date) war die neue Sitzung jener 600 Aktien. Was den anderen fehlte, wäre ab dem
+sechsten Tag nie mehr nachgeholt worden.
+
+**Ursache 3 — SPY/^SP500TR.** Beide schreibt nur `scripts/add_benchmark.py` (zuletzt
+23.09.). Sie stehen nicht in `securities` und nicht in `world.stored_symbols()`, also holte
+das Tagesupdate sie nie. ^SP500TR ist der Benchmark von Backtest, Stufe B, Papierdepots
+und Risiko — er stand einen Monat still. (^GSPC steht im Monitor und lief mit.)
+
+**Behoben:**
+- `prices.fetch_into_store`: ersetzt Zeilen über ihren eigenen Schlüssel **und** das
+  Fenster, doppelte Schlüssel in einer Antwort werden verworfen, jedes Paket ist eine
+  Transaktion (vorher: Delete committet, Insert gescheitert → Fenster gelöscht). Ein
+  Symbol ohne Daten landet in `no_data` (Hinweis), ein gescheitertes Paket in `failed`
+  (mit Fehler), und das nächste Paket läuft weiter. Downloader ist injizierbar (`download=`).
+- `prices.last_complete_session`: jüngste Sitzung, an der ≥ 90 % der üblichen Zahl an
+  Aktien einen Kurs haben (üblich = Maximum der letzten 20 Sitzungen). `build_prices.py`
+  startet dort statt bei MAX(date). Nicht abgedeckt: ein einzelnes Paket (≈ 4 %), das Tag
+  für Tag scheitert — das zeigt `failed`.
+- `build_prices.py`: holt `prices.BENCHMARK_SERIES` (^SP500TR, ^GSPC, SPY) täglich mit,
+  druckt die Symbole ohne Daten als Hinweis, und meldet gescheiterte Pakete **am Ende**
+  auf stderr mit Exit 1 (erst nachdem alles andere gespeichert ist).
+- `morning_briefing.refresh_prices`: zeigt das **Ende** von stderr (300 Zeichen).
+- Fenster endet pro Symbol beim neuesten gelieferten Kurs: am 22.10. gegen 06:30 New
+  Yorker Zeit ließ Yahoos Paket-Antwort den 21.10. für die meisten Symbole weg (einzeln
+  noch da, eine Stunde später auch einzeln nicht mehr). Das alte Löschen über das ganze
+  Fenster hätte gespeicherte 21.10.-Kurse dabei verworfen (bei SPY gesehen).
+- Tests: `tests/test_prices_update.py` (Fake-Downloader, kein Netz): Symbol ohne Daten,
+  alter Kurs vor dem Fenster (scheitert ohne den Fix, geprüft), scheiterndes Paket mit
+  Rollback, letzte vollständige Sitzung, Ende von stderr.
+
+**Wichtig:** Der Morgen-Job läuft aus `~/portfolio-lab` auf dem dort ausgecheckten Branch.
+Solange der Fix dort nicht ist, stirbt jeder Lauf wieder an BRR.
+
+**Nachgeladen 22.10.2026** (neuer Code gegen `~/portfolio-lab/data`, Exit 0):
+Aktien mit Kurs je Sitzung danach 15.10.: 5.334 · 16.10.: 5.335 · 19.10.: 5.322 ·
+20.10.: 5.324 (vorher 617). 5.346 von 5.364 Symbolen mit Daten, 18 nur als Hinweis
+(u. a. BLFS, BRNS, DOMO, WBD). SPY, ^SP500TR, ^GSPC per `add_benchmark.py` ohne Lücke bis
+20.10. Der **21.10. fehlt noch** (772 Aktien): Yahoo lieferte ihn zum Zeitpunkt des Laufs
+nicht. Der nächste Lauf startet bei der letzten vollständigen Sitzung (20.10.) und holt
+ihn. In einem zweiten Lauf meldeten unter Yahoos Drosselung 49 Symbole „keine Daten“
+(darunter LMT, M); ihre gespeicherten Kurse blieben unberührt, wie gewollt.
+Ungeprüft: der echte Morgenlauf mit dem neuen Code.
+
+## Befund 24.10.2026: Splits zerrissen die Kursreihe beim Tagesupdate (Audit F3, lokale Sitzung)
+
+**Was:** Das inkrementelle Update ersetzt nur sein Fenster (letzte vollständige Sitzung − 5
+Tage bis heute). Yahoo rechnet aber bei einem Split die *ganze* Historie um (alle Schlusskurse
+davor geteilt), bei einer Dividende alle bereinigten Schlusskurse davor. Die älteren Zeilen
+blieben auf der alten Basis: Die Reihe sprang am Split-Tag um den Split-Faktor, und
+`rebuild_raw_closes` multiplizierte die alten, nicht umgerechneten Kurse noch einmal mit dem
+Split — `close_raw` und damit die Marktkapitalisierung (Regel 7) waren um den Faktor falsch.
+Bei Dividenden fehlte die Dividende in der Gesamtrendite (Sprung von etwa der Rendite am
+Fensteranfang). PLAN.md sagte „Yahoo bereinigt rückwirkend“ — für Yahoo stimmt das, für den
+Bestand nicht.
+
+**Gemessen 24.10.2026 in `market.duckdb`:** 8 Reihen mit einem Sprung in Höhe des
+Split-Faktors am Split-Tag: AIXI (08.09., 1:7), GMEX (28.09., 1:9), DLXY (28.09., 1:5), VIVK
+(05.10., 1:15), VTAK (05.10., 1:10), KNDI (16.10., 1:10), FRGT (19.10., 1:10), JL (10.12.2024,
+1:10) — alles Reverse-Splits kleiner Werte.
+
+**Behoben (`data/prices.py`, `scripts/build_prices.py`):**
+* `_restated`: Vor dem Ersetzen wird jede Antwort mit den gespeicherten Kursen derselben Tage
+  verglichen. Weicht Schlusskurs oder Verhältnis bereinigt/Schluss ab (> 1e-6) und liegen ältere
+  Kurse vor dem Fenster, wird die ganze Historie dieses Tickers neu geladen (`refetch_history`,
+  ab seinem ersten gespeicherten Tag). Kosten: ein Download je Ticker mit Split/Dividende im
+  Fenster, bei Quartalsdividenden geschätzt einige Dutzend am Tag (nicht gemessen).
+* `split_breaks` findet alte Brüche (Sprung = Faktor am Split-Tag); `repair_split_breaks` lädt
+  sie neu und bereinigt, was danach noch bricht, selbst (Kurse vor dem Split ÷ Faktor, Volumen
+  × Faktor). Das Tagesupdate ruft es bei jedem Lauf; 0,3 s auf dem vollen Bestand.
+* **Ausgeführt 24.10.2026 auf dem echten Bestand** (mit Zustimmung): Neuladen heilte KNDI,
+  VIVK, VTAK. AIXI, DLXY, FRGT, GMEX, JL kamen von Yahoo selbst unbereinigt zurück (AIXI 0,47 $
+  vor dem 1:7 vom 08.09.2026, 3,26 $ am Tag) und wurden hier bereinigt; JL danach 3,17 $
+  bereinigt / 0,317 $ gehandelt am 09.12.2024, 3,13 $ am 10.12. `split_breaks` danach leer;
+  US-Hälfte des Welt-Bestands neu kopiert.
+  Nur Splits ab 3:2 bzw. 1:1,45: darunter flaggte der Test BEP (1,251, echte 8-%-Bewegung) und
+  FWONA (1,424, 2016, der Sprung steht so in Yahoos eigener Historie und käme bei jedem Download
+  wieder).
+* Tests: `test_a_split_in_the_window_refetches_the_whole_history`,
+  `test_a_dividend_in_the_window_refetches_the_whole_history`,
+  `test_an_unchanged_history_is_not_refetched`, `test_a_split_broken_earlier_is_found_and_repaired`,
+  `test_a_split_yahoo_never_restated_is_adjusted_here` — alle rot ohne den Fix in `prices.py`.
+
+**Ungetestet / offen:** gegen echtes Yahoo nicht gelaufen (die Tests nutzen ein nachgebautes
+Yahoo). Liefert Yahoo für einen Ticker kürzere Historie als gespeichert, bleiben die älteren
+Zeilen stehen (nicht auf Verdacht gelöscht) und behalten die alte Basis. Ältere Backtests und
+Pit-Cache-Frames mit diesen 8 Titeln sind nicht neu gerechnet; der Cache-Fingerprint ändert sich
+mit dem Neuaufbau ohnehin.
+
+## Audit 24.10.2026 — alle Befunde behoben (26.10.2026, lokale Sitzung)
+
+Gesamtbericht: Obsidian `Portfolio Lab/Audits/2026-10-24-audit.md` (Claude, 4 Agenten, und
+Codex). F1, F2, F24 und F4 waren schon behoben (Forward-Bücher buchen nur vollständige,
+geschlossene Sitzungen, eine Transaktion je Buch und Sitzung; Delisting-Regel, Version
+A2–F2), F3 auf `claude/split-refetch`. Die übrigen Befunde wurden am 26.10. von vier
+parallelen Agenten in eigenen Worktrees behoben (getrennt nach Dateien) und hier
+zusammengeführt. Jeder Fix hat einen Test, der ohne ihn fehlschlägt (Quelldatei
+zurückgetauscht, Test rot). Ausnahmen sind genannt.
+
+**Vorfälle beim Beheben (für spätere Sitzungen):**
+- `git stash` ist für alle Worktrees gemeinsam. Zwei Agenten haben einmal den Stash des
+  anderen gepoppt; repariert, nichts verloren. Für „scheitert ohne Fix“ die Quelldatei mit
+  `cp` beiseitelegen und zurückkopieren, **nie stash**.
+- Ein Test des Installationsskripts rief über einen Fehler in `--dry-run` das echte
+  `launchctl` auf und ersetzte den Butterfly-Job durch eine Plist aus einem pytest-Ordner.
+  Der Originaljob wurde am 26.10. wieder geladen; der Test setzt jetzt ein falsches
+  `launchctl` vorn in den PATH.
+
+### Kernmodule (F6–F10, CACHE_VERSION v10)
+
+- **F9 – CRSP erfindet keine Eröffnungskurse mehr.** `crsp.py` ersetzte einen fehlenden
+  `openprc` durch den Schlusskurs (R16-Verstoß). Jetzt bleibt `open` NULL, und Stufe B
+  handelt den Titel an diesem Tag nicht. Getestet mit der CRSP-Fixture im alten und im
+  CIZ-Format. Ungetestet: echte CRSP-Daten. Wirkt erst mit dem nächsten `build_wrds.py`.
+- **F8 – Stufe A erkennt Delistings auch, wenn alle Positionen verschwinden.** Das Ende des
+  Zeitraums kommt jetzt aus dem Kalender des Benchmarks (wie `sessions` in Stufe B).
+  Getestet: nur DEAD gehalten → Endwert 70; mit CRSP-Fixture das echte −85 % → 15. Offen:
+  ohne Benchmark-Reihe bleibt die Lücke.
+- **F7 – Beide Frame-Builder liefern dieselben Spalten.** `base.build_screening_frame`
+  berechnet auch `median_share_volume_60d`; vorher übersprang der Referenzpfad die
+  Plausibilitätsprüfung der Aktienzahl. `tests/test_frame_parity.py` vergleicht alle
+  Spalten und Ausschlussgründe; der Live-Test ebenfalls (läuft nur mit echtem Bestand).
+- **F6 – TTM-Werte haben ein eigenes Höchstalter.** Ein TTM-Wert, der mehr als 400 Tage vor
+  dem Screen-Datum eingereicht wurde, wird nach der Auswahl NaN (`stale_ttm`), in beiden
+  Buildern. Ausgeschlossen wird mit eigenem Grund nur, wenn ein Filter oder das Ranking die
+  Kennzahl liest; die Abhängigkeit wird gemessen (`engine.ttm_inputs`). Nicht gemessen: wie
+  viele Firmen das im echten Bestand trifft.
+- **F10 – Währung je Meldung, Umrechnung je Fakt.** Gemessen am SEC-Archiv vom 21.09.2026:
+  154 von 16.978 Filern wechseln die Währung zwischen Meldungen; 17.466 monetäre Einträge
+  gingen verloren und kommen zurück. 31.450 Convenience-Übersetzungen innerhalb einer
+  Meldung werden weiter verworfen. `pit.to_usd` rechnet jeden Betrag zum Kurs des
+  Screen-Datums in seiner eigenen Währung um; vier Quartale in zwei Währungen ergeben keinen
+  TTM-Wert. **Wirkt erst nach `build_fundamentals.py`** und einem neuen Cache (v10).
+
+### Forward-Bücher (F5, F11, F12, F17, F19, F21, F22, niedrig 3/4/8–12)
+
+- **F5:** `equivalent`/`adj_open` prüfen auf endliche positive Kurse, `ledger.book` weist
+  nicht-endliche Beträge zurück, die Sitzungs-Transaktion rollt zurück.
+- **F11:** Die Research-Eingaben (B-Modell, C-Jahresmodelle, ALFRED) werden beim ersten Lauf
+  mit SHA-256 (`manifest.json`) nach `data/forward_inputs/` kopiert und nur dort gelesen;
+  eine veränderte Kopie wird abgelehnt. Fehlt eine Eingabe, warten nur die betroffenen
+  Bücher. Die Modellquelle wird ohne lokalen Pfad gespeichert. Ungetestet: der erste echte
+  Kopiervorgang.
+- **F12/F22:** `e_backtest.py` sagt „survivorship NOT corrected“ und zählt Abgänge (echt vs.
+  angenommen); Cache-Ordner nach Fingerprint, Abbruch bei < 5 Frames, Vorjahres-Frame nach
+  Datum. Logik in `forward/simulation.py`. Die E1-Ergebnisse sind damit überholt.
+- **F17 → E3 (Regeländerung):** Split-Basis der Aktienzahl an ihrem Meldedatum
+  (`stg.issuance`, eine Funktion für Live und Simulation). Dazu niedrig 8: bei < 40 Titeln
+  je Seite höchstens n/2, nie derselbe Titel long und short. Buch E wechselt auf E3.
+- **F19 + niedrig 9:** Ein verpasstes Monatsende wird an der nächsten vollständigen Sitzung
+  nachgeholt; ein Signal ohne Kurse wird „missed“, sobald eine spätere Sitzung gebucht ist.
+- **F21:** Von Hand gerechnete zweite Markt-Fixture (Dividende long/short, EUR/USD-Sprung,
+  Leihe übers Wochenende, Monatswechsel, D/E/F). **Dabei gefunden:** F brach an der Sitzung
+  nach jedem Einstieg mit TypeError ab (Timestamp gegen date), und alle Bücher blieben
+  stehen; behoben. Trainingsgrenze mit echtem Panel getestet, `assert` → `raise`.
+- **Niedrig 3/4/10/11/12:** EUR/USD mit `fetched_at` (ein vor Tagesende geholter Wert wird
+  ersetzt); benannte, nur angehängte Migrationen (`fw_migrations`); neues `nyse.py` mit
+  13:00-Schlüssen 2024–2027 (künftige Sonderschließungen dort nachtragen); `Live` öffnet
+  je Lauf eine Quelle; `connect(read_only=True)` legt keine Datei an.
+
+### Butterfly und Morgenjob (F13–F16, F18, F20, niedrig 4/5/13)
+
+- **F16:** Läufe Di–Sa 02:00 / 03:00 / 04:30 Sydney statt 01:30 (01:30 lag 01.11.–Mitte März
+  vor 09:45 New York). Ein Test prüft jeden Tag zweier Jahre. Das Skript installiert immer
+  für die Haupt-Arbeitskopie, auch aus einem Worktree; `--dry-run` ändert nichts.
+  **Einmal neu installieren:** `./scripts/install_butterfly_tracker.sh`.
+- **F15:** Nur ein 404 von EDGAR heißt „kein Index“; jede andere Antwort lässt den Tag offen
+  (Notiz ohne URL), spätere Tage werden trotzdem gelesen.
+- **F18:** Fehlt der Long-Bid, bleibt die letzte Bewertung (unsicher markiert); ein gestellter
+  Bid von 0 bleibt 0.
+- **F20:** `pick_line` wählt nur unter Gattungen mit Kurs höchstens 6 Tage vor der
+  Entscheidung.
+- **F14 + niedrig 5/13:** stderr des Forward-Laufs und eines gescheiterten Preis-Updates
+  (Ende, ohne URLs und key=value) gehen nach run.log; Fehlertexte über `ui.error_text`;
+  der nie erreichte Zweig „Nothing followed“ ist entfernt (Test ohne Rotphase).
+- **F13 Butterfly-Teil:** Der Tracker rechnet erst auf einer Wegwerf-Kopie mit Netz und
+  wiederholt den Lauf dann auf dem echten Bestand mit denselben Antworten ohne Netz; die
+  Schreibsperre gilt nur noch für die Datenbankarbeit. Nur in Tests gemessen.
+- **Niedrig 4:** benannte Migrationen im Butterfly-Bestand (`fb_migrations`).
+
+### App (F13 App-Teil, F23, niedrig 5/6/7/14)
+
+- **F13:** Die Papierbuch-Ansichten lesen mit zwei Versuchen statt bis zu 90 s und
+  unterscheiden eine Sperre (`ui.store_is_busy`) von einem echten Fehler.
+- **F23:** Der R23-Scanner kennt 14 deutsche Ratschlag-Muster und prüft auch `scripts/`.
+- **Niedrig 5/6/7/14:** `ui.error_text`/`ui.scrubbed` für Fehlertexte; App-Tests scheitern an
+  jedem `st.error`; Überschrift der Forward-Bücher auf Englisch.
+
+### Übrig und bewusst offen
+
+- Deutsche Texte in `forward/engine.py`, `forward/report.py`, `forward/strategies.py` und
+  `filing_butterfly.py` (Berichtsausgabe, keine Ratschläge). „C — RESEARCH WINNER“ bleibt.
+- `filing_butterfly.py` hat einen eigenen Kalender ohne verkürzte Tage; könnte `nyse.py`
+  nutzen.
+- Ruff: die sicheren automatischen Fixes (Importe sortiert) sind angewendet; ~130
+  Stilmeldungen ohne Auto-Fix bleiben.
+- Zum Teilen mit einem Mitarbeiter: `.env.example`, `proposals/`, Regel in `AGENTS.md`;
+  `install_schedule.sh` und `install_options_snapshot.sh` finden ihren Projektordner selbst.
+
+**Auf dem Mac nach dem Merge:** `install_butterfly_tracker.sh` neu ausführen;
+`build_fundamentals.py` (für F10, mehrere Stunden; nur nach Freigabe); danach
+`warm_pit_cache.py` (v10).

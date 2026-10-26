@@ -80,7 +80,8 @@ class Store:
 
     # ---- the strategy lab --------------------------------------------------------
     def get_strategy(self, pid: str):
-        from .lab.spec import StrategySpec, spec_from_json as strategy_from_json
+        from .lab.spec import StrategySpec
+        from .lab.spec import spec_from_json as strategy_from_json
 
         row = self.con.execute(
             "SELECT spec_json FROM strategies WHERE portfolio_id = ?", [pid]).fetchone()

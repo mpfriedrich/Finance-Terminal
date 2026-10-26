@@ -1,9 +1,11 @@
 """Load the yield curve and the front fed funds contract."""
-import datetime as dt, time
+import datetime as dt
+import time
+
 from portfolio_lab.config import MARKET_DB
-from portfolio_lab.data.schema import open_market
 from portfolio_lab.data import prices as px
-from portfolio_lab.macro import RATE_SERIES, FED_FUNDS_FRONT
+from portfolio_lab.data.schema import open_market
+from portfolio_lab.macro import FED_FUNDS_FRONT, RATE_SERIES
 
 t0 = time.time()
 con = open_market(MARKET_DB)

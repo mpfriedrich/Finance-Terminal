@@ -142,7 +142,7 @@ def against_history(history: pd.DataFrame, current: pd.Series) -> pd.DataFrame:
         sd = past.std(ddof=1)
         rows.append({
             "multiple": label, "now": float(now), "own average": float(past.mean()),
-            "years": int(len(past)),
+            "years": len(past),
             "z-score": float((now - past.mean()) / sd) if sd > 0 else np.nan,
         })
     return pd.DataFrame(rows)

@@ -76,7 +76,7 @@ def measures(con: duckdb.DuckDBPyConnection, positions: pd.DataFrame, asof: dt.d
     port = portfolio_returns(returns, weights).dropna()
     if len(port) < 60:
         return {"error": "fewer than 60 days of shared history"}
-    out = {"days": int(len(port)), "from": port.index[0].date(), "to": port.index[-1].date()}
+    out = {"days": len(port), "from": port.index[0].date(), "to": port.index[-1].date()}
     out["volatility"] = float(port.std() * np.sqrt(252))
     out["var_95"] = float(-np.quantile(port, 0.05))
     out["var_99"] = float(-np.quantile(port, 0.01))

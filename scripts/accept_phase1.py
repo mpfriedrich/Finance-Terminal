@@ -1,10 +1,11 @@
 """Phase 1 acceptance. Every criterion from PLAN.md, measured."""
 import time
+
 from portfolio_lab.config import MARKET_DB
-from portfolio_lab.data.schema import open_market
 from portfolio_lab.data.free import FreeSource
-from portfolio_lab.screen.spec import Filter, PortfolioSpec
+from portfolio_lab.data.schema import open_market
 from portfolio_lab.screen.engine import run_screen
+from portfolio_lab.screen.spec import Filter, PortfolioSpec
 
 # Read-only: this script never writes, so it can run while the app is open.
 con = open_market(MARKET_DB, read_only=True)
