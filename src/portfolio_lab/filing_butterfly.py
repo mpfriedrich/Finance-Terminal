@@ -51,6 +51,8 @@ import datetime as dt
 import json
 import math
 import re
+import shutil
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -58,6 +60,8 @@ from zoneinfo import ZoneInfo
 
 import duckdb
 import pandas as pd
+
+from . import ui
 
 ET = ZoneInfo("America/New_York")
 FORMS = ("10-K", "10-Q")
@@ -212,28 +216,41 @@ def parse_form_index(text: str) -> pd.DataFrame:
 
 # -- the store ----------------------------------------------------------------------------
 
-MIGRATIONS = [
-    """CREATE TABLE IF NOT EXISTS fb_books (
+# Append-only and named, like data/schema.py: a store records the names it has applied
+# in fb_migrations, so a new entry (an ALTER TABLE ... ADD COLUMN) runs exactly once.
+# The old list was replayed whole on every open and only worked because each entry was
+# CREATE TABLE IF NOT EXISTS; a new column would never have reached an existing store
+# (audit 24.10.2026, low item 4). Never edit or reorder an entry; append a new one.
+# A store from before the names applies the ten originals once more: they are all
+# IF NOT EXISTS, so that only records their names.
+MIGRATIONS: list[tuple[str, str]] = [
+    ("001_fb_books",
+     """CREATE TABLE IF NOT EXISTS fb_books (
         id VARCHAR PRIMARY KEY, name VARCHAR NOT NULL, currency VARCHAR NOT NULL,
-        capital DOUBLE NOT NULL, opened_at TIMESTAMP NOT NULL, rules_json VARCHAR NOT NULL)""",
-    """CREATE TABLE IF NOT EXISTS fb_ledger (
+        capital DOUBLE NOT NULL, opened_at TIMESTAMP NOT NULL, rules_json VARCHAR NOT NULL)"""),
+    ("002_fb_ledger",
+     """CREATE TABLE IF NOT EXISTS fb_ledger (
         id VARCHAR PRIMARY KEY, book_id VARCHAR NOT NULL, booked_at TIMESTAMP NOT NULL,
         kind VARCHAR NOT NULL, amount DOUBLE NOT NULL, amount_usd DOUBLE,
-        fx DOUBLE, position_id VARCHAR, note VARCHAR)""",
-    """CREATE TABLE IF NOT EXISTS fb_scan (day DATE PRIMARY KEY, scanned_at TIMESTAMP,
-        filings INTEGER)""",
-    """CREATE TABLE IF NOT EXISTS fb_events (
+        fx DOUBLE, position_id VARCHAR, note VARCHAR)"""),
+    ("003_fb_scan",
+     """CREATE TABLE IF NOT EXISTS fb_scan (day DATE PRIMARY KEY, scanned_at TIMESTAMP,
+        filings INTEGER)"""),
+    ("004_fb_events",
+     """CREATE TABLE IF NOT EXISTS fb_events (
         accession VARCHAR PRIMARY KEY, cik BIGINT NOT NULL, company VARCHAR,
         form VARCHAR NOT NULL, filed DATE NOT NULL, first_session DATE NOT NULL,
         detected_at TIMESTAMP NOT NULL, status VARCHAR NOT NULL, decided_at TIMESTAMP,
         ticker VARCHAR, reason VARCHAR, quotes_ok BOOLEAN, structure_json VARCHAR,
-        line_json VARCHAR)""",
-    """CREATE TABLE IF NOT EXISTS fb_decisions (
+        line_json VARCHAR)"""),
+    ("005_fb_decisions",
+     """CREATE TABLE IF NOT EXISTS fb_decisions (
         accession VARCHAR NOT NULL, book_id VARCHAR NOT NULL, decided_at TIMESTAMP NOT NULL,
         opened BOOLEAN NOT NULL, reason VARCHAR, units INTEGER, max_loss DOUBLE,
         risk_budget DOUBLE, spendable DOUBLE, fx DOUBLE, position_id VARCHAR,
-        PRIMARY KEY (accession, book_id))""",
-    """CREATE TABLE IF NOT EXISTS fb_positions (
+        PRIMARY KEY (accession, book_id))"""),
+    ("006_fb_positions",
+     """CREATE TABLE IF NOT EXISTS fb_positions (
         id VARCHAR PRIMARY KEY, book_id VARCHAR NOT NULL, accession VARCHAR NOT NULL,
         cik BIGINT NOT NULL, ticker VARCHAR NOT NULL, expiry DATE NOT NULL,
         close_on DATE NOT NULL, units INTEGER NOT NULL, multiplier INTEGER NOT NULL,
@@ -242,33 +259,43 @@ MIGRATIONS = [
         status VARCHAR NOT NULL, closed_at TIMESTAMP, close_usd DOUBLE,
         close_fees_usd DOUBLE, fx_close DOUBLE, close_reason VARCHAR,
         mark_value DOUBLE, mark_at TIMESTAMP, mark_note VARCHAR,
-        UNIQUE (book_id, accession))""",
-    """CREATE TABLE IF NOT EXISTS fb_legs (
+        UNIQUE (book_id, accession))"""),
+    ("007_fb_legs",
+     """CREATE TABLE IF NOT EXISTS fb_legs (
         position_id VARCHAR NOT NULL, leg INTEGER NOT NULL, contract VARCHAR NOT NULL,
         strike DOUBLE NOT NULL, qty INTEGER NOT NULL, open_price DOUBLE NOT NULL,
         bid DOUBLE, ask DOUBLE, last DOUBLE, volume DOUBLE, open_interest DOUBLE,
-        last_trade VARCHAR, close_price DOUBLE, PRIMARY KEY (position_id, leg))""",
-    """CREATE TABLE IF NOT EXISTS fb_marks (
+        last_trade VARCHAR, close_price DOUBLE, PRIMARY KEY (position_id, leg))"""),
+    ("008_fb_marks",
+     """CREATE TABLE IF NOT EXISTS fb_marks (
         book_id VARCHAR NOT NULL, day DATE NOT NULL, marked_at TIMESTAMP NOT NULL,
         equity DOUBLE NOT NULL, cash DOUBLE NOT NULL, reserved DOUBLE NOT NULL,
         open_value DOUBLE NOT NULL, uncertain INTEGER NOT NULL, fx DOUBLE,
-        PRIMARY KEY (book_id, day))""",
-    """CREATE TABLE IF NOT EXISTS fb_benchmark (day DATE PRIMARY KEY, spy DOUBLE,
-        eurusd DOUBLE)""",
-    """CREATE TABLE IF NOT EXISTS fb_runs (run_at TIMESTAMP PRIMARY KEY, summary_json VARCHAR)""",
+        PRIMARY KEY (book_id, day))"""),
+    ("009_fb_benchmark",
+     """CREATE TABLE IF NOT EXISTS fb_benchmark (day DATE PRIMARY KEY, spy DOUBLE,
+        eurusd DOUBLE)"""),
+    ("010_fb_runs",
+     """CREATE TABLE IF NOT EXISTS fb_runs (run_at TIMESTAMP PRIMARY KEY, summary_json VARCHAR)"""),
 ]
 
 
 def connect(path: Path, read_only: bool = False, tries: int = 30) -> duckdb.DuckDBPyConnection:
-    """Open the options paper store. The app and the tracker hold it for moments only;
-    a lock held by the other side is waited out rather than reported."""
+    """Open the options paper store. A lock held by the other side is waited out
+    rather than reported. The tracker writes only after all its fetches (`run`, audit
+    24.10.2026 F13), so a wait lasts the seconds of its database work, not the minutes
+    of EDGAR and Yahoo requests.
+
+    A reader of a store with pending migrations (an older file, or none yet) opens it
+    once for writing to apply them, so the app never reads a table without a column
+    the code expects."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    if read_only and not path.exists():
-        con = duckdb.connect(str(path))
-        _migrate(con)
-        con.close()
     for attempt in range(tries):
         try:
+            if read_only and (not path.exists() or _pending(path)):
+                con = duckdb.connect(str(path))
+                _migrate(con)
+                con.close()
             con = duckdb.connect(str(path), read_only=read_only)
             if not read_only:
                 _migrate(con)
@@ -280,9 +307,31 @@ def connect(path: Path, read_only: bool = False, tries: int = 30) -> duckdb.Duck
     raise RuntimeError("unreachable")
 
 
+def _applied(con) -> set[str]:
+    has = con.execute("SELECT 1 FROM information_schema.tables "
+                      "WHERE table_name = 'fb_migrations'").fetchone()
+    return {r[0] for r in con.execute("SELECT name FROM fb_migrations").fetchall()} \
+        if has else set()
+
+
+def _pending(path: Path) -> bool:
+    con = duckdb.connect(str(path), read_only=True)
+    try:
+        return bool({name for name, _sql in MIGRATIONS} - _applied(con))
+    finally:
+        con.close()
+
+
 def _migrate(con) -> None:
-    for sql in MIGRATIONS:
+    """Apply the migrations this store has not recorded yet, each once, in order."""
+    con.execute("CREATE TABLE IF NOT EXISTS fb_migrations (name VARCHAR PRIMARY KEY, "
+                "applied_at TIMESTAMP)")
+    done = _applied(con)
+    for name, sql in MIGRATIONS:
+        if name in done:
+            continue
         con.execute(sql)
+        con.execute("INSERT INTO fb_migrations VALUES (?, current_timestamp)", [name])
 
 
 def rules() -> dict:
@@ -340,12 +389,18 @@ def receive(usd: float, currency: str, fx: float | None) -> float:
 def pick_line(market, cik: int, day: dt.date) -> tuple[dict | None, str]:
     """The company's share class with the highest average traded value over the 20
     sessions BEFORE `day`, and whether it clears the universe rules. Prices of `day`
-    itself are not used: the decision is taken during that session."""
+    itself are not used: the decision is taken during that session.
+
+    Only lines still trading compete: a last bar at most 6 days before `day`, the same
+    limit the stale-price rule below applies. Without that, an ended line of the same
+    CIK (an old CRSP line in the world store) could win on its turnover from years ago,
+    and the event fell out as "Kursdaten veraltet" although the live line was fine
+    (audit 24.10.2026 F20). With no current line, the stale one is still reported."""
     tickers = [r[0] for r in market.execute(
         "SELECT DISTINCT ticker FROM securities WHERE cik = ?", [int(cik)]).fetchall()]
     if not tickers:
         return None, "keine Aktie zur CIK im Bestand"
-    best = None
+    best = best_stale = None
     for t in tickers:
         bars = market.execute(
             "SELECT date, COALESCE(close_raw, close) AS px, volume FROM prices "
@@ -357,8 +412,13 @@ def pick_line(market, cik: int, day: dt.date) -> tuple[dict | None, str]:
         line = {"ticker": t, "history": len(bars), "price": float(bars["px"].iloc[-1]),
                 "last_date": str(bars["date"].iloc[-1])[:10], "dollar_volume_20d": dv,
                 "classes": len(tickers)}
-        if best is None or dv > best["dollar_volume_20d"]:
+        current = (day - dt.date.fromisoformat(line["last_date"])).days <= 6
+        if current and (best is None or dv > best["dollar_volume_20d"]):
             best = line
+        if not current and (best_stale is None or line["last_date"] >
+                            best_stale["last_date"]):
+            best_stale = line
+    best = best or best_stale
     if best is None:
         return None, "keine Kurse vor dem Entscheidungstag"
     last = dt.date.fromisoformat(best["last_date"])
@@ -569,12 +629,18 @@ def size(structure: dict, st: dict, fx: float | None) -> dict:
 
 def liquidation_usd(legs: list[dict]) -> float | None:
     """What closing brings now: longs sold at the bid, shorts bought back at the ask.
-    None when a short leg has no ask (it cannot be bought back on this quote)."""
+    None when the quote is incomplete: a short leg without an ask (it cannot be bought
+    back) or a long leg without any bid. A quoted bid of 0 is a price (the call is
+    worth nothing to a buyer) and counts as 0; a MISSING bid is no price at all. It
+    used to count as 0 as well, which dropped the mark and cleared its note, so a gap
+    in Yahoo's chain looked like a loss (audit 24.10.2026 F18). The caller keeps the
+    last mark and flags it uncertain."""
     total = 0.0
     for leg in legs:
         if leg["qty"] > 0:
             px = _num(leg.get("bid"))
-            px = 0.0 if math.isnan(px) else px
+            if math.isnan(px) or px < 0:
+                return None
         else:
             px = _num(leg.get("ask"))
             if not px > 0:
@@ -631,7 +697,8 @@ def close_position(con, position: dict, quotes: dict, fx: float | None,
         priced.append(dict(leg, bid=q.get("bid"), ask=q.get("ask")))
     credit = liquidation_usd(priced)
     if credit is None:
-        return "Short-Call ohne Ask: Rückkauf auf dieser Quote nicht möglich"
+        return ("Quote unvollständig (Short-Call ohne Ask oder Long-Call ohne Bid): "
+                "Schließung auf dieser Quote nicht möglich")
     if b["currency"] == "EUR" and not fx:
         return "kein aktueller EUR/USD-Kurs"
     fees = FEE_PER_CONTRACT * sum(abs(leg["qty"]) for leg in legs)
@@ -680,6 +747,10 @@ def _finish(con, position, b, credit_usd, fees_usd, fx, now, reason) -> None:
 
 # -- live data (the only network code; tests pass a fake with the same methods) ----------
 
+class EdgarError(RuntimeError):
+    """EDGAR answered, but not with the index (403, 429, 5xx): the day stays open."""
+
+
 class Live:
     """EDGAR's index and Yahoo's quotes through the project's existing access paths."""
 
@@ -687,13 +758,20 @@ class Live:
         self.user_agent = user_agent
 
     def form_index(self, day: dt.date) -> str | None:
+        """The day's form.idx, or None when EDGAR has none (404: not published yet, or
+        no filings that day). Any other answer raises, so the day stays open and the
+        next run asks again. A 403 used to count as an empty day too, but SEC answers
+        403 to a rate limit or a rejected user agent, and that day's 10-K/10-Q were then
+        never looked at again (audit 24.10.2026 F15). The error names the status only:
+        requests' own message carries the URL (R24)."""
         import requests
 
         r = requests.get(form_index_url(day), headers={"User-Agent": self.user_agent},
                          timeout=30)
-        if r.status_code in (403, 404):
-            return None                  # not published yet, or no filings that day
-        r.raise_for_status()
+        if r.status_code == 404:
+            return None
+        if r.status_code != 200:
+            raise EdgarError(f"HTTP {r.status_code} für den Index vom {day}")
         return r.text
 
     def expiries(self, symbol: str) -> list[str]:
@@ -762,13 +840,25 @@ def _store_fx(market, day: dt.date) -> float | None:
     return None
 
 
-def _scan(con, live, today: dt.date, start: dt.date, now, log) -> int:
+def _scan(con, live, today: dt.date, start: dt.date, now, log,
+          notes: list[str] | None = None) -> int:
+    """Read every weekday's index since `start` that is not in fb_scan yet. Only a day
+    that EDGAR answered for is recorded. A day whose request failed stays open with a
+    note, and the days after it are still read: one day that keeps failing must not
+    hold back every later filing (audit 24.10.2026 F15)."""
     new = 0
     day = start
     while day <= today:
         if day.weekday() < 5 and not con.execute(
                 "SELECT 1 FROM fb_scan WHERE day = ?", [day]).fetchone():
-            text = live.form_index(day)
+            try:
+                text = live.form_index(day)
+            except Exception as exc:                               # noqa: BLE001
+                if notes is not None:
+                    notes.append(f"EDGAR {day} nicht gelesen ({ui.error_text(exc)}); "
+                                 "der Tag bleibt offen")
+                day += dt.timedelta(days=1)
+                continue
             if text is None:
                 if day >= today:
                     break                    # today's index appears after the day ends
@@ -852,9 +942,58 @@ def _candidate(market, live, ev: dict, today: dt.date, now_aware) -> dict:
     return out
 
 
+class _Recorded:
+    """Stands in for `Live`: the first call of each method and arguments goes to the
+    real source and is kept (its result or its exception); a repeat is answered from
+    what was kept. A DataFrame is handed out as a copy, so no pass can change what the
+    next one sees."""
+
+    def __init__(self, live):
+        self._live, self._kept = live, {}
+
+    def __getattr__(self, name):
+        method = getattr(self._live, name)
+
+        def call(*args):
+            key = (name, *args)
+            if key not in self._kept:
+                try:
+                    self._kept[key] = (True, method(*args))
+                except Exception as exc:                           # noqa: BLE001
+                    self._kept[key] = (False, exc)
+            ok, value = self._kept[key]
+            if not ok:
+                raise value
+            return value.copy() if isinstance(value, (pd.DataFrame, pd.Series)) else value
+        return call
+
+
 def run(path: Path, market, live, now: dt.datetime | None = None, log=print) -> dict:
-    """One pass: scan, decide, manage, mark. Safe to repeat: nothing is booked twice."""
-    now_aware = (now or dt.datetime.now(dt.UTC)).astimezone(dt.UTC)
+    """One pass: scan, decide, manage, mark. Safe to repeat: nothing is booked twice.
+
+    Fetch first, then write briefly (audit 24.10.2026 F13). The tracker used to hold
+    the store's write lock through every EDGAR and Yahoo request, so the app waited up
+    to its 30 tries and then showed the store as busy. Now the whole pass runs once on
+    a throwaway copy of the store, with every answer from `live` kept; then it runs
+    again on the real store, answered from what was kept, without network. Both passes
+    see the same store, the same `now` and the same answers, so they take the same
+    decisions; the write lock is held only for the database work of the second."""
+    now = (now or dt.datetime.now(dt.UTC)).astimezone(dt.UTC)
+    connect(path).close()                       # create or migrate, then let go
+    kept = _Recorded(live)
+    with tempfile.TemporaryDirectory() as tmp:
+        copy = Path(tmp) / path.name
+        shutil.copyfile(path, copy)
+        wal = path.with_name(path.name + ".wal")
+        if wal.exists():                        # not checkpointed yet: part of the store
+            shutil.copyfile(wal, copy.with_name(copy.name + ".wal"))
+        _run_once(copy, market, kept, now, lambda *_: None)
+    return _run_once(path, market, kept, now, log)
+
+
+def _run_once(path: Path, market, live, now: dt.datetime, log) -> dict:
+    """The pass itself, on whichever store and source `run` hands it."""
+    now_aware = now
     now = _naive(now_aware)
     today = now_aware.astimezone(ET).date()
     live_session = in_session(now_aware)
@@ -866,10 +1005,8 @@ def run(path: Path, market, live, now: dt.datetime | None = None, log=print) -> 
         ensure_books(con, now)
         start = min(r[0] for r in con.execute("SELECT opened_at FROM fb_books").fetchall())
         start_day = start.replace(tzinfo=dt.UTC).astimezone(ET).date()
-        try:
-            summary["new_events"] = _scan(con, live, today, start_day, now, log)
-        except Exception as exc:                                   # noqa: BLE001
-            summary["notes"].append(f"EDGAR nicht erreichbar: {type(exc).__name__}")
+        summary["new_events"] = _scan(con, live, today, start_day, now, log,
+                                      summary["notes"])
         try:
             fx = live.fx()
         except Exception:                                          # noqa: BLE001

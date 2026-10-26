@@ -424,3 +424,185 @@ def test_live_spot_reads_yfinance_fast_info_by_item(monkeypatch):
     monkeypatch.setattr(yfinance, "Ticker", Ticker)
     assert fb.Live("agent").spot("AAA") == 101.5
     assert fb.Live("agent").fx() == 101.5
+
+
+# -- audit 24.10.2026 ---------------------------------------------------------------------
+
+class _Response:
+    def __init__(self, status: int, text: str = ""):
+        self.status_code, self.text = status, text
+
+
+def test_edgar_only_404_means_no_index_any_other_answer_raises(monkeypatch):
+    """F15: SEC answers 403 to a rate limit or a rejected user agent. That is not a
+    day without filings; it must raise, without the URL in the message (R24)."""
+    import requests
+
+    answers = {}
+    monkeypatch.setattr(requests, "get", lambda url, **kw: answers["r"])
+    live = fb.Live("agent")
+    answers["r"] = _Response(404)
+    assert live.form_index(FILED) is None
+    answers["r"] = _Response(200, "index text")
+    assert live.form_index(FILED) == "index text"
+    for status in (403, 429, 503):
+        answers["r"] = _Response(status)
+        with pytest.raises(fb.EdgarError) as err:
+            live.form_index(FILED)
+        assert f"HTTP {status}" in str(err.value) and "sec.gov" not in str(err.value)
+
+
+def test_a_failed_edgar_day_stays_open_and_is_read_on_the_next_run(path, market):
+    """F15: the failing day gets a note and no fb_scan row; later days are still read;
+    the next run reads the day and finds its filing."""
+    live = FakeLive()
+    later = dt.date(2026, 10, 21)
+    live.index[later] = index_text([("10-K", "BBB INC", 222, later,
+                                     "0000000222-26-000002")])
+    real = live.form_index
+
+    def refusing(day):
+        if day == FILED:
+            raise fb.EdgarError(f"HTTP 403 für den Index vom {day}")
+        return real(day)
+
+    live.form_index = refusing
+    fb.run(path, market, live, now=at(FILED, 10), log=lambda *_: None)   # books open
+    s = fb.run(path, market, live, now=at(later, 18), log=lambda *_: None)
+    assert any("EDGAR 2026-10-20 nicht gelesen" in n and "HTTP 403" in n and
+               "bleibt offen" in n for n in s["notes"])
+    scanned = read(path, "SELECT day FROM fb_scan ORDER BY day")["day"]
+    assert FILED not in set(pd.to_datetime(scanned).dt.date)
+    assert list(read(path, "SELECT accession FROM fb_events")["accession"]) == [
+        "0000000222-26-000002"]                       # the day after was still read
+    live.form_index = real
+    fb.run(path, market, live, now=at(later, 19), log=lambda *_: None)
+    got = read(path, "SELECT accession FROM fb_events ORDER BY accession")["accession"]
+    assert list(got) == ["0000000111-26-000001", "0000000222-26-000002"]
+
+
+def test_a_missing_long_bid_keeps_the_last_mark_and_flags_it(path, market):
+    """F18: a long leg without a bid is no price. The last mark stays and is marked
+    uncertain; it is not revalued as if the call were worth 0."""
+    live = FakeLive()
+    open_books_and_enter(path, market, live)
+    first = read(path, "SELECT mark_value FROM fb_positions")["mark_value"].iloc[0]
+    assert first == pytest.approx((12.0 - 8.4) * 100 - 2.6)          # 357.40
+    live.quotes = {**OPEN_QUOTES, 90: (float("nan"), 11.2)}
+    live.calls_kwargs = {"last_trade": "2026-10-22T14:00:00Z"}
+    fb.run(path, market, live, now=at(dt.date(2026, 10, 22), 11), log=lambda *_: None)
+    p = read(path, "SELECT mark_value, mark_note FROM fb_positions")
+    assert p["mark_value"].iloc[0] == pytest.approx(first)
+    assert p["mark_note"].iloc[0] == "keine handelbare Quote, letzte Bewertung gilt"
+    con = fb.connect(path, read_only=True)
+    assert fb.state(con, "fb-usd-100000", 1.1)["uncertain"] == 1
+    con.close()
+
+
+def test_a_quoted_bid_of_zero_is_a_price_of_zero():
+    """F18: a real bid of 0 stays 0; a missing one gives no value."""
+    legs = [{"qty": 1, "bid": 0.0, "ask": 0.05}, {"qty": -2, "bid": 0.0, "ask": 0.05},
+            {"qty": 1, "bid": 0.0, "ask": 0.05}]
+    assert fb.liquidation_usd(legs) == pytest.approx(-2 * 0.05 * 100)
+    legs[0]["bid"] = None
+    assert fb.liquidation_usd(legs) is None
+    legs[0]["bid"] = float("nan")
+    assert fb.liquidation_usd(legs) is None
+
+
+def test_an_ended_line_with_more_old_turnover_does_not_win(market):
+    """F20: an ended line of the same CIK traded far more years ago; the line still
+    trading is chosen, not the ended one (which would read as stale prices)."""
+    market.execute("INSERT INTO securities VALUES (111, 'AAA-OLD')")
+    old_days = pd.bdate_range(end="2024-12-31", periods=300).date
+    market.executemany("INSERT INTO prices VALUES ('AAA-OLD',?,100,100,100,100,?)",
+                       [(d, 50_000_000) for d in old_days])
+    line, why = fb.pick_line(market, 111, ENTRY)
+    assert (line["ticker"], why) == ("AAA", "")
+    assert line["classes"] == 3
+    # with no current line at all, the newest stale line is reported as stale
+    market.execute("DELETE FROM prices WHERE ticker IN ('AAA', 'AAA-B')")
+    line, why = fb.pick_line(market, 111, ENTRY)
+    assert line["ticker"] == "AAA-OLD" and why.startswith("Kursdaten veraltet")
+
+
+def _old_store(path):
+    """A store as the tracker wrote it before named migrations: the ten tables, no
+    fb_migrations, one book already opened."""
+    con = duckdb.connect(str(path))
+    for _name, sql in fb.MIGRATIONS[:10]:
+        con.execute(sql)
+    con.execute("INSERT INTO fb_books VALUES ('fb-usd-100000', 'old', 'USD', 100000, "
+                "TIMESTAMP '2026-10-18 12:00:00', '{}')")
+    con.close()
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_an_old_store_opens_and_records_its_migrations(path, read_only):
+    """Low item 4: a store without fb_migrations opens (for the app read-only too),
+    keeps its rows and records every migration name once."""
+    _old_store(path)
+    con = fb.connect(path, read_only=read_only)
+    try:
+        names = [r[0] for r in con.execute("SELECT name FROM fb_migrations ORDER BY name")
+                 .fetchall()]
+        assert names == [name for name, _sql in fb.MIGRATIONS]
+        assert con.execute("SELECT name FROM fb_books").fetchall() == [("old",)]
+    finally:
+        con.close()
+
+
+def test_a_new_migration_runs_exactly_once_and_reaches_readers(path, monkeypatch):
+    """Low item 4: an appended ALTER TABLE reaches an existing store once; replaying
+    it on the next open would fail ("column already exists")."""
+    _old_store(path)
+    fb.connect(path).close()
+    monkeypatch.setattr(fb, "MIGRATIONS", fb.MIGRATIONS + [
+        ("999_test_column", "ALTER TABLE fb_runs ADD COLUMN extra INTEGER")])
+    con = fb.connect(path, read_only=True)            # the app opens first
+    cols = [r[0] for r in con.execute("DESCRIBE fb_runs").fetchall()]
+    con.close()
+    assert "extra" in cols
+    fb.connect(path).close()                          # the tracker: not applied again
+    fb.connect(path, read_only=True).close()
+
+
+def test_no_fetch_happens_while_the_real_store_is_open(path, market, monkeypatch):
+    """F13: every EDGAR and Yahoo request runs while the real store is closed, so the
+    app is not kept waiting on the write lock; the bookings are the same as before."""
+    open_cons = []
+    real_connect = fb.connect
+
+    class Tracked:
+        def __init__(self, con, p):
+            self._con, self._p = con, p
+
+        def __getattr__(self, name):
+            return getattr(self._con, name)
+
+        def close(self):
+            open_cons.remove(self._p)
+            self._con.close()
+
+    def connect(p, read_only=False, tries=30):
+        open_cons.append(p)
+        return Tracked(real_connect(p, read_only=read_only, tries=tries), p)
+
+    monkeypatch.setattr(fb, "connect", connect)
+    live = FakeLive()
+    fetched = []
+    for name in ("form_index", "expiries", "calls", "spot", "fx", "ex_dividend",
+                 "history", "close_on"):
+        method = getattr(live, name)
+
+        def guarded(*args, _m=method, _n=name):
+            assert path not in open_cons, f"{_n} fetched while the store was open"
+            fetched.append(_n)
+            return _m(*args)
+        setattr(live, name, guarded)
+    summary = open_books_and_enter(path, market, live)
+    assert summary["opened"] == 1 and "calls" in fetched and "form_index" in fetched
+    assert read(path, "SELECT COUNT(*) n FROM fb_positions")["n"].iloc[0] == 1
+    assert read(path, "SELECT COUNT(*) n FROM fb_ledger")["n"].iloc[0] == 2 + 2
+    assert not open_cons
+    assert fetched.count("fx") == 2              # two runs, each asks once, not twice
