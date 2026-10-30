@@ -37,8 +37,8 @@ from . import features as fx
 SEED = 62025
 # The research copy. Read only to make the first copy of INPUTS (and by the app for the
 # historical research curves, which are display only).
-RESEARCH = Path("/Users/moritzfriedrich/.codex/.chatgpt-projects/"
-                "g-p-6acf80a14d708191bee8657f87aa1ab2/portfolio-lab-research")
+RESEARCH = Path.home() / (".codex/.chatgpt-projects/"
+                          "g-p-6acf80a14d708191bee8657f87aa1ab2/portfolio-lab-research")
 INPUTS = {"b": "results/price_ml_inputs/frozen_model.json",
           "c": "results/rolling_windows/10y/annual_models.json",
           "alfred": "results/macro_factors/alfred/macro_realtime_periods.parquet"}

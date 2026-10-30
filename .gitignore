@@ -5,3 +5,12 @@ __pycache__/
 .venv/
 .pytest_cache/
 .DS_Store
+CLAUDE.local.md
+.claude/
+.env*
+!.env.example
+*.duckdb
+*.parquet
+.streamlit/secrets.toml
+.ruff_cache/
+.idea/

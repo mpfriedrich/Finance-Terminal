@@ -308,3 +308,17 @@ Roughly 1,000 of them (about 6 minutes). The ones worth knowing about:
 This applies criteria you supply to public filings and market data. The numbers rest on
 free data sources with known defects, several of which are documented in `PLAN.md` and
 in the commit history. The decisions are yours.
+
+## How this was built
+
+I am a business student, not a software engineer. I set the requirements, the rules the
+backtests must follow and the checks they must pass, reviewed every result against real
+data, and built the code together with AI coding assistants (Claude Code and Codex).
+`CLAUDE.md`, `AGENTS.md` and `PLAN.md` are the working notes those sessions use; `PLAN.md`
+(in German) records every requirement, review and measurement.
+
+## Licence
+
+The code is MIT-licensed (see [LICENSE](LICENSE)). No market data is included: `data/` is
+created locally from public sources (SEC, FRED, Yahoo) and, where configured, from
+licensed sources such as WRDS, whose terms do not allow redistribution.

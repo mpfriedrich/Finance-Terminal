@@ -14,14 +14,11 @@ advice (R23, enforced by `tests/test_wording.py`).
 
 ## 2. The user
 
-- **Moritz**, a Master's student at FU Berlin who is also getting a University of Sydney
-  account. He is not a programmer and uses the macOS terminal step by step.
-- **Speak German with him.** Give one command per step, say what output to expect,
-  and ask him to paste the output back. He has confused Cmd+C with Ctrl+C before, and
-  once typed commands into a terminal that was still running the app.
+- The owner is the only user. How to talk to him (language, step-by-step terminal
+  instructions) is in `CLAUDE.local.md`, which is gitignored; read it if it exists.
 - He decides and merges pull requests himself. Don't open a PR unless he asks.
-- Never ask him to paste passwords or API keys into the chat. Secrets belong in
-  `.env.local` only; tell him to edit it with `open -e .env.local`.
+- Never ask for passwords or API keys in the chat. Secrets belong in `.env.local` only;
+  tell him to edit it with `open -e .env.local`.
 
 ## 3. Where things run
 
